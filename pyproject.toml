@@ -1,0 +1,53 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ram"
+dynamic = ["version"]
+description = "Reasoning Autoregressive Modeling - coarse-to-fine reasoning process for LLMs"
+readme = "description.txt"
+license = {text = "Apache-2.0"}
+requires-python = ">=3.11"
+keywords = ["reasoning", "autoregressive", "llm", "coarse-to-fine"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: OS Independent",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3.11",
+    "Topic :: Software Development :: Libraries",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "pandas",
+    "torch",
+    "transformers",
+    "selenium",
+    "python-dotenv",
+    "pyarrow",
+    "networkx",
+    "pydot",
+    "datasets",
+    "matplotlib",
+    "graphviz",
+    "tenacity",
+    "txtai",
+    "h5py",
+    "wandb",
+    "einops",
+    "litellm",
+]
+
+[project.optional-dependencies]
+tests = ["pytest"]
+
+[project.urls]
+Homepage = "https://github.com/AgenticFin/Reasoning-Autoregressive-Modeling"
+
+[tool.setuptools.dynamic]
+version = {attr = "ram.__version__"}
+
+[tool.setuptools.packages.find]
+exclude = ["tests", "third-part"]

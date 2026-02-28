@@ -2,7 +2,7 @@
 This is a test to check if the setup.py file is correctly configured
 """
 
-import cdemo
+import ram
 
 
 if __name__ == "__main__":
