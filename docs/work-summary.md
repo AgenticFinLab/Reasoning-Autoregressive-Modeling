@@ -470,11 +470,11 @@ System-1.5 bridges **fast intuitive reasoning (System-1)** and **slow deliberate
 2. **Stage 2:** Distill full-path System-2 reasoning into adaptive shortcut paths
 
 ##### Experimental Results
-| Metric | Performance |
-|--------|-------------|
-| GSM8K Accuracy | Comparable to traditional CoT |
-| Inference Speed | 20x faster |
-| Token Reduction | 92.31% |
+| Metric          | Performance                   |
+|-----------------|-------------------------------|
+| GSM8K Accuracy  | Comparable to traditional CoT |
+| Inference Speed | 20x faster                    |
+| Token Reduction | 92.31%                        |
 
 ---
 
@@ -549,35 +549,35 @@ FR-Ponder implements **instance-adaptive reasoning** through latent steering, us
 
 ### Decoder-Based Models (Layer-wise Vertical) Comparison
 
-| Method | Mechanism | Training | Test-Time Scaling | Key Innovation |
-|--------|-----------|----------|-------------------|----------------|
-| CoTFormer | Token-level iterations | Pretraining | Yes (depth) | Budget-adaptive compute |
-| Huginn | Recurrent block | Pretraining | Yes (depth) | Depth recurrence without extra tokens |
-| LTO | Latent reward model | Post-training | Yes | Reward signals in latent thoughts |
-| ITT | Adaptive token routing | Pretraining | Yes | 96.5% of 3x model performance |
-| Pondering LM | Pondering step | Pretraining | No | Weighted embedding processing |
-| Zhu et al. | Continuous superposition | N/A (theoretical) | N/A | Polynomial speedup proof |
-| MoR | Mixture of recursions | Pretraining | Yes | Token-level adaptive depth |
+| Method       | Mechanism                | Training          | Test-Time Scaling | Key Innovation                        |
+|--------------|--------------------------|-------------------|-------------------|---------------------------------------|
+| CoTFormer    | Token-level iterations   | Pretraining       | Yes (depth)       | Budget-adaptive compute               |
+| Huginn       | Recurrent block          | Pretraining       | Yes (depth)       | Depth recurrence without extra tokens |
+| LTO          | Latent reward model      | Post-training     | Yes               | Reward signals in latent thoughts     |
+| ITT          | Adaptive token routing   | Pretraining       | Yes               | 96.5% of 3x model performance         |
+| Pondering LM | Pondering step           | Pretraining       | No                | Weighted embedding processing         |
+| Zhu et al.   | Continuous superposition | N/A (theoretical) | N/A               | Polynomial speedup proof              |
+| MoR          | Mixture of recursions    | Pretraining       | Yes               | Token-level adaptive depth            |
 
 ### Inference Exploration (Token-wise Horizontal) Comparison
 
 #### Parallel Scaling Methods
-| Method | Approach | Training | Key Feature |
-|--------|----------|----------|-------------|
-| SoftCoT++ | Multiple initial tokens | Fine-tuning | Contrastive diversity |
-| PCCoT | Jacobi iteration | Fine-tuning | 50% time reduction |
-| Butt et al. | RL with soft tokens | RL | Continuous exploration |
-| KaVa | KV-cache distillation | Distillation | Compressed reasoning |
-| LTA-Thinker | Multi-objective training | Fine-tuning | Overthinking reduction |
-| Pythia Arch | Latent thoughts pretraining | Pretraining | 1.4B > 2.8B performance |
+| Method      | Approach                    | Training     | Key Feature             |
+|-------------|-----------------------------|--------------|-------------------------|
+| SoftCoT++   | Multiple initial tokens     | Fine-tuning  | Contrastive diversity   |
+| PCCoT       | Jacobi iteration            | Fine-tuning  | 50% time reduction      |
+| Butt et al. | RL with soft tokens         | RL           | Continuous exploration  |
+| KaVa        | KV-cache distillation       | Distillation | Compressed reasoning    |
+| LTA-Thinker | Multi-objective training    | Fine-tuning  | Overthinking reduction  |
+| Pythia Arch | Latent thoughts pretraining | Pretraining  | 1.4B > 2.8B performance |
 
 #### Sequential Scaling Methods
-| Method | Approach | Training | Key Feature |
-|--------|----------|----------|-------------|
-| LatentSeek | Policy gradient | None | Test-time adaptation |
-| System-1.5 | Dynamic shortcuts | Distillation | 20x speedup, 92% token reduction |
-| LatentEvolve | Dual cognitive systems | None | Self-evolving, 13% improvement |
-| FR-Ponder | Latent steering | RL | Adaptive reasoning depth |
+| Method       | Approach               | Training     | Key Feature                      |
+|--------------|------------------------|--------------|----------------------------------|
+| LatentSeek   | Policy gradient        | None         | Test-time adaptation             |
+| System-1.5   | Dynamic shortcuts      | Distillation | 20x speedup, 92% token reduction |
+| LatentEvolve | Dual cognitive systems | None         | Self-evolving, 13% improvement   |
+| FR-Ponder    | Latent steering        | RL           | Adaptive reasoning depth         |
 
 ### Key Insights for RAM Project
 
@@ -704,9 +704,9 @@ Original LLM → [Backbone] → [LM Head] → Next Token
    - Model generates own training signal
 
 #### Experimental Results
-| Mode | Speedup | Quality |
-|------|---------|----------|
-| Medusa-1 | 2.2x+ | Lossless |
+| Mode     | Speedup  | Quality       |
+|----------|----------|---------------|
+| Medusa-1 | 2.2x+    | Lossless      |
 | Medusa-2 | 2.3-3.6x | Near-lossless |
 
 #### Implications for RAM Project
@@ -751,11 +751,11 @@ EAGLE-3: Direct token prediction + multi-layer fusion
    - Better performance with increased compute
 
 #### Experimental Results
-| Model Type | Speedup | vs EAGLE-2 |
-|------------|---------|------------|
-| Chat | Up to 6.5x | ~1.4x faster |
-| Reasoning | Significant | ~1.4x faster |
-| SGLang (batch=64) | 1.38x throughput | - |
+| Model Type        | Speedup          | vs EAGLE-2   |
+|-------------------|------------------|--------------|
+| Chat              | Up to 6.5x       | ~1.4x faster |
+| Reasoning         | Significant      | ~1.4x faster |
+| SGLang (batch=64) | 1.38x throughput | -            |
 
 #### Implications for RAM Project
 - **Scalability:** Benefits from increased training data/compute
@@ -845,11 +845,11 @@ Jacobi Forcing is a **progressive distillation paradigm** that trains AR models 
    - No architectural changes to base model
 
 #### Experimental Results
-| Metric | Improvement |
-|--------|-------------|
-| Wall-clock speedup | 3.8x (coding/math) |
-| Tokens per iteration | 4.5x higher |
-| With rejection recycling | ~4.0x speedup |
+| Metric                   | Improvement        |
+|--------------------------|--------------------|
+| Wall-clock speedup       | 3.8x (coding/math) |
+| Tokens per iteration     | 4.5x higher        |
+| With rejection recycling | ~4.0x speedup      |
 
 #### Implications for RAM Project
 - **Smooth transition:** Converts existing AR models to parallel decoders
@@ -890,10 +890,10 @@ Online speculative decoding **continuously updates the draft model** on observed
    - No full retraining required
 
 #### Experimental Results
-| Metric | Improvement |
-|--------|-------------|
-| Token acceptance rate | +0.1 to +0.65 |
-| Latency reduction | 1.42x to 2.17x |
+| Metric                | Improvement    |
+|-----------------------|----------------|
+| Token acceptance rate | +0.1 to +0.65  |
+| Latency reduction     | 1.42x to 2.17x |
 
 #### Implications for RAM Project
 - **Adaptive reasoning:** Draft models can adapt to specific reasoning patterns
@@ -933,11 +933,11 @@ Parallel-Probe introduces **2D probing** to expose width-depth dynamics of paral
    - Focuses resources on promising paths
 
 #### Experimental Results
-| Metric | Reduction |
-|--------|----------|
-| Sequential tokens | Up to 35.8% |
-| Total token cost | Over 25.8% |
-| Accuracy | Competitive with majority voting |
+| Metric            | Reduction                        |
+|-------------------|----------------------------------|
+| Sequential tokens | Up to 35.8%                      |
+| Total token cost  | Over 25.8%                       |
+| Accuracy          | Competitive with majority voting |
 
 #### Implications for RAM Project
 - **Width-depth trade-off:** Understanding optimal parallel reasoning allocation
@@ -948,15 +948,15 @@ Parallel-Probe introduces **2D probing** to expose width-depth dynamics of paral
 
 ## Efficiency Methods Comparison
 
-| Method | Approach | Draft Model | Speedup | Key Feature |
-|--------|----------|-------------|---------|-------------|
-| Speculative Decoding | Draft-verify | Required | 2-3x | Exact outputs |
-| Medusa | Multi-head | No (heads) | 2.2-3.6x | Tree attention |
-| EAGLE-3 | Feature fusion | Required | Up to 6.5x | Data scaling |
-| Lookahead | Jacobi iteration | No | 1.8-4x | Self-contained |
-| Jacobi Forcing | Trajectory training | No | 3.8-4x | AR compatible |
-| Online Spec. Dec. | Adaptive draft | Required | 1.4-2.2x | Online learning |
-| Parallel-Probe | 2D probing | No | 25-35% savings | Early stopping |
+| Method               | Approach            | Draft Model | Speedup        | Key Feature     |
+|----------------------|---------------------|-------------|----------------|-----------------|
+| Speculative Decoding | Draft-verify        | Required    | 2-3x           | Exact outputs   |
+| Medusa               | Multi-head          | No (heads)  | 2.2-3.6x       | Tree attention  |
+| EAGLE-3              | Feature fusion      | Required    | Up to 6.5x     | Data scaling    |
+| Lookahead            | Jacobi iteration    | No          | 1.8-4x         | Self-contained  |
+| Jacobi Forcing       | Trajectory training | No          | 3.8-4x         | AR compatible   |
+| Online Spec. Dec.    | Adaptive draft      | Required    | 1.4-2.2x       | Online learning |
+| Parallel-Probe       | 2D probing          | No          | 25-35% savings | Early stopping  |
 
 ---
 
