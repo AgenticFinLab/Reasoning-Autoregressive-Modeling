@@ -1,0 +1,59 @@
+# =============================================================================
+# Encoder Unit Test Configuration
+# =============================================================================
+# Used by: examples/uTEST/test_encoder.py
+# Only encoder and data sections are used; others are null.
+
+# =============================================================================
+# Data Configuration
+# =============================================================================
+data:
+  data_name: gsm8k
+  data_path: ./data
+  split: train
+
+# =============================================================================
+# Environment Configuration
+# =============================================================================
+environment:
+  seed: 42
+  device: auto
+  num_workers: 4
+
+# =============================================================================
+# Model Architecture
+# =============================================================================
+model:
+  # --- HuggingFace Encoder ---
+  encoder:
+    model_name: bert-base-uncased
+    pretrained: true
+    freeze: false
+    output_dim: null
+    max_length: 128
+
+  # --- HuggingFace Decoder ---
+  decoder: null
+
+  # --- Multi-Scale Quantizer ---
+  quantizer: null
+
+  # --- Latent dimension ---
+  latent_dim: null
+
+# =============================================================================
+# Training Configuration
+# =============================================================================
+train:
+  batch_size: 2
+  learning_rate: null
+  weight_decay: null
+  num_epochs: null
+  warmup_steps: null
+  gradient_clip: null
+  max_seq_len: 128
+
+# =============================================================================
+# Logging Configuration
+# =============================================================================
+logging: null

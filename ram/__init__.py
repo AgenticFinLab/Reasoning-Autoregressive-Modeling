@@ -1,38 +1,50 @@
-"""Text-VAR: Multi-Scale Autoregressive Modeling for Text
+"""TAR: Text Auto-Regressive Modeling
 
 A framework for Chain-of-Thought reasoning inspired by VAR (Visual Autoregressive Modeling).
-Structure mirrors third-part/VAR-main/models/.
 
 Key Components:
-- Encoder: 1D Conv encoder (mirrors basic_vae.py)
-- Decoder: 1D Conv decoder with vocab projection (mirrors basic_vae.py)
-- VectorQuantizer2: Multi-scale residual quantization (mirrors quant.py)
-- VQVAE: Complete autoencoder (mirrors vqvae.py)
+- TextEncoder: HuggingFace encoder with tokenizer
+- TextDecoder: HuggingFace decoder for generation
+- MultiScaleQuantizer: Multi-scale residual quantization (VAR innovation)
+- TextVQVAE: Complete autoencoder
 
 Data Loading:
     Use lmbase for data loading:
-    >>> from lmbase.dataset.registry import get
-    >>> config = {"data_name": "math", "data_path": "./data/math"}
-    >>> dataset = get(config, split="train")
-    
+    >>> from lmbase.dataset import registry
+    >>> dataset = registry.get("gsm8k", split="train")
+
 Usage:
-    from ram.models import VQVAE
+    from ram.models import TextEncoder, build_encoder
     from ram.utils import load_config
-    
-    config = load_config('configs/text_var/default.yml')
-    model = VQVAE(**config['model'])
+
+    config = load_config('configs/uTEST/encoder.yml')
+    encoder = build_encoder(config['model']['encoder'])
 """
 
-from .models import Encoder, Decoder, VectorQuantizer2, VQVAE
-from .utils import load_config, set_seed, count_parameters
+from .models import (
+    TextEncoder,
+    TextDecoder,
+    MultiScaleQuantizer,
+    TextVQVAE,
+    build_encoder,
+    build_decoder,
+    build_quantizer,
+    build_text_vqvae,
+)
+from .utils import load_config, set_seed, count_parameters, get_device
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 __all__ = [
-    "Encoder",
-    "Decoder",
-    "VectorQuantizer2",
-    "VQVAE",
+    "TextEncoder",
+    "TextDecoder",
+    "MultiScaleQuantizer",
+    "TextVQVAE",
+    "build_encoder",
+    "build_decoder",
+    "build_quantizer",
+    "build_text_vqvae",
     "load_config",
     "set_seed",
     "count_parameters",
+    "get_device",
 ]

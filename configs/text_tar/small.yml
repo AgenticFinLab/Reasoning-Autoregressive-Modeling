@@ -56,12 +56,12 @@ train:
 # Logging Configuration
 # ============================================================
 logging:
-  output_dir: ./outputs/text_var_small
-  checkpoint_dir: ./checkpoints/text_var_small
-  log_dir: ./logs/text_var_small
+  output_dir: ./outputs/text_tar_small
+  checkpoint_dir: ./checkpoints/text_tar_small
+  log_dir: ./logs/text_tar_small
   log_interval: 10
   save_interval: 100
   eval_interval: 50
   log_level: DEBUG
   use_wandb: false
-  wandb_project: text-var-dev
+  wandb_project: text-tar-dev

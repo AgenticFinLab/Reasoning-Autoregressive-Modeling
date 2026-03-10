@@ -1,9 +1,13 @@
+"""TAR Utilities
+
+General utility functions for the TAR framework.
 """
-Text-VAR Utilities
 
-Helper functions and utilities for Text-VAR framework.
-"""
+from .helpers import load_config, set_seed, count_parameters, get_device
 
-from .helpers import load_config, set_seed, count_parameters
-
-__all__ = ["load_config", "set_seed", "count_parameters"]
+__all__ = [
+    "load_config",
+    "set_seed",
+    "count_parameters",
+    "get_device",
+]

@@ -1,24 +1,38 @@
+"""TAR (Text Auto-Regressive) Models.
+
+Modular structure:
+- encoder.py: TextEncoder (HuggingFace)
+- decoder.py: TextDecoder (HuggingFace)
+- quantizer.py: MultiScaleQuantizer (custom, VAR innovation)
+- scale_ops.py: ScaleOps (downsample/upsample operations)
+- text_vqvae.py: TextVQVAE (combines all)
+
+Architecture:
+    [B, L] -> Encoder -> [B, L, D] -> Quantizer -> [B, L, C] -> Decoder -> [B, L, vocab]
 """
-Text-VAR Models
 
-Mirrors the structure of third-part/VAR-main/models/:
-- basic_vae.py: Encoder, Decoder (1D Conv versions)
-- quant.py: VectorQuantizer2 (multi-scale residual quantization)
-- vqvae.py: VQVAE (complete autoencoder)
-
-File mapping:
-    VAR-main/models/basic_vae.py  →  ram/models/basic_vae.py
-    VAR-main/models/quant.py      →  ram/models/quant.py
-    VAR-main/models/vqvae.py      →  ram/models/vqvae.py
-"""
-
-from .basic_vae import Encoder, Decoder
-from .quant import VectorQuantizer2
-from .vqvae import VQVAE
+from .encoder import TextEncoder, build_encoder
+from .decoder import TextDecoder, build_decoder
+from .scale_ops import ScaleOps, AvgPoolScaleOps, LinearScaleOps, build_scale_ops
+from .quantizer import MultiScaleQuantizer, build_quantizer
+from .text_vqvae import TextVQVAE, build_text_vqvae
 
 __all__ = [
-    'Encoder',
-    'Decoder', 
-    'VectorQuantizer2',
-    'VQVAE',
+    # encoder.py
+    "TextEncoder",
+    "build_encoder",
+    # decoder.py
+    "TextDecoder",
+    "build_decoder",
+    # scale_ops.py
+    "ScaleOps",
+    "AvgPoolScaleOps",
+    "LinearScaleOps",
+    "build_scale_ops",
+    # quantizer.py
+    "MultiScaleQuantizer",
+    "build_quantizer",
+    # text_vqvae.py
+    "TextVQVAE",
+    "build_text_vqvae",
 ]

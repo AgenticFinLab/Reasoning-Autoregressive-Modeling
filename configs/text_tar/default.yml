@@ -1,0 +1,76 @@
+# Text-TAR Default Configuration
+# Multi-Scale VQVAE for Chain-of-Thought Reasoning
+# Uses HuggingFace models for encoder/decoder
+
+# ============================================================
+# Data Configuration (using lmbase)
+# ============================================================
+data:
+  data_name: math              # Dataset: math, gsm8k, math500, etc.
+  data_path: ./data/math       # Cache path
+  split: train
+
+# ============================================================
+# Environment Configuration
+# ============================================================
+environment:
+  seed: 42
+  device: auto                 # auto, cpu, cuda, mps
+  num_workers: 4
+
+# ============================================================
+# Model Architecture (ALL FIELDS REQUIRED)
+# ============================================================
+model:
+  # --- HuggingFace Encoder ---
+  encoder:
+    model_name: bert-base-uncased    # HuggingFace model name
+    pretrained: true                  # Use pretrained weights
+    freeze: false                     # Freeze encoder weights
+    # output_dim: null               # Optional: project to different dim
+  
+  # --- HuggingFace Decoder ---
+  decoder:
+    model_name: gpt2                  # HuggingFace model name
+    pretrained: true                  # Use pretrained weights
+    freeze: false                     # Freeze decoder weights
+  
+  # --- Multi-Scale Quantizer (VAR innovation) ---
+  quantizer:
+    codebook_size: 4096              # Codebook vocabulary size V
+    scale_lengths: [1, 2, 4, 8, 16, 32]  # Sequence length at each scale
+    beta: 0.25                       # Commitment loss weight
+    quant_resi: 0.5                  # φ residual ratio
+    share_quant_resi: 4              # Partially shared φ layers
+    # scale_ops:                     # Optional: custom scale operations
+    #   type: avgpool                # avgpool | linear | learned
+    #   align_corners: false
+  
+  # --- Latent dimension ---
+  latent_dim: 256                    # Latent space dimension (Cvae)
+
+# ============================================================
+# Training Configuration
+# ============================================================
+train:
+  batch_size: 8
+  learning_rate: 1.0e-4
+  weight_decay: 0.01
+  num_epochs: 10
+  warmup_steps: 500
+  gradient_clip: 1.0
+  max_seq_len: 256             # Input sequence length (L)
+
+# ============================================================
+# Logging Configuration
+# ============================================================
+logging:
+  output_dir: ./outputs/text_tar
+  checkpoint_dir: ./checkpoints/text_tar
+  log_dir: ./logs/text_tar
+  log_interval: 100
+  save_interval: 1000
+  eval_interval: 500
+  log_level: INFO
+  use_wandb: false
+  wandb_project: text-tar

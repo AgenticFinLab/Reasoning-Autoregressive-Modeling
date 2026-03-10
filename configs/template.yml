@@ -1,0 +1,76 @@
+# =============================================================================
+# TAR Configuration Template
+# =============================================================================
+# All config files MUST follow this structure for consistency.
+# Set unused sections to null.
+
+# =============================================================================
+# Data Configuration
+# =============================================================================
+data:
+  data_name: null              # Dataset name: math, gsm8k, math500, etc.
+  data_path: null              # Cache path
+  split: null                  # train, test, validation
+
+# =============================================================================
+# Environment Configuration
+# =============================================================================
+environment:
+  seed: 42
+  device: auto                 # auto, cpu, cuda, mps
+  num_workers: 4
+
+# =============================================================================
+# Model Architecture
+# =============================================================================
+model:
+  # --- HuggingFace Encoder ---
+  encoder:
+    model_name: null           # HuggingFace model name (e.g., bert-base-uncased)
+    pretrained: null           # Use pretrained weights
+    freeze: null               # Freeze encoder weights
+    output_dim: null           # Optional: project to different dim
+
+  # --- HuggingFace Decoder ---
+  decoder:
+    model_name: null           # HuggingFace model name (e.g., gpt2)
+    pretrained: null           # Use pretrained weights
+    freeze: null               # Freeze decoder weights
+
+  # --- Multi-Scale Quantizer ---
+  quantizer:
+    codebook_size: null        # Codebook vocabulary size V
+    scale_lengths: null        # Sequence length at each scale [1,2,4,8,16,32]
+    beta: null                 # Commitment loss weight
+    quant_resi: null           # φ residual ratio
+    share_quant_resi: null     # Partially shared φ layers
+    scale_ops: null            # Optional: {type, align_corners, dim, max_scales}
+
+  # --- Latent dimension ---
+  latent_dim: null             # Latent space dimension
+
+# =============================================================================
+# Training Configuration
+# =============================================================================
+train:
+  batch_size: null
+  learning_rate: null
+  weight_decay: null
+  num_epochs: null
+  warmup_steps: null
+  gradient_clip: null
+  max_seq_len: null            # Input sequence length (L)
+
+# =============================================================================
+# Logging Configuration
+# =============================================================================
+logging:
+  output_dir: null
+  checkpoint_dir: null
+  log_dir: null
+  log_interval: null
+  save_interval: null
+  eval_interval: null
+  log_level: INFO
+  use_wandb: false
+  wandb_project: null

@@ -1,0 +1,213 @@
+"""Multi-Scale Vector Quantizer (VAR's Core Innovation).
+
+Implements multi-scale residual quantization with f_hat accumulation.
+This is the only custom component - encoder/decoder use HuggingFace.
+
+Key Formula:
+    f_hat = Σ_k upsample(φ_k(codebook_lookup(downsample(z, scale_k))))
+
+Scales: [1, 2, 4, 8, 16, 32] -> coarse to fine
+"""
+
+from typing import Optional, Dict, Any, Tuple, List
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+from .scale_ops import ScaleOps, AvgPoolScaleOps, build_scale_ops
+
+__all__ = ["MultiScaleQuantizer", "build_quantizer"]
+
+
+class MultiScaleQuantizer(nn.Module):
+    """Multi-Scale Vector Quantizer.
+
+    Args:
+        codebook_size: Number of codebook entries V
+        codebook_dim: Dimension of codebook vectors C
+        scale_lengths: List of sequence lengths [1, 2, 4, ..., L_max]
+        beta: Commitment loss weight
+        quant_resi: Residual ratio for phi layers
+        share_quant_resi: Number of scales sharing phi layer
+        scale_ops: ScaleOps instance for down/upsampling (default: AvgPoolScaleOps)
+
+    Input:  [B, L, C] latent features
+    Output: [B, L, C] f_hat, loss, indices_per_scale
+    """
+
+    def __init__(
+        self,
+        codebook_size: int = 4096,
+        codebook_dim: int = 256,
+        scale_lengths: List[int] = [1, 2, 4, 8, 16, 32],
+        beta: float = 0.25,
+        quant_resi: float = 0.5,
+        share_quant_resi: int = 4,
+        scale_ops: Optional[ScaleOps] = None,
+    ):
+        super().__init__()
+
+        self.codebook_size = codebook_size
+        self.codebook_dim = codebook_dim
+        self.scale_lengths = scale_lengths
+        self.num_scales = len(scale_lengths)
+        self.max_length = max(scale_lengths)
+        self.beta = beta
+        self.quant_resi = quant_resi
+
+        # Scale operations (pluggable)
+        self.scale_ops = scale_ops if scale_ops is not None else AvgPoolScaleOps()
+
+        # Shared codebook: [V, C]
+        self.codebook = nn.Embedding(codebook_size, codebook_dim)
+        nn.init.uniform_(
+            self.codebook.weight, -1.0 / codebook_size, 1.0 / codebook_size
+        )
+
+        # Phi layers (residual mixing)
+        if share_quant_resi > 0 and self.num_scales > share_quant_resi:
+            self.num_shared = share_quant_resi
+            self.phi_shared = nn.Linear(codebook_dim, codebook_dim)
+            self.phi_independent = nn.ModuleList(
+                [
+                    nn.Linear(codebook_dim, codebook_dim)
+                    for _ in range(self.num_scales - share_quant_resi)
+                ]
+            )
+        else:
+            self.num_shared = 0
+            self.phi_shared = None
+            self.phi_independent = nn.ModuleList(
+                [nn.Linear(codebook_dim, codebook_dim) for _ in range(self.num_scales)]
+            )
+
+    def get_phi(self, scale_idx: int) -> nn.Linear:
+        """Get phi layer for given scale index."""
+        if self.phi_shared is not None and scale_idx < self.num_shared:
+            return self.phi_shared
+        idx = scale_idx if self.phi_shared is None else scale_idx - self.num_shared
+        return self.phi_independent[idx]
+
+    def quantize(
+        self,
+        z: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor, List[torch.Tensor]]:
+        """
+        Quantize at multiple scales with accumulation.
+
+        Args:
+            z: [B, L, C] input features
+
+        Returns:
+            f_hat: [B, L, C] accumulated quantized features
+            loss: Scalar (commitment + codebook loss)
+            indices_per_scale: List of [B, l_k] indices
+        """
+        B, L, C = z.shape
+        device = z.device
+
+        f_hat = torch.zeros(B, self.max_length, C, device=device, dtype=z.dtype)
+        total_loss = 0.0
+        indices_per_scale = []
+
+        for k, scale_len in enumerate(self.scale_lengths):
+            # 1. Downsample: [B, L, C] -> [B, l_k, C]
+            z_down = self.scale_ops.downsample(z, scale_len)
+
+            # 2. Compute residual
+            if k > 0:
+                f_hat_down = self.scale_ops.downsample(f_hat, scale_len)
+                residual = z_down - f_hat_down
+            else:
+                residual = z_down
+
+            # 3. Find nearest codebook entries
+            flat_residual = residual.reshape(-1, C)
+            distances = (
+                flat_residual.pow(2).sum(dim=1, keepdim=True)
+                + self.codebook.weight.pow(2).sum(dim=1)
+                - 2 * flat_residual @ self.codebook.weight.T
+            )
+            indices = distances.argmin(dim=1)
+            indices_per_scale.append(indices.view(B, scale_len))
+
+            # 4. Lookup and apply phi
+            quantized = self.codebook(indices).view(B, scale_len, C)
+            phi = self.get_phi(k)
+            h_k = phi(quantized) * self.quant_resi + quantized * (1 - self.quant_resi)
+
+            # 5. Upsample and accumulate: [B, l_k, C] -> [B, max_len, C]
+            h_k_up = self.scale_ops.upsample(h_k, self.max_length)
+            f_hat = f_hat + h_k_up
+
+            # 6. Loss
+            commitment_loss = F.mse_loss(residual, quantized.detach())
+            codebook_loss = F.mse_loss(residual.detach(), quantized)
+            total_loss = total_loss + commitment_loss * self.beta + codebook_loss
+
+        # Adjust to input length
+        if L != self.max_length:
+            f_hat = self.scale_ops.upsample(f_hat, L)
+
+        return f_hat, total_loss, indices_per_scale
+
+    def decode_indices(
+        self,
+        indices_per_scale: List[torch.Tensor],
+        target_length: int,
+    ) -> torch.Tensor:
+        """
+        Decode indices back to features.
+
+        Args:
+            indices_per_scale: List of [B, l_k] indices
+            target_length: Target sequence length
+
+        Returns:
+            f_hat: [B, target_length, C]
+        """
+        B = indices_per_scale[0].shape[0]
+        device = indices_per_scale[0].device
+
+        f_hat = torch.zeros(B, self.max_length, self.codebook_dim, device=device)
+
+        for k, indices in enumerate(indices_per_scale):
+            quantized = self.codebook(indices)
+            phi = self.get_phi(k)
+            h_k = phi(quantized) * self.quant_resi + quantized * (1 - self.quant_resi)
+
+            h_k_up = self.scale_ops.upsample(h_k, self.max_length)
+            f_hat = f_hat + h_k_up
+
+        if target_length != self.max_length:
+            f_hat = self.scale_ops.upsample(f_hat, target_length)
+
+        return f_hat
+
+
+def build_quantizer(config: Dict[str, Any]) -> MultiScaleQuantizer:
+    """Build quantizer from config.
+
+    Config keys (all required except scale_ops):
+        - codebook_size: int
+        - codebook_dim: int
+        - scale_lengths: list[int]
+        - beta: float
+        - quant_resi: float
+        - share_quant_resi: int
+        - scale_ops: dict (optional)
+    """
+    # Build scale_ops if specified
+    scale_ops = None
+    if "scale_ops" in config:
+        scale_ops = build_scale_ops(config["scale_ops"])
+
+    return MultiScaleQuantizer(
+        codebook_size=config["codebook_size"],
+        codebook_dim=config["codebook_dim"],
+        scale_lengths=config["scale_lengths"],
+        beta=config["beta"],
+        quant_resi=config["quant_resi"],
+        share_quant_resi=config["share_quant_resi"],
+        scale_ops=scale_ops,
+    )

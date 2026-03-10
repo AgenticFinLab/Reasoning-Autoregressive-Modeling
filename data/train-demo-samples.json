@@ -1,0 +1,202 @@
+[
+  {
+    "question": "Tracy has a charity book collection store from which she receives book donations from members of her town. Any person who wants to borrow a book is free to do so as long as they return the book after they've finished reading. She has already received 300 book donations. If ten people come and donate five books each in a week, and a total of 140 books are borrowed by other people to read, calculate the total number of books she has remaining in the store?\n",
+    "main_id": "ID3078",
+    "split": "train",
+    "cot_answer": "The ten people donated 10*5 = <<10*5=50>>50 books.\nThe total number of books in her store after the new donations is 300+50 = <<300+50=350>>350 books.\nWhen some of the books are borrowed, her total collection becomes 350-140 =<<350-140=210>>210 books.\n#### 210",
+    "groundtruth": "210",
+    "sample_info": {
+      "dataset": "openai/gsm8k"
+    }
+  },
+  {
+    "question": "If Janet reads 80 pages a day and Belinda reads 30 pages a day, how many more pages does Janet read in 6 weeks?\n",
+    "main_id": "ID1860",
+    "split": "train",
+    "cot_answer": "First find the total number of days in 6 weeks: 6 weeks * 7 days/week = <<6*7=42>>42 days\nThen find the total difference in the number of pages Janet and Belinda read each day: 80 pages/day - 30 pages/day = <<80-30=50>>50 pages/day\nThen multiply the daily difference by the number of days to find the total difference in the number of pages they read: 50 pages/day * 42 days = <<50*42=2100>>2100 pages\n#### 2100",
+    "groundtruth": "2100",
+    "sample_info": {
+      "dataset": "openai/gsm8k"
+    }
+  },
+  {
+    "question": "Jeremy listened to five fewer songs yesterday than today. Yesterday, he listened to nine songs. How many songs did Jeremy listen to in two days?\n",
+    "main_id": "ID348",
+    "split": "train",
+    "cot_answer": "Jeremy listened to 9 + 5 = <<9+5=14>>14 songs today.\nThus, he listened to 9 + 14 = <<9+14=23>>23 songs in two days.\n#### 23",
+    "groundtruth": "23",
+    "sample_info": {
+      "dataset": "openai/gsm8k"
+    }
+  },
+  {
+    "question": "Janet hires six employees. Four of them are warehouse workers who make $15/hour, and the other two are managers who make $20/hour. Janet has to pay 10% of her workers' salaries in FICA taxes. If everyone works 25 days a month and 8 hours a day, how much does Janet owe total for their wages and taxes for one month?\n",
+    "main_id": "ID311",
+    "split": "train",
+    "cot_answer": "First figure out how many hours each worker works per month by multiplying the number of days they work by the number of hours a day they work: 25 days * 8 hours/day = <<25*8=200>>200 hours\nThen calculate how much one warehouse worker makes per month by multiplying their hourly rate by the number of hours they work: 200 hours * $15/hour = $<<200*15=3000>>3000\nThen multiply that number by 4 to find out how much all the warehouse workers make: $3000/worker * 4 workers = $<<3000*4=12000>>12,000\nNow multiply the hours each manager works (also 200) by their hourly wage to find out how much one manager makes per month: 200 hours * $20/hour = $<<200*20=4000>>4,000\nNow multiply one manager's wages by the number of managers (2) to find their total wage amount: $4,000/manager * 2 managers = $<<4000*2=8000>>8,000\nNow add the wages for the managers and the workers to find the total cost of the wages: $8,000 + $12,000 = $<<8000+12000=20000>>20,000\nNow multiply the total wage bill by 10% to find how much the FICA taxes are: $20,000 * .1 = $<<20000*.1=2000>>2,000\nNow add the total wage bill to the total tax amount to find the grand total: $2,000 + $20,000 = $<<2000+20000=22000>>22,000\n#### 22000",
+    "groundtruth": "22000",
+    "sample_info": {
+      "dataset": "openai/gsm8k"
+    }
+  },
+  {
+    "question": "Jenna is planning a road trip. She plans on driving the first 200 miles, and her friend will drive the last 100 miles. They plan on taking 2 30-minute breaks. If Jenna drives 50 miles per hour and her friend drives 20 miles per hour, how many hours will they spend on the road trip?\n",
+    "main_id": "ID4040",
+    "split": "train",
+    "cot_answer": "Jenna will drive 200 miles at a rate of 50 miles per hour, so she will drive for 4 hours.\nHer friend will drive 100 miles at a rate of 20 miles per hour, so Jenna's friend will drive for 5 hours.\nThey will spend a total of 60 minutes on breaks because 30 minutes + 30 minutes = <<30+30=60>>60 minutes.\nThus, they will spend 1 hour on breaks because there are 60 minutes in an hour.\nThe road trip will take a total of 1+4+5 = <<1+4+5=10>>10 hours.\n#### 10",
+    "groundtruth": "10",
+    "sample_info": {
+      "dataset": "openai/gsm8k"
+    }
+  },
+  {
+    "question": "Jeff makes 10 donuts each day for 12 days. Jeff eats one of the donuts each day. Chris then comes over and eats 8 donuts. If 10 donuts fit in each box, how many boxes can Jeff fill with his donuts?\n",
+    "main_id": "ID1115",
+    "split": "train",
+    "cot_answer": "Jeff makes a total of 10 * 12 = <<10*12=120>>120 donuts.\nJeff eats 1 * 12 = <<1*12=12>>12 donuts.\nAfter Chris is done eating, there are 120 - 12 - 8 = <<120-12-8=100>>100 donuts remaining.\nJeff needs 100 / 10 = <<100/10=10>>10 boxes to store all of his donuts.\n#### 10",
+    "groundtruth": "10",
+    "sample_info": {
+      "dataset": "openai/gsm8k"
+    }
+  },
+  {
+    "question": "Gilbert grows herbs in his yard to use in his cooking. At the beginning of the spring, he planted three basil bushes, a parsley plant, and two kinds of mint. Halfway through spring, one of the basil plants dropped seeds from a flower and made an extra basil plant grow. However, a rabbit came by the garden near the end of spring and ate all the mint. How many herb plants did Gilbert have when spring ended?\n",
+    "main_id": "ID6210",
+    "split": "train",
+    "cot_answer": "Gilbert planted 3 + 1 + 2 = <<3+1+2=6>>6 herb plants.\nHe gained a basil plant when one of the basil plants seeded a new plant, so he had 6 + 1 = <<6+1=7>>7 plants.\nThe rabbit ate both mint plants, so Gilbert had 7 - 2 = <<7-2=5>>5 herb plants when spring ended.\n#### 5",
+    "groundtruth": "5",
+    "sample_info": {
+      "dataset": "openai/gsm8k"
+    }
+  },
+  {
+    "question": "There are 35 books on the cart. There are five fiction books, 4 more non-fiction books than fiction books, 2 times as many autobiographies as fiction books, and the rest picture books. How many books were picture books?\n",
+    "main_id": "ID5786",
+    "split": "train",
+    "cot_answer": "There are 5+4 = <<5+4=9>>9 non-fiction books on the cart.\nThere are 2*5 = <<2*5=10>>10 autobiographies on the cart.\nThere are 5+9+10 = <<5+9+10=24>>24 fiction, non-fiction, and autobiography books on the cart.\nThere are 35-24 = <<35-24=11>>11 picture books on the cart.\n#### 11",
+    "groundtruth": "11",
+    "sample_info": {
+      "dataset": "openai/gsm8k"
+    }
+  },
+  {
+    "question": "The Grey's bought several chickens at a sale. John took 5 more of the chickens than Mary took. Ray took 6 chickens less than Mary. If Ray took 10 chickens, how many more chickens did John take than Ray?\n",
+    "main_id": "ID4245",
+    "split": "train",
+    "cot_answer": "Mary took 10+6 = <<10+6=16>>16 chickens.\nJohn took 16+5 = <<16+5=21>>21 chickens\nJohn took 21-10 = <<21-10=11>>11 more chickens than Ray.\n#### 11",
+    "groundtruth": "11",
+    "sample_info": {
+      "dataset": "openai/gsm8k"
+    }
+  },
+  {
+    "question": "In Canada, for every moose there are two beavers, and for every beaver there are 19 humans.  If there are 38 million people in Canada, what is the moose population of Canada, in millions?\n",
+    "main_id": "ID4726",
+    "split": "train",
+    "cot_answer": "If there are 19 humans for every one beaver, then there are 38 million/19=<<38/19=2>>2 million beavers in Canada.\nAnd if for every one moose there are two beavers, then the moose population of Canada is 2 million/2=<<2/2=1>>1 million.\n#### 1",
+    "groundtruth": "1",
+    "sample_info": {
+      "dataset": "openai/gsm8k"
+    }
+  },
+  {
+    "question": "20 kids in preschool are ready for a nap.  1/2 of the kids fall asleep within the first 5 minutes.  Then half of the kids remaining fall asleep within another 5 minutes.  How many kids are still awake?\n",
+    "main_id": "ID6145",
+    "split": "train",
+    "cot_answer": "In a class with 20 kids, 1/2 of the students have already fallen asleep so 20/2 = <<20/2=10>>10 kids are already asleep\nWe start with 20 kids awake and 10 are already asleep so 20- 10 = <<20-10=10>>10 kids are still awake\n1/2 of these 10 kids fall asleep next meaning there are 10/2 = <<10/2=5>>5 students still awake\n#### 5",
+    "groundtruth": "5",
+    "sample_info": {
+      "dataset": "openai/gsm8k"
+    }
+  },
+  {
+    "question": "Before he lost one, Policeman O'Brien had 5 more than twice as many hats as fire chief Simpson. If fire chief Simpson has 15 hats, how many hats does Policeman O'Brien now have?\n",
+    "main_id": "ID5865",
+    "split": "train",
+    "cot_answer": "Twice as many hats as fire chief Simpson has is 2 * 15 = <<2*15=30>>30 hats.\n5 more than 30 hats is 30 + 5 = <<30+5=35>>35 hats.\nOne less than 35 hats is 35 - 1 = <<35-1=34>>34 hats.\n#### 34",
+    "groundtruth": "34",
+    "sample_info": {
+      "dataset": "openai/gsm8k"
+    }
+  },
+  {
+    "question": "Darnell has 1000 square feet of fabric that he's using to make mini flags. He makes square flags that are 4 feet by 4 feet, wide rectangular flags that are 5 feet by 3 feet, and tall rectangular flags that are 3 feet by 5 feet. He has already made 16 square flags, 20 wide flags, and 10 tall flags. How many square feet of fabric does he have left?\n",
+    "main_id": "ID3770",
+    "split": "train",
+    "cot_answer": "The square flags use 16 square feet of fabric per flag because four times four equals <<4*4=16>>16\nThe wide flags each use 15 feet of fabric per flag because five times three equals <<5*3=15>>15\nThe tall flags each use 15 feet of fabric per flag because five times three equals <<5*3=15>>15\nHe has used 256 square feet for the square flags because 16 times 16 equals <<16*16=256>>256\nHe has used 300 square feet for the wide flags because 20 times 15 equals <<20*15=300>>300\nHe has used 150 square feet for the tall flags because ten times 15 equals 150.\nHe has used 706 square feet because 256 plus 300 plus 150 equals <<256+300+150=706>>706.\nHe has 294 square feet left because 1,000 minus 706 equals <<1000-706=294>>294\n#### 294",
+    "groundtruth": "294",
+    "sample_info": {
+      "dataset": "openai/gsm8k"
+    }
+  },
+  {
+    "question": "A farmer planted 30 rows of tomatoes with 10 plants in each row. Each tomato plant yields 20 pieces of tomatoes. How many pieces of tomatoes can the farmer get from all his planted tomatoes?\n",
+    "main_id": "ID3497",
+    "split": "train",
+    "cot_answer": "The farmer planted a total of 30 x 10 = <<30*10=300>>300 tomato plants.\nThus, the farmer can get 300 x 20 = <<300*20=6000>>6000 pieces of tomatoes.\n#### 6000",
+    "groundtruth": "6000",
+    "sample_info": {
+      "dataset": "openai/gsm8k"
+    }
+  },
+  {
+    "question": "Lydia has 80 plants. 40% of her plants are flowering plants. Lydia wants to place a fourth of her flowering plants on the porch. If each flowering plant produces 5 flowers, how many flowers are there in total on the porch?\n",
+    "main_id": "ID5356",
+    "split": "train",
+    "cot_answer": "Lydia has 80 * 0.40 = <<80*0.40=32>>32 flowering plants\nLydia places 32 / 4 = <<32/4=8>>8 of the flowering plants on the porch\nThere are 8 * 5 = <<8*5=40>>40 flowers on the porch\n#### 40",
+    "groundtruth": "40",
+    "sample_info": {
+      "dataset": "openai/gsm8k"
+    }
+  },
+  {
+    "question": "Sally sews 4 shirts on Monday, 3 shirts on Tuesday, and 2 shirts on Wednesday.  Each shirt has 5 buttons.  How many buttons does Sally need to sew all the shirts?\n",
+    "main_id": "ID6548",
+    "split": "train",
+    "cot_answer": "Total number of shirts Sally sews is 4 + 3 + 2 = <<4+3+2=9>>9 shirts.\nThe total number of buttons she needs is 9 x 5 = <<9*5=45>>45 buttons.\n#### 45",
+    "groundtruth": "45",
+    "sample_info": {
+      "dataset": "openai/gsm8k"
+    }
+  },
+  {
+    "question": "Riku has 25 times more stickers than Kristoff. If Kristoff has 85 stickers, how many stickers does Riku have?\n",
+    "main_id": "ID283",
+    "split": "train",
+    "cot_answer": "If Kristoff has 85 stickers, Riku has 25 * 85 stickers = <<85*25=2125>>2125 more stickers.\nThe total number of stickers Riku has is 2125 stickers + 85 stickers = <<2125+85=2210>>2210 stickers\n#### 2210",
+    "groundtruth": "2210",
+    "sample_info": {
+      "dataset": "openai/gsm8k"
+    }
+  },
+  {
+    "question": "Susie and Britney each keep chickens, of two different breeds. Susie has 11 Rhode Island Reds and 6 Golden Comets. Britney has twice as many Rhode Island Reds as Susie, but only half as many Golden Comets. How many more chickens are in Britney's flock than in Susie's?\n",
+    "main_id": "ID1033",
+    "split": "train",
+    "cot_answer": "Britney has 11*2=<<11*2=22>>22 Rhode Island Reds.\nShe has 6/2=<<6/2=3>>3 Golden Comets.\nShe has 22+3=<<22+3=25>>25 total.\nSusie has 11+6=<<11+6=17>>17 total.\nBritney has 25-17=<<25-17=8>>8 more.\n#### 8",
+    "groundtruth": "8",
+    "sample_info": {
+      "dataset": "openai/gsm8k"
+    }
+  },
+  {
+    "question": "A person borrowed an amount of money for a year at an interest rate of 12%. If the total interest is $1500, what was the original borrowed amount?\n",
+    "main_id": "ID5108",
+    "split": "train",
+    "cot_answer": "Let X be the price of the borrowed amount.\nThe interest is X*.12 = $1500.\nSo the borrowed amount is X = $1500/.12 = $<<1500/.12=12500>>12500.\n#### 12500",
+    "groundtruth": "12500",
+    "sample_info": {
+      "dataset": "openai/gsm8k"
+    }
+  },
+  {
+    "question": "A couple agreed to split their expenses equally, including the salary of their house help. While doing her job, the house help had an accident; thus, she underwent a medical procedure which cost her $128. The couple decided to pay half of the medical expenses and the other half will be deducted from her $160 salary. If the husband paid for the entire half of the hospital bill, how much does he still need to pay so that they split the expenses for the house help equally?\n",
+    "main_id": "ID5318",
+    "split": "train",
+    "cot_answer": "The amount that the couple would cover for the hospital bill is $128/2 = $<<128/2=64>>64.\nThe couple's total expenses (salary and hospital bill) is $160 + $64 = $<<160+64=224>>224.\nSo each of them should give $224/2 = $<<224/2=112>>112 in total.\nSince the husband paid the entire half of the hospital bill already ($64), he still needs to pay $112 - $64 = $<<48=48>>48.\n#### 48",
+    "groundtruth": "48",
+    "sample_info": {
+      "dataset": "openai/gsm8k"
+    }
+  }
+]
