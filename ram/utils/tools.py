@@ -9,6 +9,7 @@ Functions:
 """
 
 import random
+from typing import List
 
 import numpy as np
 import torch
@@ -114,3 +115,92 @@ def count_parameters(model: torch.nn.Module, trainable_only: bool = True) -> int
     if trainable_only:
         return sum(p.numel() for p in model.parameters() if p.requires_grad)
     return sum(p.numel() for p in model.parameters())
+
+
+def collate_fn_text(batch) -> List[str]:
+    """Extract text from dataset samples.
+
+    Supports common dataset formats with 'question' or 'problem' fields.
+
+    Args:
+        batch: List of dataset samples (dicts or other).
+
+    Returns:
+        List[str]: Extracted text strings.
+    """
+    texts = []
+    for sample in batch:
+        if isinstance(sample, dict):
+            if "question" in sample:
+                texts.append(sample["question"])
+            elif "problem" in sample:
+                texts.append(sample["problem"])
+            elif "text" in sample:
+                texts.append(sample["text"])
+            else:
+                texts.append(str(sample))
+        else:
+            texts.append(str(sample))
+    return texts
+
+
+def decode_logits_to_text(
+    logits: torch.Tensor,
+    tokenizer,
+    original_texts: List[str] = None,
+) -> dict:
+    """Decode logits to text and compare with original.
+
+    Restoration procedure:
+        logits [B, L, V=50257] -> argmax(dim=-1) -> pred_ids [B, L]
+        pred_ids [B, L] -> tokenizer.decode() -> List[str] texts
+
+        V=50257 is GPT2's vocabulary size:
+        - Each position has 50257 logits (one per token)
+        - argmax over dim=-1 selects the most likely token ID
+        - tokenizer.decode converts token IDs back to text
+
+    Args:
+        logits: Decoder output [B, L, V]
+        tokenizer: Tokenizer for decoding (e.g., GPT2Tokenizer)
+        original_texts: Optional original texts for comparison
+
+    Returns:
+        dict with keys:
+            - pred_ids: List[List[int]] predicted token IDs (JSON-serializable)
+            - pred_texts: List[str] decoded texts
+            - original_texts: List[str] original input texts (if provided)
+            - comparisons: List[dict] with original/reconstructed pairs
+    """
+    # logits [B, L, V] -> argmax(dim=-1) -> pred_ids [B, L]
+    pred_ids_tensor = logits.argmax(dim=-1)
+
+    # Convert to list for JSON serialization
+    pred_ids = pred_ids_tensor.cpu().tolist()
+
+    # pred_ids [B, L] -> tokenizer.decode() -> List[str]
+    pred_texts = []
+    for i in range(pred_ids_tensor.shape[0]):
+        text = tokenizer.decode(pred_ids_tensor[i], skip_special_tokens=True)
+        pred_texts.append(text)
+
+    result = {
+        "pred_ids": pred_ids,
+        "pred_texts": pred_texts,
+    }
+
+    # Add original texts and comparisons if provided
+    if original_texts is not None:
+        result["original_texts"] = original_texts
+        comparisons = []
+        for i, (orig, pred) in enumerate(zip(original_texts, pred_texts)):
+            comparisons.append(
+                {
+                    "index": i,
+                    "original": orig,
+                    "reconstructed": pred,
+                }
+            )
+        result["comparisons"] = comparisons
+
+    return result

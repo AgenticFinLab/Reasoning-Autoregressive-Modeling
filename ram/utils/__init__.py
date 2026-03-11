@@ -13,6 +13,8 @@ from .tools import (
     count_parameters,
     get_device,
     setup_environment,
+    collate_fn_text,
+    decode_logits_to_text,
 )
 
 __all__ = [
@@ -21,4 +23,6 @@ __all__ = [
     "count_parameters",
     "get_device",
     "setup_environment",
+    "collate_fn_text",
+    "decode_logits_to_text",
 ]
