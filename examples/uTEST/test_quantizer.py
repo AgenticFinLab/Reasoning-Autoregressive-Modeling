@@ -1,0 +1,240 @@
+"""Unit test for MultiScaleQuantizer.
+
+Usage:
+    python examples/uTEST/test_quantizer.py -c configs/uTEST/quantizer.yml
+
+Tests:
+    1. Encoder -> hidden states [B, L, D]
+    2. Quantizer initialization (codebook, phi layers, scale_ops)
+    3. Multi-scale quantization: f_hat, loss, indices_per_scale
+    4. Scale operations (downsample/upsample at each scale)
+    5. Decode indices back to f_hat
+    6. Reconstruction consistency
+
+Pipeline:
+    ┌─────────────────────┐
+    │ List[str] texts     │
+    └────────┬────────────┘
+             │ Encoder
+             ▼
+    ┌─────────────────────┐
+    │ [B, L, D] hidden    │  (D = codebook_dim)
+    └────────┬────────────┘
+             │ Quantizer (multi-scale)
+             ▼
+    ┌─────────────────────┐
+    │ [B, L, D] f_hat     │  + loss + indices_per_scale
+    └─────────────────────┘
+"""
+
+import argparse
+import torch
+from lmbase.dataset import registry
+
+from ram.models.encoder import build_encoder
+from ram.models.quantizer import build_quantizer, MultiScaleQuantizer
+from ram.models.scale_ops import AvgPoolScaleOps, LinearScaleOps
+from ram.utils import load_config
+
+
+def test_quantizer(config: dict):
+    """Comprehensive test for MultiScaleQuantizer.
+
+    Tests:
+        1. Encoder -> hidden [B, L, D]
+        2. Quantizer initialization
+        3. Multi-scale quantization
+        4. Scale operations
+        5. Decode indices
+        6. Reconstruction consistency
+    """
+    enc_cfg = config["model"]["encoder"]
+    quant_cfg = config["model"]["quantizer"]
+    data_cfg = config["data"]
+    train_cfg = config["train"]
+
+    B = train_cfg["batch_size"]
+    L = enc_cfg["max_length"]
+    D = quant_cfg["codebook_dim"]
+    scales = quant_cfg["scale_lengths"]
+
+    # Load data from lmbase
+    dataset = registry.get(data_cfg, split=data_cfg["split"])
+    texts = []
+    for i in range(min(B, len(dataset))):
+        sample = dataset[i]
+        if "question" in sample:
+            texts.append(sample["question"])
+        elif "problem" in sample:
+            texts.append(sample["problem"])
+        else:
+            texts.append(str(sample))
+
+    print(f"Dataset: {data_cfg['data_name']}, {len(dataset)} samples")
+    print(f"Batch: {B} texts, max_length={L}")
+    print(f"Scales: {scales}")
+    print()
+
+    # =================================================================
+    # 1. Encoder -> hidden states
+    # =================================================================
+    print("[1] Encoder -> hidden states")
+    encoder = build_encoder(enc_cfg)
+    assert (
+        encoder.output_dim == D
+    ), f"Encoder output_dim ({encoder.output_dim}) != codebook_dim ({D})"
+
+    with torch.no_grad():
+        hidden = encoder(inputs=texts)
+    print(
+        f"    Encoder output: [{hidden.shape[0]}, {hidden.shape[1]}, {hidden.shape[2]}]"
+    )
+    assert hidden.shape == (
+        B,
+        L,
+        D,
+    ), f"Expected [{B}, {L}, {D}], got {list(hidden.shape)}"
+    print("    PASSED")
+
+    # =================================================================
+    # 2. Quantizer initialization
+    # =================================================================
+    print("[2] Quantizer Initialization")
+    quantizer = build_quantizer(quant_cfg)
+
+    print(f"    codebook_size: {quantizer.codebook_size}")
+    print(f"    codebook_dim: {quantizer.codebook_dim}")
+    print(f"    scale_lengths: {quantizer.scale_lengths}")
+    print(f"    num_scales: {quantizer.num_scales}")
+    print(f"    max_length: {quantizer.max_length}")
+    print(f"    num_shared phi: {quantizer.num_shared}")
+    print(f"    codebook shape: {list(quantizer.codebook.weight.shape)}")
+
+    assert quantizer.codebook.weight.shape == (quant_cfg["codebook_size"], D)
+    assert quantizer.num_scales == len(scales)
+    print("    PASSED")
+
+    # =================================================================
+    # 3. Multi-scale Quantization
+    # =================================================================
+    print("[3] Multi-scale Quantization")
+
+    # Forward pass
+    f_hat, loss, indices_per_scale = quantizer.quantize(hidden)
+
+    print(f"    Input:  [{hidden.shape[0]}, {hidden.shape[1]}, {hidden.shape[2]}]")
+    print(f"    f_hat:  [{f_hat.shape[0]}, {f_hat.shape[1]}, {f_hat.shape[2]}]")
+    print(f"    Loss:   {loss.item():.4f}")
+    print(f"    Num scales: {len(indices_per_scale)}")
+
+    assert (
+        f_hat.shape == hidden.shape
+    ), f"f_hat shape mismatch: {f_hat.shape} vs {hidden.shape}"
+    assert loss.item() > 0, "Loss should be positive"
+    assert len(indices_per_scale) == len(scales)
+    print("    PASSED")
+
+    # =================================================================
+    # 4. Scale Operations (per scale)
+    # =================================================================
+    print("[4] Scale Operations (per scale)")
+
+    for k, scale_len in enumerate(scales):
+        indices_k = indices_per_scale[k]
+        print(
+            f"    Scale {k}: length={scale_len}, indices shape={list(indices_k.shape)}"
+        )
+        assert indices_k.shape == (
+            B,
+            scale_len,
+        ), f"Scale {k}: expected [{B}, {scale_len}], got {list(indices_k.shape)}"
+
+        # Check indices are valid (0 <= idx < codebook_size)
+        assert indices_k.min() >= 0, f"Scale {k}: negative indices"
+        assert (
+            indices_k.max() < quant_cfg["codebook_size"]
+        ), f"Scale {k}: indices exceed codebook_size"
+
+    print("    PASSED")
+
+    # =================================================================
+    # 5. Decode Indices
+    # =================================================================
+    print("[5] Decode Indices")
+
+    f_hat_decoded = quantizer.decode_indices(indices_per_scale, target_length=L)
+    print(
+        f"    Decoded f_hat: [{f_hat_decoded.shape[0]}, {f_hat_decoded.shape[1]}, {f_hat_decoded.shape[2]}]"
+    )
+
+    assert f_hat_decoded.shape == (B, L, D)
+    print("    PASSED")
+
+    # =================================================================
+    # 6. Reconstruction Consistency
+    # =================================================================
+    print("[6] Reconstruction Consistency")
+
+    # f_hat from quantize() should match decode_indices()
+    diff = (f_hat - f_hat_decoded).abs().mean().item()
+    print(f"    f_hat vs decoded diff: {diff:.6f}")
+
+    # Note: There may be small differences due to residual computation
+    # but they should be very close
+    assert diff < 0.1, f"f_hat and decoded f_hat differ too much: {diff}"
+    print("    PASSED")
+
+    # =================================================================
+    # 7. Scale Ops Test (downsample/upsample)
+    # =================================================================
+    print("[7] Scale Ops Test")
+
+    scale_ops = quantizer.scale_ops
+    print(f"    Scale ops type: {type(scale_ops).__name__}")
+
+    # Test downsample/upsample roundtrip
+    x_test = torch.randn(B, L, D)
+    for scale_len in scales:
+        x_down = scale_ops.downsample(x_test, scale_len)
+        x_up = scale_ops.upsample(x_down, L)
+        print(
+            f"    [{B}, {L}, {D}] -> down({scale_len}) -> [{B}, {scale_len}, {D}] -> up({L}) -> [{B}, {L}, {D}]"
+        )
+        assert x_down.shape == (B, scale_len, D)
+        assert x_up.shape == (B, L, D)
+
+    print("    PASSED")
+
+    # =================================================================
+    # 8. Phi Layers Test
+    # =================================================================
+    print("[8] Phi Layers Test")
+
+    for k in range(quantizer.num_scales):
+        phi = quantizer.get_phi(k)
+        is_shared = k < quantizer.num_shared
+        print(f"    Scale {k}: phi type={'shared' if is_shared else 'independent'}")
+
+    print("    PASSED")
+
+    print()
+    print("=" * 60)
+    print("ALL TESTS PASSED")
+    print("=" * 60)
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Unit test for MultiScaleQuantizer")
+    parser.add_argument(
+        "-c",
+        "--config",
+        type=str,
+        required=True,
+        help="Path to config file (e.g., configs/uTEST/quantizer.yml)",
+    )
+    args = parser.parse_args()
+
+    config = load_config(args.config)
+    print(f"Config: {args.config}")
+    print("=" * 60)
+    test_quantizer(config)

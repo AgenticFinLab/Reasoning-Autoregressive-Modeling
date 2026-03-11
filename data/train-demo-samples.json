@@ -1,202 +1,242 @@
 [
   {
-    "question": "Tracy has a charity book collection store from which she receives book donations from members of her town. Any person who wants to borrow a book is free to do so as long as they return the book after they've finished reading. She has already received 300 book donations. If ten people come and donate five books each in a week, and a total of 140 books are borrowed by other people to read, calculate the total number of books she has remaining in the store?\n",
-    "main_id": "ID3078",
+    "main_id": "ID4110",
     "split": "train",
-    "cot_answer": "The ten people donated 10*5 = <<10*5=50>>50 books.\nThe total number of books in her store after the new donations is 300+50 = <<300+50=350>>350 books.\nWhen some of the books are borrowed, her total collection becomes 350-140 =<<350-140=210>>210 books.\n#### 210",
-    "groundtruth": "210",
+    "question": "Solve for $x$: $$\\log_2 \\frac{3x+9}{5x-3} +\\log_2\\frac{5x-3}{x-2}=2$$\n",
+    "cot_answer": "Begin by combining logs: $$\\log_2\\left (\\frac{3x+9}{5x-3}\\cdot\\frac{5x-3}{x-2}\\right)=2$$Notice that $5x-3$ cancels.  We are left with: $$\\log_2\\frac{3x+9}{x-2}=2$$Now, eliminate logs and solve: \\begin{align*}\n\\frac{3x+9}{x-2}&=2^2\\\\\n\\Rightarrow\\qquad 3x+9&=4(x-2)\\\\\n\\Rightarrow\\qquad 3x+9&=4x-8\\\\\n\\Rightarrow\\qquad \\boxed{17}&=x\\\\\n\\end{align*}",
+    "groundtruth": "17",
     "sample_info": {
-      "dataset": "openai/gsm8k"
+      "dataset": "DigitalLearningGmbH/MATH-lighteval",
+      "level": "Level 2",
+      "type": "Intermediate Algebra"
     }
   },
   {
-    "question": "If Janet reads 80 pages a day and Belinda reads 30 pages a day, how many more pages does Janet read in 6 weeks?\n",
-    "main_id": "ID1860",
+    "main_id": "ID5358",
     "split": "train",
-    "cot_answer": "First find the total number of days in 6 weeks: 6 weeks * 7 days/week = <<6*7=42>>42 days\nThen find the total difference in the number of pages Janet and Belinda read each day: 80 pages/day - 30 pages/day = <<80-30=50>>50 pages/day\nThen multiply the daily difference by the number of days to find the total difference in the number of pages they read: 50 pages/day * 42 days = <<50*42=2100>>2100 pages\n#### 2100",
-    "groundtruth": "2100",
+    "question": "What is the residue of $9^{2010}$, modulo 17?\n",
+    "cot_answer": "We start by generating powers of 9 modulo 17. Note that we can generate $9^{2k}$ from $9^k$ by squaring $9^k$. We get \\begin{align*}\n9^1 &\\equiv 9 \\pmod{17} \\\\\n9^2 &\\equiv 13 \\pmod{17} \\\\\n9^4 &\\equiv 16 \\pmod{17} \\\\\n9^8 &\\equiv 1 \\pmod{17}.\n\\end{align*}Since $9^8 \\equiv 1$ modulo 17, we have \\begin{align*}\n9^{2010} &\\equiv 9^2 9^{2008} \\\\\n&\\equiv 9^2 (9^8)^{251} \\\\\n&\\equiv 9^2 1^{251} \\\\\n&\\equiv 9^2 \\\\\n&\\equiv \\boxed{13} \\pmod{17}.\n\\end{align*}",
+    "groundtruth": "13",
     "sample_info": {
-      "dataset": "openai/gsm8k"
+      "dataset": "DigitalLearningGmbH/MATH-lighteval",
+      "level": "Level 5",
+      "type": "Number Theory"
     }
   },
   {
-    "question": "Jeremy listened to five fewer songs yesterday than today. Yesterday, he listened to nine songs. How many songs did Jeremy listen to in two days?\n",
-    "main_id": "ID348",
+    "main_id": "ID6550",
     "split": "train",
-    "cot_answer": "Jeremy listened to 9 + 5 = <<9+5=14>>14 songs today.\nThus, he listened to 9 + 14 = <<9+14=23>>23 songs in two days.\n#### 23",
-    "groundtruth": "23",
+    "question": "How many multiples of 10 are between 11 and 103?\n",
+    "cot_answer": "The first multiple of $10$ that is greater than $11$ is $20$, and the last multiple of $10$ that is less than $103$ is $100$. The list of multiples is $20$, $30$, $\\ldots$, $100$. Divide each of these numbers by $10$ to get the list $2$, $3$, $\\ldots$, $10$. Subtracting $1$ from each number in this list gives a new list of $1$, $2$, $\\ldots $, $9$, so it is clear that there are $\\boxed{9}$ such numbers.",
+    "groundtruth": "9",
     "sample_info": {
-      "dataset": "openai/gsm8k"
+      "dataset": "DigitalLearningGmbH/MATH-lighteval",
+      "level": "Level 1",
+      "type": "Prealgebra"
     }
   },
   {
-    "question": "Janet hires six employees. Four of them are warehouse workers who make $15/hour, and the other two are managers who make $20/hour. Janet has to pay 10% of her workers' salaries in FICA taxes. If everyone works 25 days a month and 8 hours a day, how much does Janet owe total for their wages and taxes for one month?\n",
-    "main_id": "ID311",
+    "main_id": "ID7229",
     "split": "train",
-    "cot_answer": "First figure out how many hours each worker works per month by multiplying the number of days they work by the number of hours a day they work: 25 days * 8 hours/day = <<25*8=200>>200 hours\nThen calculate how much one warehouse worker makes per month by multiplying their hourly rate by the number of hours they work: 200 hours * $15/hour = $<<200*15=3000>>3000\nThen multiply that number by 4 to find out how much all the warehouse workers make: $3000/worker * 4 workers = $<<3000*4=12000>>12,000\nNow multiply the hours each manager works (also 200) by their hourly wage to find out how much one manager makes per month: 200 hours * $20/hour = $<<200*20=4000>>4,000\nNow multiply one manager's wages by the number of managers (2) to find their total wage amount: $4,000/manager * 2 managers = $<<4000*2=8000>>8,000\nNow add the wages for the managers and the workers to find the total cost of the wages: $8,000 + $12,000 = $<<8000+12000=20000>>20,000\nNow multiply the total wage bill by 10% to find how much the FICA taxes are: $20,000 * .1 = $<<20000*.1=2000>>2,000\nNow add the total wage bill to the total tax amount to find the grand total: $2,000 + $20,000 = $<<2000+20000=22000>>22,000\n#### 22000",
-    "groundtruth": "22000",
+    "question": "Let $\\mathbf{a},$ $\\mathbf{b},$ and $\\mathbf{c}$ be unit vectors such that\n\\[\\mathbf{a} + \\mathbf{b} + \\sqrt{3} \\mathbf{c} = \\mathbf{0}.\\]Find the angle between $\\mathbf{a}$ and $\\mathbf{b},$ in degrees.\n\nNote: A unit vector is a vector of magnitude 1.\n",
+    "cot_answer": "From the given equation,\n\\[\\mathbf{a} + \\mathbf{b} = -\\sqrt{3} \\mathbf{c}.\\]Then $(\\mathbf{a} + \\mathbf{b}) \\cdot (\\mathbf{a} + \\mathbf{b}) = 3 \\mathbf{c} \\cdot \\mathbf{c} = 3.$  Expanding, we get\n\\[\\mathbf{a} \\cdot \\mathbf{a} + 2 \\mathbf{a} \\cdot \\mathbf{b} + \\mathbf{b} \\cdot \\mathbf{b} = 3.\\]Then $2 \\mathbf{a} \\cdot \\mathbf{b} = 1,$ so $\\mathbf{a} \\cdot \\mathbf{b} = \\frac{1}{2}.$\n\nIf $\\theta$ is the angle between $\\mathbf{a}$ and $\\mathbf{b},$ then\n\\[\\cos \\theta = \\frac{\\mathbf{a} \\cdot \\mathbf{b}}{\\|\\mathbf{a}\\| \\|\\mathbf{b}\\|} = \\frac{1/2}{1 \\cdot 1} = \\frac{1}{2},\\]so $\\theta = \\boxed{60^\\circ}.$",
+    "groundtruth": "60^\\circ",
     "sample_info": {
-      "dataset": "openai/gsm8k"
+      "dataset": "DigitalLearningGmbH/MATH-lighteval",
+      "level": "Level 2",
+      "type": "Precalculus"
     }
   },
   {
-    "question": "Jenna is planning a road trip. She plans on driving the first 200 miles, and her friend will drive the last 100 miles. They plan on taking 2 30-minute breaks. If Jenna drives 50 miles per hour and her friend drives 20 miles per hour, how many hours will they spend on the road trip?\n",
-    "main_id": "ID4040",
+    "main_id": "ID2341",
     "split": "train",
-    "cot_answer": "Jenna will drive 200 miles at a rate of 50 miles per hour, so she will drive for 4 hours.\nHer friend will drive 100 miles at a rate of 20 miles per hour, so Jenna's friend will drive for 5 hours.\nThey will spend a total of 60 minutes on breaks because 30 minutes + 30 minutes = <<30+30=60>>60 minutes.\nThus, they will spend 1 hour on breaks because there are 60 minutes in an hour.\nThe road trip will take a total of 1+4+5 = <<1+4+5=10>>10 hours.\n#### 10",
-    "groundtruth": "10",
+    "question": "Henry's Hamburger Heaven offers its hamburgers with the following condiments: ketchup, mustard, mayonnaise, tomato, lettuce, pickles, cheese, and onions. A customer can choose one, two, or three meat patties, and any collection of condiments. How many different kinds of hamburgers can be ordered?\n",
+    "cot_answer": "A customer makes one of two choices for each condiment, to include it or not to include it. The choices are made independently, so there are $2^8 = 256$ possible combinations of condiments. For each of those combinations there are three choices regarding the number of meat patties, so there are altogether $(3)(256)=\\boxed{768}$ different kinds of hamburgers.",
+    "groundtruth": "768",
     "sample_info": {
-      "dataset": "openai/gsm8k"
+      "dataset": "DigitalLearningGmbH/MATH-lighteval",
+      "level": "Level 5",
+      "type": "Counting & Probability"
     }
   },
   {
-    "question": "Jeff makes 10 donuts each day for 12 days. Jeff eats one of the donuts each day. Chris then comes over and eats 8 donuts. If 10 donuts fit in each box, how many boxes can Jeff fill with his donuts?\n",
-    "main_id": "ID1115",
+    "main_id": "ID5263",
     "split": "train",
-    "cot_answer": "Jeff makes a total of 10 * 12 = <<10*12=120>>120 donuts.\nJeff eats 1 * 12 = <<1*12=12>>12 donuts.\nAfter Chris is done eating, there are 120 - 12 - 8 = <<120-12-8=100>>100 donuts remaining.\nJeff needs 100 / 10 = <<100/10=10>>10 boxes to store all of his donuts.\n#### 10",
-    "groundtruth": "10",
+    "question": "The number $r$ can be expressed as a four-place decimal $0.abcd,$ where $a, b, c,$ and $d$ represent digits, any of which could be zero. It is desired to approximate $r$ by a fraction whose numerator is 1 or 2 and whose denominator is an integer. The closest such fraction to $r$ is $\\frac 27.$ What is the number of possible values for $r$?\n\n",
+    "cot_answer": "The nearest fractions to $\\frac 27$ with numerator $1$ are $\\frac 13, \\frac 14$; and with numerator $2$ are $\\frac 26, \\frac 28 = \\frac 13, \\frac 14$ anyway. For $\\frac 27$ to be the best approximation for $r$, the decimal must be closer to $\\frac 27 \\approx .28571$ than to $\\frac 13 \\approx .33333$ or $\\frac 14 \\approx .25$.\nThus $r$ can range between $\\frac{\\frac 14 + \\frac{2}{7}}{2} \\approx .267857$ and $\\frac{\\frac 13 + \\frac{2}{7}}{2} \\approx .309523$. At $r = .2679, .3095$, it becomes closer to the other fractions, so $.2679 \\le r \\le .3095$ and the number of values of $r$ is $3095 - 2679 + 1 = \\boxed{417}$.",
+    "groundtruth": "417",
     "sample_info": {
-      "dataset": "openai/gsm8k"
+      "dataset": "DigitalLearningGmbH/MATH-lighteval",
+      "level": "Level 5",
+      "type": "Number Theory"
     }
   },
   {
-    "question": "Gilbert grows herbs in his yard to use in his cooking. At the beginning of the spring, he planted three basil bushes, a parsley plant, and two kinds of mint. Halfway through spring, one of the basil plants dropped seeds from a flower and made an extra basil plant grow. However, a rabbit came by the garden near the end of spring and ate all the mint. How many herb plants did Gilbert have when spring ended?\n",
-    "main_id": "ID6210",
+    "main_id": "ID7",
     "split": "train",
-    "cot_answer": "Gilbert planted 3 + 1 + 2 = <<3+1+2=6>>6 herb plants.\nHe gained a basil plant when one of the basil plants seeded a new plant, so he had 6 + 1 = <<6+1=7>>7 plants.\nThe rabbit ate both mint plants, so Gilbert had 7 - 2 = <<7-2=5>>5 herb plants when spring ended.\n#### 5",
-    "groundtruth": "5",
+    "question": "What are all values of $p$ such that for every $q>0$, we have   $$\\frac{3(pq^2+p^2q+3q^2+3pq)}{p+q}>2p^2q?$$ Express your answer in interval notation in decimal form.\n",
+    "cot_answer": "First we'll simplify that complicated expression. We attempt to factor the numerator of the left side: \\begin{align*}\npq^2+p^2q+3q^2+3pq &= q(pq + p^2 + 3q + 3p) \\\\\n&= q[ p(q+p) + 3(q+p) ] \\\\\n&= q(p+3)(q+p).\n\\end{align*}Substituting this in for the numerator in our inequality gives $$\\frac{3q(p+3)(p+q)}{p+q}>2p^2q.$$We note that left hand side has $p+q$ in both the numerator and denominator.  We can only cancel these terms if $p+q \\neq 0.$  Since we're looking for values of $p$ such that the inequality is true for all $q > 0,$ we need $p \\geq 0$ so that $p + q \\neq 0.$\n\nAlso because this must be true for every $q>0$, we can cancel the $q$'s on both sides. This gives  \\begin{align*}\n3(p+3)&>2p^2\\Rightarrow\\\\\n3p+9&>2p^2 \\Rightarrow\\\\\n0&>2p^2-3p-9.\n\\end{align*}Now we must solve this quadratic inequality. We can factor the quadratic as $2p^2-3p-9=(2p+3)(p-3)$. The roots are $p=3$ and $p=-1.5$. Since a graph of this parabola would open upwards, we know that the value of $2p^2 - 3p - 9$ is negative between the roots, so the solution to our inequality is $-1.5<p<3.$  But we still need $0 \\leq p,$ so in interval notation the answer is $\\boxed{[0,3)}$.",
+    "groundtruth": "[0,3)",
     "sample_info": {
-      "dataset": "openai/gsm8k"
+      "dataset": "DigitalLearningGmbH/MATH-lighteval",
+      "level": "Level 5",
+      "type": "Algebra"
     }
   },
   {
-    "question": "There are 35 books on the cart. There are five fiction books, 4 more non-fiction books than fiction books, 2 times as many autobiographies as fiction books, and the rest picture books. How many books were picture books?\n",
-    "main_id": "ID5786",
+    "main_id": "ID6751",
     "split": "train",
-    "cot_answer": "There are 5+4 = <<5+4=9>>9 non-fiction books on the cart.\nThere are 2*5 = <<2*5=10>>10 autobiographies on the cart.\nThere are 5+9+10 = <<5+9+10=24>>24 fiction, non-fiction, and autobiography books on the cart.\nThere are 35-24 = <<35-24=11>>11 picture books on the cart.\n#### 11",
-    "groundtruth": "11",
+    "question": "We are given that $$54+(98\\div14)+(23\\cdot 17)-200-(312\\div 6)=200.$$Now, let's remove the parentheses:  $$54+98\\div14+23\\cdot 17-200-312\\div 6.$$What does this expression equal?\n",
+    "cot_answer": "Notice how the parentheses are only around pairs of numbers that are being multiplied or divided. Since multiplication and division are performed before addition and subtraction, it doesn't matter if we remove the parentheses. That's why  \\begin{align*}\n&54+(98\\div14)+(23\\cdot 17)-200-(312\\div 6)\\\\\n&=54+98\\div14+23\\cdot17-200-312\\div 6\\\\\n&=\\boxed{200}.\\end{align*}",
+    "groundtruth": "200",
     "sample_info": {
-      "dataset": "openai/gsm8k"
+      "dataset": "DigitalLearningGmbH/MATH-lighteval",
+      "level": "Level 1",
+      "type": "Prealgebra"
     }
   },
   {
-    "question": "The Grey's bought several chickens at a sale. John took 5 more of the chickens than Mary took. Ray took 6 chickens less than Mary. If Ray took 10 chickens, how many more chickens did John take than Ray?\n",
-    "main_id": "ID4245",
+    "main_id": "ID3141",
     "split": "train",
-    "cot_answer": "Mary took 10+6 = <<10+6=16>>16 chickens.\nJohn took 16+5 = <<16+5=21>>21 chickens\nJohn took 21-10 = <<21-10=11>>11 more chickens than Ray.\n#### 11",
-    "groundtruth": "11",
+    "question": "The base of a triangle is of length $b$, and the altitude is of length $h$. A rectangle of height $x$ is inscribed in the triangle with the base of the rectangle in the base of the triangle. The area of the rectangle is:\n$\\textbf{(A)}\\ \\frac{bx}{h}(h-x)\\qquad \\textbf{(B)}\\ \\frac{hx}{b}(b-x)\\qquad \\textbf{(C)}\\ \\frac{bx}{h}(h-2x)\\qquad \\textbf{(D)}\\ x(b-x)\\qquad \\textbf{(E)}\\ x(h-x)$\n\n",
+    "cot_answer": "Let $AB=b$, $DE=h$, and $WX = YZ = x$.[asy] pair A=(0,0),B=(56,0),C=(20,48),D=(20,0),W=(10,0),X=(10,24),Y=(38,24),Z=(38,0); draw(A--B--C--A); draw((10,0)--(10,24)--(38,24)--(38,0)); draw(C--D); dot(A); dot(B); dot(C); dot(D); dot(W); dot(X); dot(Y); dot(Z); dot((20,24)); label(\"$A$\",A,S); label(\"$B$\",B,S); label(\"$C$\",C,N); label(\"$D$\",D,S); label(\"$W$\",W,S); label(\"$X$\",X,NW); label(\"$Y$\",Y,NE); label(\"$Z$\",Z,S); label(\"$N$\",(20,24),NW); [/asy]Since $CD$ is perpendicular to $AB$, $ND = WX$. That means $CN = h-x$. The sides of the rectangle are parallel, so $XY \\parallel WZ$. That means by AA Similarity, $\\triangle CXY \\sim \\triangle CAB$. Letting $n$ be the length of the base of the rectangle, that means\\[\\frac{h-x}{n} = \\frac{h}{b}\\]\\[n = \\frac{b(h-x)}{h}\\]Thus, the area of the rectangle is $\\boxed{\\frac{bx}{h}(h-x)}$",
+    "groundtruth": "\\frac{bx}{h}(h-x)",
     "sample_info": {
-      "dataset": "openai/gsm8k"
+      "dataset": "DigitalLearningGmbH/MATH-lighteval",
+      "level": "Level 5",
+      "type": "Geometry"
     }
   },
   {
-    "question": "In Canada, for every moose there are two beavers, and for every beaver there are 19 humans.  If there are 38 million people in Canada, what is the moose population of Canada, in millions?\n",
-    "main_id": "ID4726",
+    "main_id": "ID5556",
     "split": "train",
-    "cot_answer": "If there are 19 humans for every one beaver, then there are 38 million/19=<<38/19=2>>2 million beavers in Canada.\nAnd if for every one moose there are two beavers, then the moose population of Canada is 2 million/2=<<2/2=1>>1 million.\n#### 1",
-    "groundtruth": "1",
+    "question": "If the lengths of two sides of a right triangle are 5 and 12 units, what is the least possible length, in units, of the third side? Express your answer in simplest radical form.\n",
+    "cot_answer": "The third side is either the hypotenuse of the right triangle or one of the legs.  It is shorter in the latter case, because the angle between the sides of length 5 and 12 is smaller.  By the Pythagorean theorem, the length of the missing leg is $\\sqrt{12^2-5^2}=\\boxed{\\sqrt{119}}$ units.  (Note: $\\sqrt{119}$ does not simplify since $119 = 7\\cdot 17$).",
+    "groundtruth": "\\sqrt{119}",
     "sample_info": {
-      "dataset": "openai/gsm8k"
+      "dataset": "DigitalLearningGmbH/MATH-lighteval",
+      "level": "Level 5",
+      "type": "Prealgebra"
     }
   },
   {
-    "question": "20 kids in preschool are ready for a nap.  1/2 of the kids fall asleep within the first 5 minutes.  Then half of the kids remaining fall asleep within another 5 minutes.  How many kids are still awake?\n",
-    "main_id": "ID6145",
+    "main_id": "ID4060",
     "split": "train",
-    "cot_answer": "In a class with 20 kids, 1/2 of the students have already fallen asleep so 20/2 = <<20/2=10>>10 kids are already asleep\nWe start with 20 kids awake and 10 are already asleep so 20- 10 = <<20-10=10>>10 kids are still awake\n1/2 of these 10 kids fall asleep next meaning there are 10/2 = <<10/2=5>>5 students still awake\n#### 5",
-    "groundtruth": "5",
+    "question": "Find the domain of the function\n\\[f(x) = \\sqrt{1 - \\sqrt{2 - \\sqrt{3 - x}}}.\\]\n",
+    "cot_answer": "The function $f(x) = \\sqrt{1 - \\sqrt{2 - \\sqrt{3 - x}}}$ is defined only when\n\\[1 - \\sqrt{2 - \\sqrt{3 - x}} \\ge 0,\\]or\n\\[\\sqrt{2 - \\sqrt{3 - x}} \\le 1. \\quad (*)\\]Squaring both sides, we get\n\\[2 - \\sqrt{3 - x} \\le 1.\\]Then\n\\[\\sqrt{3 - x} \\ge 1.\\]Squaring both sides, we get\n\\[3 - x \\ge 1,\\]so $x \\le 2.$\n\nAlso, for $(*)$ to hold, we must also have\n\\[2 - \\sqrt{3 - x} \\ge 0.\\]Then $\\sqrt{3 - x} \\le 2.$  Squaring both sides, we get\n\\[3 - x \\le 4,\\]so $x \\ge -1.$\n\nHence, the domain of $f(x)$ is $\\boxed{[-1,2]}.$",
+    "groundtruth": "[-1,2]",
     "sample_info": {
-      "dataset": "openai/gsm8k"
+      "dataset": "DigitalLearningGmbH/MATH-lighteval",
+      "level": "Level 3",
+      "type": "Intermediate Algebra"
     }
   },
   {
-    "question": "Before he lost one, Policeman O'Brien had 5 more than twice as many hats as fire chief Simpson. If fire chief Simpson has 15 hats, how many hats does Policeman O'Brien now have?\n",
-    "main_id": "ID5865",
+    "main_id": "ID3003",
     "split": "train",
-    "cot_answer": "Twice as many hats as fire chief Simpson has is 2 * 15 = <<2*15=30>>30 hats.\n5 more than 30 hats is 30 + 5 = <<30+5=35>>35 hats.\nOne less than 35 hats is 35 - 1 = <<35-1=34>>34 hats.\n#### 34",
-    "groundtruth": "34",
+    "question": "Let $ABCD$ be an isosceles trapezoid, whose dimensions are $AB = 6, BC=5=DA,$and $CD=4.$ Draw circles of radius 3 centered at $A$ and $B,$ and circles of radius 2 centered at $C$ and $D.$ A circle contained within the trapezoid is tangent to all four of these circles. Its radius is $\\frac{-k+m\\sqrt{n}}p,$ where $k, m, n,$ and $p$ are positive integers, $n$ is not divisible by the square of any prime, and $k$ and $p$ are relatively prime. Find $k+m+n+p.$\n\n",
+    "cot_answer": "Let the radius of the center circle be $r$ and its center be denoted as $O$.\n[asy] pointpen = black; pathpen = black+linewidth(0.7); pen d = linewidth(0.7) + linetype(\"4 4\"); pen f = fontsize(8);    real r = (-60 + 48 * 3^.5)/23; pair A=(0,0), B=(6,0), D=(1, 24^.5), C=(5,D.y), O = (3,(r^2 + 6*r)^.5);  D(MP(\"A\",A)--MP(\"B\",B)--MP(\"C\",C,N)--MP(\"D\",D,N)--cycle); D(CR(A,3));D(CR(B,3));D(CR(C,2));D(CR(D,2));D(CR(O,r)); D(O); D((3,0)--(3,D.y),d); D(A--O--D,d); MP(\"3\",(3/2,0),S,f);MP(\"2\",(2,D.y),N,f); [/asy]\nClearly line $AO$ passes through the point of tangency of circle $A$ and circle $O$. Let $y$ be the height from the base of the trapezoid to $O$. From the Pythagorean Theorem,\\[3^2 + y^2 = (r + 3)^2 \\Longrightarrow y = \\sqrt {r^2 + 6r}.\\]\nWe use a similar argument with the line $DO$, and find the height from the top of the trapezoid to $O$, $z$, to be $z = \\sqrt {r^2 + 4r}$.\nNow $y + z$ is simply the height of the trapezoid. Let $D'$ be the foot of the perpendicular from $D$ to $AB$; then $AD' = 3 - 2 = 1$. By the Pythagorean Theorem, $(AD')^2 + (DD')^2 = (AD)^2 \\Longrightarrow DD' = \\sqrt{24}$ so we need to solve the equation $\\sqrt {r^2 + 4r} + \\sqrt {r^2 + 6r} = \\sqrt {24}$. We can solve this by moving one radical to the other side, and squaring the equation twice to end with a quadratic equation.\nSolving this, we get $r = \\frac { - 60 + 48\\sqrt {3}}{23}$, and the answer is $k + m + n + p = 60 + 48 + 3 + 23 = \\boxed{134}$.",
+    "groundtruth": "134",
     "sample_info": {
-      "dataset": "openai/gsm8k"
+      "dataset": "DigitalLearningGmbH/MATH-lighteval",
+      "level": "Level 5",
+      "type": "Geometry"
     }
   },
   {
-    "question": "Darnell has 1000 square feet of fabric that he's using to make mini flags. He makes square flags that are 4 feet by 4 feet, wide rectangular flags that are 5 feet by 3 feet, and tall rectangular flags that are 3 feet by 5 feet. He has already made 16 square flags, 20 wide flags, and 10 tall flags. How many square feet of fabric does he have left?\n",
-    "main_id": "ID3770",
+    "main_id": "ID1053",
     "split": "train",
-    "cot_answer": "The square flags use 16 square feet of fabric per flag because four times four equals <<4*4=16>>16\nThe wide flags each use 15 feet of fabric per flag because five times three equals <<5*3=15>>15\nThe tall flags each use 15 feet of fabric per flag because five times three equals <<5*3=15>>15\nHe has used 256 square feet for the square flags because 16 times 16 equals <<16*16=256>>256\nHe has used 300 square feet for the wide flags because 20 times 15 equals <<20*15=300>>300\nHe has used 150 square feet for the tall flags because ten times 15 equals 150.\nHe has used 706 square feet because 256 plus 300 plus 150 equals <<256+300+150=706>>706.\nHe has 294 square feet left because 1,000 minus 706 equals <<1000-706=294>>294\n#### 294",
-    "groundtruth": "294",
+    "question": "A math field day competition is held in a room with many tables, and there are 6 stools at each table. Each stool has 3 legs, and each table has 4 legs. If there is a total of 484 legs on all the tables and stools in the room, how many tables are in the room?\n",
+    "cot_answer": "Let $s$ be the number of stools in the room and $t$ be the number of tables. We are looking for the value of $t$. We can set up a system of equations to represent the given information, as follows:\n\n\\begin{align*}\ns &= 6t \\\\\n3s + 4t &= 484 \\\\\n\\end{align*}To solve for $t$, we need to eliminate $s$ from the equations above. Substitute the first equation into the second to eliminate $s$, to get $3(6t)+4t=484$, or $t=22$. Thus, there are $\\boxed{22}$ tables in the room.",
+    "groundtruth": "22",
     "sample_info": {
-      "dataset": "openai/gsm8k"
+      "dataset": "DigitalLearningGmbH/MATH-lighteval",
+      "level": "Level 2",
+      "type": "Algebra"
     }
   },
   {
-    "question": "A farmer planted 30 rows of tomatoes with 10 plants in each row. Each tomato plant yields 20 pieces of tomatoes. How many pieces of tomatoes can the farmer get from all his planted tomatoes?\n",
-    "main_id": "ID3497",
+    "main_id": "ID1515",
     "split": "train",
-    "cot_answer": "The farmer planted a total of 30 x 10 = <<30*10=300>>300 tomato plants.\nThus, the farmer can get 300 x 20 = <<300*20=6000>>6000 pieces of tomatoes.\n#### 6000",
-    "groundtruth": "6000",
+    "question": "Circle $O$ is located on the coordinate plane with center at $(2,3)$.  One endpoint of a diameter is at $(-1,-1)$.  What are the coordinates of the other endpoint of this diameter?  Express your answer as an ordered pair.\n",
+    "cot_answer": "[asy]\ndraw((-7,0)--(11,0),Arrows);\ndraw((0,-5)--(0,11),Arrows);\nlabel(\"$x$\",(12,0)); label(\"$y$\",(-1,11));\ndraw(Circle((2,3),5));\ndot((2,3)); dot((-1,-1));\nlabel(\"(2,3)\",(2,3),W);\nlabel(\"(-1,-1)\",(-1,-1),W);\ndraw((-1,-1)--(2,-1),dashed+red); draw((2,-1)--(2,3),dashed+blue);\ndraw((2,3)--(5,3),dashed+red); draw((5,3)--(5,7),dashed+blue);\ndot((5,7));\nlabel(\"(?,?)\",(5,7),E);\n[/asy]\n\nRefer to the above diagram.  Since the opposite ends of a diameter are symmetric with respect to the center of the circle, we must travel the same distance and direction from $(-1,-1)$ to $(2,3)$ as we do from $(2,3)$ to the other endpoint.  To go from $(-1,-1)$ to $(2,3)$ we run $3$ (left dashed red line) and rise $4$ (left dashed blue line), so our other endpoint has coordinates $(2+3,3+4)=\\boxed{(5,7)}$.",
+    "groundtruth": "(5,7)",
     "sample_info": {
-      "dataset": "openai/gsm8k"
+      "dataset": "DigitalLearningGmbH/MATH-lighteval",
+      "level": "Level 3",
+      "type": "Algebra"
     }
   },
   {
-    "question": "Lydia has 80 plants. 40% of her plants are flowering plants. Lydia wants to place a fourth of her flowering plants on the porch. If each flowering plant produces 5 flowers, how many flowers are there in total on the porch?\n",
-    "main_id": "ID5356",
+    "main_id": "ID6763",
     "split": "train",
-    "cot_answer": "Lydia has 80 * 0.40 = <<80*0.40=32>>32 flowering plants\nLydia places 32 / 4 = <<32/4=8>>8 of the flowering plants on the porch\nThere are 8 * 5 = <<8*5=40>>40 flowers on the porch\n#### 40",
-    "groundtruth": "40",
+    "question": "Find\n\\[\\begin{pmatrix} 1 & 1 \\\\ 0 & 1 \\end{pmatrix} \\begin{pmatrix} 1 & 3 \\\\ 0 & 1 \\end{pmatrix} \\begin{pmatrix} 1 & 5 \\\\ 0 & 1 \\end{pmatrix} \\dotsm \\begin{pmatrix} 1 & 99 \\\\ 0 & 1 \\end{pmatrix}.\\]\n",
+    "cot_answer": "More generally,\n\\[\\begin{pmatrix} 1 & a \\\\ 0 & 1 \\end{pmatrix} \\begin{pmatrix} 1 & b \\\\ 0 & 1 \\end{pmatrix} = \\begin{pmatrix} 1 & a + b \\\\ 0 & 1 \\end{pmatrix}.\\]Therefore,\n\\[\\begin{pmatrix} 1 & 1 \\\\ 0 & 1 \\end{pmatrix} \\begin{pmatrix} 1 & 3 \\\\ 0 & 1 \\end{pmatrix} \\begin{pmatrix} 1 & 5 \\\\ 0 & 1 \\end{pmatrix} \\dotsm \\begin{pmatrix} 1 & 99 \\\\ 0 & 1 \\end{pmatrix} = \\begin{pmatrix} 1 & 1 + 3 + 5 + \\dots + 99 \\\\ 0 & 1 \\end{pmatrix} = \\boxed{\\begin{pmatrix} 1 & 2500 \\\\ 0 & 1 \\end{pmatrix}}.\\]",
+    "groundtruth": "\\begin{pmatrix} 1 & 2500 \\\\ 0 & 1 \\end{pmatrix}",
     "sample_info": {
-      "dataset": "openai/gsm8k"
+      "dataset": "DigitalLearningGmbH/MATH-lighteval",
+      "level": "Level 3",
+      "type": "Precalculus"
     }
   },
   {
-    "question": "Sally sews 4 shirts on Monday, 3 shirts on Tuesday, and 2 shirts on Wednesday.  Each shirt has 5 buttons.  How many buttons does Sally need to sew all the shirts?\n",
-    "main_id": "ID6548",
+    "main_id": "ID3792",
     "split": "train",
-    "cot_answer": "Total number of shirts Sally sews is 4 + 3 + 2 = <<4+3+2=9>>9 shirts.\nThe total number of buttons she needs is 9 x 5 = <<9*5=45>>45 buttons.\n#### 45",
-    "groundtruth": "45",
+    "question": "Let $x,$ $y,$ and $z$ be positive real numbers such that $x + y + z = 1.$  Find the minimum value of\n\\[\\frac{x + y}{xyz}.\\]\n",
+    "cot_answer": "By the AM-HM inequality,\n\\[\\frac{x + y}{2} \\ge \\frac{2}{\\frac{1}{x} + \\frac{1}{y}} = \\frac{2xy}{x + y},\\]so $\\frac{x + y}{xy} \\ge \\frac{4}{x + y}.$  Hence,\n\\[\\frac{x + y}{xyz} \\ge \\frac{4}{(x + y)z}.\\]By the AM-GM inequality,\n\\[\\sqrt{(x + y)z} \\le \\frac{x + y + z}{2} = \\frac{1}{2},\\]so $(x + y)z \\le \\frac{1}{4}.$  Hence,\n\\[\\frac{4}{(x + y)z} \\ge 16.\\]Equality occurs when $x = y = \\frac{1}{4}$ and $z = \\frac{1}{2},$ so the minimum value is $\\boxed{16}$.",
+    "groundtruth": "16",
     "sample_info": {
-      "dataset": "openai/gsm8k"
+      "dataset": "DigitalLearningGmbH/MATH-lighteval",
+      "level": "Level 5",
+      "type": "Intermediate Algebra"
     }
   },
   {
-    "question": "Riku has 25 times more stickers than Kristoff. If Kristoff has 85 stickers, how many stickers does Riku have?\n",
-    "main_id": "ID283",
+    "main_id": "ID2327",
     "split": "train",
-    "cot_answer": "If Kristoff has 85 stickers, Riku has 25 * 85 stickers = <<85*25=2125>>2125 more stickers.\nThe total number of stickers Riku has is 2125 stickers + 85 stickers = <<2125+85=2210>>2210 stickers\n#### 2210",
-    "groundtruth": "2210",
+    "question": "Objects $A$ and $B$ move simultaneously in the coordinate plane via a sequence of steps, each of length one. Object $A$ starts at $(0,0)$ and each of its steps is either right or up, both equally likely. Object $B$ starts at $(5,7)$ and each of its steps is either left or down, both equally likely. Which of the following is closest to the probability that the objects meet?\n\nA. 0.10\n\nB. 0.15\n\nC. 0.20\n\nD. 0.25\n\nE. 0.30\n\n(Type the letter that corresponds to your answer.)\n",
+    "cot_answer": "Since there are twelve steps between $(0,0)$ and $(5,7)$, $A$ and $B$ can meet only after they have each moved six steps. The possible meeting places are $P_{0} = (0,6)$, $P_{1} = (1,5)$, $P_{2} = (2,4)$, $P_{3}=(3,3)$, $P_{4} = (4,2)$, and $P_{5} =\n(5,1)$. Let $a_{i}$ and $b_{i}$ denote the number of paths to $P_{i}$ from $(0,0)$ and $(5,7)$, respectively. Since $A$ has to take $i$ steps to the right and $B$ has to take $i+1$ steps down, the number of ways in which $A$ and $B$ can meet at $P_{i}$ is $$a_{i}\\cdot b_{i} = \\binom{6}{i} \\binom{6}{i+1}. $$Since $A$ and $B$ can each take $2^{6}$ paths in six steps, the probability that they meet  is \\begin{align*}\n&\\sum_{i = 0}^{5}\\displaystyle\\left ( \\frac{a_{i}}{2^{6}}\\displaystyle\\right)\\displaystyle\\left( \\frac{b_{i}}{2^{6}} \\displaystyle\\right) \\\\\n& \\qquad = \\frac{\\binom{6}{0}\\binom{6}{1} + \\binom{6}{1}\\binom{6}{2} + \\binom{6}{2}\\binom{6}{3}\n+ \\binom{6}{3}\\binom{6}{4}+ \\binom{6}{4}\\binom{6}{5} + \\binom{6}{5}\\binom{6}{6}}{2^{12}}\\\\\n& \\qquad = \\frac{99}{512} \\\\\n& \\qquad \\approx \\boxed{0.20}.\n\\end{align*}",
+    "groundtruth": "0.20",
     "sample_info": {
-      "dataset": "openai/gsm8k"
+      "dataset": "DigitalLearningGmbH/MATH-lighteval",
+      "level": "Level 5",
+      "type": "Counting & Probability"
     }
   },
   {
-    "question": "Susie and Britney each keep chickens, of two different breeds. Susie has 11 Rhode Island Reds and 6 Golden Comets. Britney has twice as many Rhode Island Reds as Susie, but only half as many Golden Comets. How many more chickens are in Britney's flock than in Susie's?\n",
-    "main_id": "ID1033",
+    "main_id": "ID7021",
     "split": "train",
-    "cot_answer": "Britney has 11*2=<<11*2=22>>22 Rhode Island Reds.\nShe has 6/2=<<6/2=3>>3 Golden Comets.\nShe has 22+3=<<22+3=25>>25 total.\nSusie has 11+6=<<11+6=17>>17 total.\nBritney has 25-17=<<25-17=8>>8 more.\n#### 8",
-    "groundtruth": "8",
+    "question": "Let $A,B,C$ be angles of a triangle, where angle $B$ is obtuse, and \\begin{align*}\n\\cos^2 A + \\cos^2 B + 2 \\sin A \\sin B \\cos C &= \\frac{15}{8} \\text{ and} \\\\\n\\cos^2 B + \\cos^2 C + 2 \\sin B \\sin C \\cos A &= \\frac{14}{9}.\n\\end{align*}There are positive integers $p$, $q$, $r$, and $s$ for which \\[ \\cos^2 C + \\cos^2 A + 2 \\sin C \\sin A \\cos B = \\frac{p-q\\sqrt{r}}{s}, \\]where $p+q$ and $s$ are relatively prime and $r$ is not divisible by the square of any prime.  Find $p+q+r+s$.\n",
+    "cot_answer": "From the equation $\\cos^2 A + \\cos^2 B + 2 \\sin A \\sin B \\cos C = \\frac{15}{8},$\n\\[\\sin^2 A + \\sin^2 B - 2 \\sin A \\sin B \\cos C = \\frac{1}{8}.\\]By the Extended Law of Sines, $\\sin A = \\frac{a}{2R}$ and $\\sin B = \\frac{b}{2R},$ so\n\\[a^2 + b^2 - 2ab \\cos C = \\frac{R^2}{2}.\\]By the Law of Cosines, this is $c^2 = \\frac{R^2}{2}.$  But $c = 2R \\sin C,$ so\n\\[\\sin^2 C = \\frac{1}{8}.\\]Since $B$ is obtuse, $C$ is acute, and $\\sin C = \\frac{\\sqrt{2}}{4}.$  We can compute that $\\cos C = \\frac{\\sqrt{14}}{4}.$\n\nThe same calculations on the second equation yield $\\sin A = \\frac{2}{3}$ and $\\cos A = \\frac{\\sqrt{5}}{3}.$  Then\n\\begin{align*}\n\\cos B &= \\cos (180^\\circ - A - C) \\\\\n&= -\\cos (A + C) \\\\\n&= -\\cos A \\cos C + \\sin A \\sin C \\\\\n&= -\\frac{\\sqrt{5}}{3} \\cdot \\frac{\\sqrt{14}}{4} + \\frac{2}{3} \\cdot \\frac{\\sqrt{2}}{4} \\\\\n&= \\frac{2 \\sqrt{2} - \\sqrt{70}}{12},\n\\end{align*}so\n\\begin{align*}\n\\cos^2 C + \\cos^2 A + 2 \\sin C \\sin A \\cos B &= \\frac{14}{16} + \\frac{5}{9} + 2 \\cdot \\frac{\\sqrt{2}}{4} \\cdot \\frac{2}{3} \\cdot \\frac{2 \\sqrt{2} - \\sqrt{70}}{12} \\\\\n&= \\frac{111 - 4 \\sqrt{35}}{72}.\n\\end{align*}The final answer is $111 + 4 + 35 + 72 = \\boxed{222}.$",
+    "groundtruth": "222",
     "sample_info": {
-      "dataset": "openai/gsm8k"
+      "dataset": "DigitalLearningGmbH/MATH-lighteval",
+      "level": "Level 4",
+      "type": "Precalculus"
     }
   },
   {
-    "question": "A person borrowed an amount of money for a year at an interest rate of 12%. If the total interest is $1500, what was the original borrowed amount?\n",
-    "main_id": "ID5108",
+    "main_id": "ID5686",
     "split": "train",
-    "cot_answer": "Let X be the price of the borrowed amount.\nThe interest is X*.12 = $1500.\nSo the borrowed amount is X = $1500/.12 = $<<1500/.12=12500>>12500.\n#### 12500",
-    "groundtruth": "12500",
+    "question": "Of the 100 students in the science club, 65 take mathematics, 43 take physics and 10 students take both mathematics and physics. How many science club students take neither mathematics nor physics?\n",
+    "cot_answer": "There are $65-10 = 55$ students taking only math, $43-10=33$ taking only physics, and 10 taking both. $100-55-33-10= \\boxed{2}$ students take neither.",
+    "groundtruth": "2",
     "sample_info": {
-      "dataset": "openai/gsm8k"
+      "dataset": "DigitalLearningGmbH/MATH-lighteval",
+      "level": "Level 2",
+      "type": "Prealgebra"
     }
   },
   {
-    "question": "A couple agreed to split their expenses equally, including the salary of their house help. While doing her job, the house help had an accident; thus, she underwent a medical procedure which cost her $128. The couple decided to pay half of the medical expenses and the other half will be deducted from her $160 salary. If the husband paid for the entire half of the hospital bill, how much does he still need to pay so that they split the expenses for the house help equally?\n",
-    "main_id": "ID5318",
+    "main_id": "ID4587",
     "split": "train",
-    "cot_answer": "The amount that the couple would cover for the hospital bill is $128/2 = $<<128/2=64>>64.\nThe couple's total expenses (salary and hospital bill) is $160 + $64 = $<<160+64=224>>224.\nSo each of them should give $224/2 = $<<224/2=112>>112 in total.\nSince the husband paid the entire half of the hospital bill already ($64), he still needs to pay $112 - $64 = $<<48=48>>48.\n#### 48",
-    "groundtruth": "48",
+    "question": "Find the last three digits of $9^{105}.$\n",
+    "cot_answer": "We can write $9^{105} = (10 - 1)^{105}.$  Then by the Binomial Theorem,\n\\[(10 - 1)^{105} = 10^{105} - \\binom{105}{1} 10^{104} + \\binom{105}{2} 10^{103} - \\dots + \\binom{105}{102} 10^3 - \\binom{105}{103} 10^2 + \\binom{105}{104} 10 - 1.\\]All the terms up to $\\binom{105}{102} 10^3$ are divisible by $10^3,$ so for the purpose of finding the last three digits, we can ignore them.  We are left with\n\\begin{align*}\n-\\binom{105}{103} 10^2 + \\binom{105}{104} 10 - 1 &= -\\binom{105}{2} 10^2 + \\binom{105}{1} 10 - 1 \\\\\n&= -\\frac{105 \\cdot 104}{2} \\cdot 10^2 + 105 \\cdot 10 - 1 \\\\\n&= -546000 + 1050 - 1 \\\\\n&= -546000 + 1049.\n\\end{align*}Hence, the last three digits are $\\boxed{049}.$",
+    "groundtruth": "049",
     "sample_info": {
-      "dataset": "openai/gsm8k"
+      "dataset": "DigitalLearningGmbH/MATH-lighteval",
+      "level": "Level 3",
+      "type": "Intermediate Algebra"
     }
   }
 ]

@@ -3,10 +3,60 @@
 Implements multi-scale residual quantization with f_hat accumulation.
 This is the only custom component - encoder/decoder use HuggingFace.
 
-Key Formula:
-    f_hat = Σ_k upsample(φ_k(codebook_lookup(downsample(z, scale_k))))
+Quantization Basics:
+    Vector Quantization maps continuous vectors to discrete codebook entries:
+    z [B, L, D] -> find nearest codebook vector -> indices [B, L]
 
-Scales: [1, 2, 4, 8, 16, 32] -> coarse to fine
+    Each position selects one of V codebook vectors (V = codebook_size).
+    This creates a discrete bottleneck for learning compressed representations.
+
+Single-Scale Quantization:
+    z [B, L, D] -> codebook_lookup -> quantized [B, L, D]
+
+    Problem: One scale captures one level of detail only.
+    Fine details and coarse structure compete for the same codebook.
+
+Multi-Scale Quantization (VAR's Innovation):
+    Process at multiple scales, accumulate residuals:
+
+    Scale 1 (coarsest):  z -> down(1)  -> [B, 1, D]  -> quantize -> up(L) -> f_hat
+    Scale 2:             residual -> down(2)  -> [B, 2, D]  -> quantize -> up(L) -> f_hat +=
+    Scale 4:             residual -> down(4)  -> [B, 4, D]  -> quantize -> up(L) -> f_hat +=
+    ...                  ...
+    Scale L (finest):    residual -> down(L)  -> [B, L, D]  -> quantize -> up(L) -> f_hat +=
+
+    Each scale captures different granularity:
+    - Scale 1: Global structure (1 vector represents entire sequence)
+    - Scale 2-8: Coarse patterns
+    - Scale 16-L: Fine details
+
+Key Formula:
+    f_hat = Σ_k upsample(φ_k(codebook_lookup(downsample(z - f_hat_prev, scale_k))))
+
+Flow Diagram:
+    ┌─────────────────────┐
+    │ [B, L, D] input z   │
+    └────────┬────────────┘
+             │ for each scale k ∈ [1, 2, 4, 8, 16, 32]
+             ▼
+    ┌─────────────────────┐
+    │ downsample(z, k)    │ -> [B, k, D]
+    │ compute residual    │ -> [B, k, D]  (z_down - f_hat_down)
+    │ codebook lookup     │ -> indices [B, k]
+    │ apply φ_k           │ -> [B, k, D]
+    │ upsample to L       │ -> [B, L, D]
+    │ accumulate f_hat    │ -> f_hat += upsampled
+    └────────┬────────────┘
+             │
+             ▼
+    ┌─────────────────────┐
+    │ [B, L, D] f_hat     │ + loss + indices_per_scale
+    └─────────────────────┘
+
+Why Multi-Scale?
+    1. Hierarchical: Coarse scales capture global, fine scales capture details
+    2. Efficient: Fewer codebook entries needed per scale
+    3. Generative: Can generate coarse-to-fine (like VAR's next-scale prediction)
 """
 
 from typing import Optional, Dict, Any, Tuple, List

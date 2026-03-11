@@ -1,10 +1,70 @@
 """Text Encoder using HuggingFace models.
 
-Directly uses pretrained HuggingFace encoders (BERT, RoBERTa, etc.)
-for encoding text sequences.
+Directly uses pretrained HuggingFace encoders for encoding text sequences
+into continuous representations.
 
-Input:  List[str] texts OR [B, L] input_ids
-Output: [B, L, D] hidden_states
+Available Models:
+    Encoder-only (bidirectional, recommended for encoding):
+        - BERT: bert-base-uncased (768), bert-large-uncased (1024)
+        - RoBERTa: roberta-base (768), roberta-large (1024)
+        - ALBERT: albert-base-v2 (768), albert-large-v2 (1024)
+        - DistilBERT: distilbert-base-uncased (768) - faster, smaller
+        - DeBERTa: microsoft/deberta-v3-base (768) - better performance
+
+    Encoder-Decoder (use encoder part):
+        - T5: t5-small (512), t5-base (768), t5-large (1024)
+        - BART: facebook/bart-base (768), facebook/bart-large (1024)
+
+    Decoder-only (causal, use hidden states):
+        - GPT2: gpt2 (768), gpt2-medium (1024), gpt2-large (1280)
+
+Model Selection Principles:
+    1. Task alignment: Use bidirectional encoders (BERT/RoBERTa) for understanding,
+       causal decoders (GPT2) only if generation context is needed
+    2. Dimension matching: Ensure hidden_dim aligns with decoder's input_dim,
+       or use projection layer to adapt
+    3. Efficiency: DistilBERT for speed, BERT-base for balance, large models
+       for best quality
+    4. Domain: RoBERTa for general NLP, DeBERTa for SOTA performance
+
+Pipeline:
+    1. Input: List[str] texts OR [B, L] input_ids
+    2. Tokenize (if texts): texts -> input_ids [B, L], attention_mask [B, L]
+    3. HuggingFace Encoder: input_ids [B, L] -> hidden [B, L, hidden_dim]
+    4. Projection (optional): hidden [B, L, hidden_dim] -> output [B, L, output_dim]
+    5. Output: [B, L, output_dim] continuous representations
+
+    Flow Diagram:
+    ┌─────────────────┐
+    │ List[str] texts │
+    └────────┬────────┘
+             │ tokenize
+             ▼
+    ┌─────────────────┐
+    │ [B, L] input_ids│
+    └────────┬────────┘
+             │ HuggingFace Encoder
+             ▼
+    ┌─────────────────────┐
+    │ [B, L, hidden_dim]  │
+    └────────┬────────────┘
+             │ projection (optional)
+             ▼
+    ┌─────────────────────┐
+    │ [B, L, output_dim]  │
+    └─────────────────────┘
+
+Dimensions:
+    B: batch size
+    L: sequence length (max_length after padding/truncation)
+    hidden_dim: HuggingFace model's hidden size (e.g., BERT-base: 768)
+    output_dim: final output dimension (= hidden_dim if no projection)
+
+Example:
+    encoder = build_encoder(config['model']['encoder'])
+    # Input: 2 texts, max_length=128, BERT hidden=768
+    output = encoder(inputs=["Hello world", "Test"])
+    # Output: [2, 128, 768]
 """
 
 from typing import Optional, Dict, Any, List, Union
@@ -159,9 +219,14 @@ def build_encoder(config: Dict[str, Any]) -> TextEncoder:
 
     # Logging
     freeze_str = "frozen" if config["freeze"] else "trainable"
-    if encoder.proj is not None:
-        logger.info(f"[Encoder] {encoder.model_name} ({freeze_str}) - h({encoder.hidden_dim}) -> proj -> o({encoder.output_dim})")
-    else:
-        logger.info(f"[Encoder] {encoder.model_name} ({freeze_str}) - h({encoder.hidden_dim}) -> o({encoder.output_dim})")
+    proj_str = " -> proj" if encoder.proj else ""
+    logger.info(
+        "[Encoder] %s (%s) - h(%d)%s -> o(%d)",
+        encoder.model_name,
+        freeze_str,
+        encoder.hidden_dim,
+        proj_str,
+        encoder.output_dim,
+    )
 
     return encoder

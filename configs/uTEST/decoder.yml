@@ -1,14 +1,14 @@
 # =============================================================================
-# Encoder Unit Test Configuration
+# Decoder Unit Test Configuration
 # =============================================================================
-# Used by: examples/uTEST/test_encoder.py
-# Only encoder and data sections are used; others are null.
+# Used by: examples/uTEST/test_decoder.py
+# Tests encoder -> decoder pipeline (no quantizer)
 
 # =============================================================================
 # Data Configuration
 # =============================================================================
 data:
-  data_name: math500
+  data_name: math
   data_path: ./data
   split: train
 
@@ -33,7 +33,10 @@ model:
     max_length: 128
 
   # --- HuggingFace Decoder ---
-  decoder: null
+  decoder:
+    model_name: gpt2
+    pretrained: true
+    freeze: false
 
   # --- Multi-Scale Quantizer ---
   quantizer: null
