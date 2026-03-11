@@ -31,7 +31,7 @@ model:
     # No projection, use BERT hidden_dim directly (768)
     output_dim: null
     # Sequence length L
-    max_length: 128
+    max_length: 512
 
   # --- HuggingFace Decoder ---
   decoder:

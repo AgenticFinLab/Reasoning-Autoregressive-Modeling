@@ -35,7 +35,7 @@ model:
     # Project to match quantizer codebook_dim (256)
     output_dim: 256
     # Sequence length L (must be >= max(scale_lengths))
-    max_length: 64
+    max_length: 512
 
   # --- HuggingFace Decoder ---
   decoder:
@@ -53,7 +53,7 @@ model:
     # Must match encoder output_dim
     codebook_dim: 256
     # Multi-scale lengths (max should <= max_length)
-    scale_lengths: [1, 2, 4, 8, 16, 32, 64]
+    scale_lengths: [1, 2, 4, 8, 16, 32]
     # Commitment loss weight β
     beta: 0.25
     # Phi residual ratio
