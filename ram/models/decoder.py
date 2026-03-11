@@ -89,10 +89,11 @@ class TextDecoder(nn.Module):
     """Text Decoder using HuggingFace pretrained model.
 
     Args:
-        model_name: HuggingFace model name (e.g., 'gpt2')
-        pretrained: Whether to load pretrained weights
-        freeze: Whether to freeze decoder weights
-        input_dim: Input dimension (for projection to model dim)
+        config: Dict with required keys:
+            - model_name: HuggingFace model name (e.g., 'gpt2')
+            - pretrained: Whether to load pretrained weights
+            - freeze: Whether to freeze decoder weights
+        input_dim: Input dimension from encoder/quantizer (required)
 
     Supported models:
         - GPT2: gpt2, gpt2-medium, gpt2-large
@@ -100,29 +101,31 @@ class TextDecoder(nn.Module):
         - LLaMA: meta-llama/Llama-2-7b (if available)
     """
 
-    def __init__(
-        self,
-        model_name: str = "gpt2",
-        pretrained: bool = True,
-        freeze: bool = False,
-        input_dim: Optional[int] = None,
-    ):
+    def __init__(self, config: Dict[str, Any], input_dim: int):
         super().__init__()
+
+        # HuggingFace model identifier (e.g., 'gpt2', 'facebook/opt-125m')
+        model_name = config["model_name"]
+        # Whether to load pretrained weights (True) or random init (False)
+        pretrained = config["pretrained"]
+        # Whether to freeze decoder weights during training
+        freeze = config["freeze"]
+
         self.model_name = model_name
 
         # Load HuggingFace model directly
         if pretrained:
             self.decoder = AutoModelForCausalLM.from_pretrained(model_name)
         else:
-            config = AutoConfig.from_pretrained(model_name)
-            self.decoder = AutoModelForCausalLM.from_config(config)
+            hf_config = AutoConfig.from_pretrained(model_name)
+            self.decoder = AutoModelForCausalLM.from_config(hf_config)
 
         # Get dimensions from model config
         self.hidden_dim = self.decoder.config.hidden_size
         self.vocab_size = self.decoder.config.vocab_size
 
         # Input projection if dimensions don't match
-        if input_dim is not None and input_dim != self.hidden_dim:
+        if input_dim != self.hidden_dim:
             self.input_proj = nn.Linear(input_dim, self.hidden_dim)
         else:
             self.input_proj = None
@@ -186,12 +189,7 @@ def build_decoder(config: Dict[str, Any], input_dim: int) -> TextDecoder:
         config: Config dict
         input_dim: Input dimension from encoder/quantizer (required)
     """
-    decoder = TextDecoder(
-        model_name=config["model_name"],
-        pretrained=config["pretrained"],
-        freeze=config["freeze"],
-        input_dim=input_dim,
-    )
+    decoder = TextDecoder(config, input_dim)
 
     # Logging
     freeze_str = "frozen" if config["freeze"] else "trainable"

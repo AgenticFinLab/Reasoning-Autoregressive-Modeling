@@ -2,15 +2,15 @@
 # Encoder Unit Test Configuration
 # =============================================================================
 # Used by: examples/uTEST/test_encoder.py
-# Only encoder and data sections are used; others are null.
+# Tests: Encoder only (no decoder, no quantizer)
 
 # =============================================================================
 # Data Configuration
 # =============================================================================
 data:
   data_name: math500
-  data_path: ./data
-  split: train
+  data_path: ./EXPERIMENT/data
+  split: test
 
 # =============================================================================
 # Environment Configuration
@@ -18,7 +18,6 @@ data:
 environment:
   seed: 42
   device: auto
-  num_workers: 4
 
 # =============================================================================
 # Model Architecture
@@ -29,7 +28,9 @@ model:
     model_name: bert-base-uncased
     pretrained: true
     freeze: false
+    # No projection, use BERT hidden_dim directly (768)
     output_dim: null
+    # Sequence length L
     max_length: 128
 
   # --- HuggingFace Decoder ---
@@ -45,13 +46,8 @@ model:
 # Training Configuration
 # =============================================================================
 train:
+  # Test only, batch_size used for inference
   batch_size: 2
-  learning_rate: null
-  weight_decay: null
-  num_epochs: null
-  warmup_steps: null
-  gradient_clip: null
-  max_seq_len: 128
 
 # =============================================================================
 # Logging Configuration

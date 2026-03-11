@@ -18,7 +18,7 @@ Pipeline:
     ┌─────────────────────┐
     │ [B, L, D] hidden    │  [2, 32, 256] encoder output
     └────────┬────────────┘
-             │ Quantizer.quantize()
+             │ Quantizer.forward()
              │
              │  f_rest = z.clone()               # residual starts as original
              │  f_hat = zeros([B, L, D])          # accumulator starts as zeros
@@ -154,7 +154,7 @@ def test_quantizer(config: dict):
     print("[3] Multi-scale Quantization")
 
     # Forward pass
-    f_hat, loss, indices_per_scale = quantizer.quantize(hidden)
+    f_hat, loss, indices_per_scale = quantizer(hidden)
 
     print(f"    Input:  [{hidden.shape[0]}, {hidden.shape[1]}, {hidden.shape[2]}]")
     print(f"    f_hat:  [{f_hat.shape[0]}, {f_hat.shape[1]}, {f_hat.shape[2]}]")

@@ -17,46 +17,69 @@ Single-Scale Quantization:
     Fine details and coarse structure compete for the same codebook.
 
 Multi-Scale Quantization (VAR's Innovation):
-    Process at multiple scales, accumulate residuals:
+    KEY INSIGHT: Maintain f_rest (residual) at FULL resolution L.
 
-    Scale 1 (coarsest):  z -> down(1)  -> [B, 1, D]  -> quantize -> up(L) -> f_hat
-    Scale 2:             residual -> down(2)  -> [B, 2, D]  -> quantize -> up(L) -> f_hat +=
-    Scale 4:             residual -> down(4)  -> [B, 4, D]  -> quantize -> up(L) -> f_hat +=
-    ...                  ...
-    Scale L (finest):    residual -> down(L)  -> [B, L, D]  -> quantize -> up(L) -> f_hat +=
+    Initialize:
+        f_rest = z.clone()           # [B, L, D] residual starts as z
+        f_hat = zeros([B, L, D])     # [B, L, D] accumulator starts as zeros
+
+    For each scale k ∈ [1, 2, 4, 8, 16, 32]:
+        rest_down = downsample(f_rest, k)   # [B, k, D] downsample residual
+        indices = codebook_lookup(rest_down) # [B, k] find nearest
+        h_k = φ_k(codebook[indices])         # [B, k, D] apply phi
+        h_k_up = upsample(h_k, L)            # [B, L, D] upsample to full
+        f_hat = f_hat + h_k_up               # [B, L, D] accumulate
+        f_rest = f_rest - h_k_up             # [B, L, D] update residual
+
+    After loop:
+        VQ Loss = β*||f_hat - z||² + ||f_hat - z||²
+        STE: f_hat = (f_hat.detach() - z_no_grad) + z
 
     Each scale captures different granularity:
     - Scale 1: Global structure (1 vector represents entire sequence)
     - Scale 2-8: Coarse patterns
     - Scale 16-L: Fine details
 
-Key Formula:
-    f_hat = Σ_k upsample(φ_k(codebook_lookup(downsample(z - f_hat_prev, scale_k))))
+Key Formula (corrected):
+    f_hat = Σ_k upsample(φ_k(codebook_lookup(downsample(f_rest, scale_k))))
+    where f_rest is updated each iteration: f_rest -= h_k_up
 
 Flow Diagram:
-    ┌─────────────────────┐
-    │ [B, L, D] input z   │
-    └────────┬────────────┘
-             │ for each scale k ∈ [1, 2, 4, 8, 16, 32]
-             ▼
-    ┌─────────────────────┐
-    │ downsample(z, k)    │ -> [B, k, D]
-    │ compute residual    │ -> [B, k, D]  (z_down - f_hat_down)
-    │ codebook lookup     │ -> indices [B, k]
-    │ apply φ_k           │ -> [B, k, D]
-    │ upsample to L       │ -> [B, L, D]
-    │ accumulate f_hat    │ -> f_hat += upsampled
-    └────────┬────────────┘
-             │
-             ▼
-    ┌─────────────────────┐
-    │ [B, L, D] f_hat     │ + loss + indices_per_scale
-    └─────────────────────┘
+    ┌──────────────────────────────────────────────────────┐
+    │ Initialize:                                              │
+    │   f_rest = z.clone()    [B, L, D]                        │
+    │   f_hat = zeros         [B, L, D]                        │
+    └────────────────────────┬─────────────────────────────┘
+                             │
+                             │ for each scale k ∈ [1, 2, 4, 8, 16, 32]
+                             ▼
+    ┌──────────────────────────────────────────────────────┐
+    │ rest_down = downsample(f_rest, k)  -> [B, k, D]          │
+    │ indices = codebook_lookup(rest_down) -> [B, k]           │
+    │ h_k = φ_k(codebook[indices])         -> [B, k, D]        │
+    │ h_k_up = upsample(h_k, L)            -> [B, L, D]        │
+    │ f_hat = f_hat + h_k_up               -> [B, L, D]        │
+    │ f_rest = f_rest - h_k_up             -> [B, L, D]        │
+    └────────────────────────┬─────────────────────────────┘
+                             │
+                             ▼
+    ┌──────────────────────────────────────────────────────┐
+    │ VQ Loss = β*||f_hat - z||² + ||f_hat - z||²              │
+    │ STE: f_hat = (f_hat.detach() - z_no_grad) + z           │
+    └────────────────────────┬─────────────────────────────┘
+                             │
+                             ▼
+    ┌──────────────────────────────────────────────────────┐
+    │ Output:                                                  │
+    │   f_hat [B, L, D], vq_loss, indices_per_scale           │
+    └──────────────────────────────────────────────────────┘
 
 Why Multi-Scale?
     1. Hierarchical: Coarse scales capture global, fine scales capture details
     2. Efficient: Fewer codebook entries needed per scale
     3. Generative: Can generate coarse-to-fine (like VAR's next-scale prediction)
+
+Reference: third-part/VAR-main/models/quant.py lines 58-98
 """
 
 from typing import Optional, Dict, Any, Tuple, List
@@ -73,13 +96,14 @@ class MultiScaleQuantizer(nn.Module):
     """Multi-Scale Vector Quantizer.
 
     Args:
-        codebook_size: Number of codebook entries V
-        codebook_dim: Dimension of codebook vectors C
-        scale_lengths: List of sequence lengths [1, 2, 4, ..., L_max]
-        beta: Commitment loss weight
-        quant_resi: Residual ratio for phi layers
-        share_quant_resi: Number of scales sharing phi layer
-        scale_ops: ScaleOps instance for down/upsampling (default: AvgPoolScaleOps)
+        config: Dict with required keys:
+            - codebook_size: Number of codebook entries V
+            - codebook_dim: Dimension of codebook vectors C
+            - scale_lengths: List of sequence lengths [1, 2, 4, ..., L_max]
+            - beta: Commitment loss weight
+            - quant_resi: Residual ratio for phi layers
+            - share_quant_resi: Number of scales sharing phi layer
+        scale_ops: ScaleOps instance for down/upsampling (optional, default: AvgPoolScaleOps)
 
     Input:  [B, L, C] latent features
     Output: [B, L, C] f_hat, loss, indices_per_scale
@@ -87,15 +111,23 @@ class MultiScaleQuantizer(nn.Module):
 
     def __init__(
         self,
-        codebook_size: int = 4096,
-        codebook_dim: int = 256,
-        scale_lengths: List[int] = [1, 2, 4, 8, 16, 32],
-        beta: float = 0.25,
-        quant_resi: float = 0.5,
-        share_quant_resi: int = 4,
+        config: Dict[str, Any],
         scale_ops: Optional[ScaleOps] = None,
     ):
         super().__init__()
+
+        # Number of codebook entries V (vocabulary size for quantization)
+        codebook_size = config["codebook_size"]
+        # Dimension of codebook vectors C (must match encoder output_dim)
+        codebook_dim = config["codebook_dim"]
+        # List of scale lengths [1, 2, 4, ...] for multi-scale quantization
+        scale_lengths = config["scale_lengths"]
+        # Commitment loss weight β in VQ loss: β*||f_hat - z||²
+        beta = config["beta"]
+        # Residual mixing ratio for phi layers: h = phi(q)*resi + q*(1-resi)
+        quant_resi = config["quant_resi"]
+        # Number of scales sharing the same phi layer (0 = all independent)
+        share_quant_resi = config["share_quant_resi"]
 
         self.codebook_size = codebook_size
         self.codebook_dim = codebook_dim
@@ -138,7 +170,7 @@ class MultiScaleQuantizer(nn.Module):
         idx = scale_idx if self.phi_shared is None else scale_idx - self.num_shared
         return self.phi_independent[idx]
 
-    def quantize(
+    def forward(
         self,
         z: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor, List[torch.Tensor]]:
@@ -154,7 +186,7 @@ class MultiScaleQuantizer(nn.Module):
 
         Returns:
             f_hat: [B, L, C] accumulated quantized features
-            loss: Scalar VQ loss = β*||f_hat - z||² + ||f_hat - z||²
+            vq_loss: Scalar VQ loss = β*||f_hat - z||² + ||f_hat - z||²
             indices_per_scale: List of [B, l_k] indices, one per scale
 
         Dimensions:
@@ -289,12 +321,4 @@ def build_quantizer(config: Dict[str, Any]) -> MultiScaleQuantizer:
     if "scale_ops" in config:
         scale_ops = build_scale_ops(config["scale_ops"])
 
-    return MultiScaleQuantizer(
-        codebook_size=config["codebook_size"],
-        codebook_dim=config["codebook_dim"],
-        scale_lengths=config["scale_lengths"],
-        beta=config["beta"],
-        quant_resi=config["quant_resi"],
-        share_quant_resi=config["share_quant_resi"],
-        scale_ops=scale_ops,
-    )
+    return MultiScaleQuantizer(config, scale_ops=scale_ops)

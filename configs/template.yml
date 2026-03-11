@@ -7,9 +7,10 @@
 # =============================================================================
 # Data Configuration
 # =============================================================================
+# MANDATORY: data_path MUST be ./EXPERIMENT/data (shared across all runs)
 data:
   data_name: null              # Dataset name: math, gsm8k, math500, etc.
-  data_path: null              # Cache path
+  data_path: null              # MUST be ./EXPERIMENT/data
   split: null                  # train, test, validation
 
 # =============================================================================
@@ -64,10 +65,13 @@ train:
 # =============================================================================
 # Logging Configuration
 # =============================================================================
+# MANDATORY: All paths MUST follow this pattern:
+#   ./EXPERIMENT/{parent_folder}-{config_name}/
+# Example: configs/uTEST/ed_train.yml -> ./EXPERIMENT/uTEST-ed_train/
 logging:
-  output_dir: null
-  checkpoint_dir: null
-  log_dir: null
+  output_dir: null             # MUST be ./EXPERIMENT/{parent}-{name}
+  checkpoint_dir: null         # MUST be ./EXPERIMENT/{parent}-{name}/checkpoints
+  log_dir: null                # MUST be ./EXPERIMENT/{parent}-{name}/logs
   log_interval: null
   save_interval: null
   eval_interval: null

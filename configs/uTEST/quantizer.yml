@@ -9,7 +9,7 @@
 # =============================================================================
 data:
   data_name: math
-  data_path: ./data
+  data_path: ./EXPERIMENT/data
   split: train
 
 # =============================================================================
@@ -18,7 +18,6 @@ data:
 environment:
   seed: 42
   device: auto
-  num_workers: 4
 
 # =============================================================================
 # Model Architecture
@@ -29,35 +28,33 @@ model:
     model_name: bert-base-uncased
     pretrained: true
     freeze: false
-    output_dim: 256  # Project to match quantizer codebook_dim
-    max_length: 32   # Short for fast testing
+    # Project to match quantizer codebook_dim
+    output_dim: 256
+    # Sequence length L (tokenizer padding/truncation)
+    max_length: 32
 
   # --- HuggingFace Decoder ---
-  decoder: null  # Not used in quantizer test
+  decoder: null
 
   # --- Multi-Scale Quantizer ---
   quantizer:
     codebook_size: 1024
     codebook_dim: 256
+    # max(scale_lengths) should <= max_length
     scale_lengths: [1, 2, 4, 8, 16, 32]
     beta: 0.25
     quant_resi: 0.5
     share_quant_resi: 4
 
   # --- Latent dimension ---
-  latent_dim: 256
+  latent_dim: null
 
 # =============================================================================
 # Training Configuration
 # =============================================================================
 train:
+  # Test only, batch_size used for inference
   batch_size: 2
-  learning_rate: 1.0e-4
-  weight_decay: 0.01
-  num_epochs: 10
-  warmup_steps: 100
-  gradient_clip: 1.0
-  max_seq_len: 32
 
 # =============================================================================
 # Logging Configuration

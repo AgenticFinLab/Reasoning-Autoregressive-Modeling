@@ -82,11 +82,12 @@ class TextEncoder(nn.Module):
     """Text Encoder using HuggingFace pretrained model.
 
     Args:
-        model_name: HuggingFace model name (e.g., 'bert-base-uncased')
-        pretrained: Whether to load pretrained weights
-        freeze: Whether to freeze encoder weights
-        output_dim: If set, project to this dimension
-        max_length: Max sequence length for tokenization
+        config: Dict with required keys:
+            - model_name: HuggingFace model name (e.g., 'bert-base-uncased')
+            - pretrained: Whether to load pretrained weights
+            - freeze: Whether to freeze encoder weights
+            - output_dim: If set, project to this dimension (null for no projection)
+            - max_length: Max sequence length for tokenization
 
     Supported models:
         - BERT: bert-base-uncased, bert-large-uncased
@@ -95,15 +96,20 @@ class TextEncoder(nn.Module):
         - T5: t5-small, t5-base (encoder only)
     """
 
-    def __init__(
-        self,
-        model_name: str = "bert-base-uncased",
-        pretrained: bool = True,
-        freeze: bool = False,
-        output_dim: Optional[int] = None,
-        max_length: int = 512,
-    ):
+    def __init__(self, config: Dict[str, Any]):
         super().__init__()
+
+        # HuggingFace model identifier (e.g., 'bert-base-uncased', 'roberta-base')
+        model_name = config["model_name"]
+        # Whether to load pretrained weights (True) or random init (False)
+        pretrained = config["pretrained"]
+        # Whether to freeze encoder weights during training
+        freeze = config["freeze"]
+        # Output dimension after projection (null = use model's hidden_dim)
+        output_dim = config["output_dim"]
+        # Max sequence length for tokenization (padding/truncation)
+        max_length = config["max_length"]
+
         self.model_name = model_name
         self.max_length = max_length
 
@@ -114,8 +120,8 @@ class TextEncoder(nn.Module):
         if pretrained:
             self.encoder = AutoModel.from_pretrained(model_name)
         else:
-            config = AutoConfig.from_pretrained(model_name)
-            self.encoder = AutoModel.from_config(config)
+            hf_config = AutoConfig.from_pretrained(model_name)
+            self.encoder = AutoModel.from_config(hf_config)
 
         # Get hidden dimension from model config
         self.hidden_dim = self.encoder.config.hidden_size
@@ -217,13 +223,7 @@ def build_encoder(config: Dict[str, Any]) -> TextEncoder:
         - output_dim: int or null
         - max_length: int
     """
-    encoder = TextEncoder(
-        model_name=config["model_name"],
-        pretrained=config["pretrained"],
-        freeze=config["freeze"],
-        output_dim=config["output_dim"],
-        max_length=config["max_length"],
-    )
+    encoder = TextEncoder(config)
 
     # Logging
     freeze_str = "frozen" if config["freeze"] else "trainable"

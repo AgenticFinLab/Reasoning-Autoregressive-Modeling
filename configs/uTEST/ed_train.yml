@@ -1,8 +1,9 @@
 # =============================================================================
-# Decoder Unit Test Configuration
+# Encoder-Decoder Training Configuration
 # =============================================================================
-# Used by: examples/uTEST/test_decoder.py
-# Tests: Encoder -> Decoder pipeline (no quantizer)
+# Used by: examples/uTEST/test_ed_train.py
+# Task: Simple text reconstruction (Encoder -> Decoder)
+# Pipeline: texts -> Encoder -> [B, L, D] -> Decoder -> [B, L, V] -> loss
 
 # =============================================================================
 # Data Configuration
@@ -25,18 +26,24 @@ environment:
 model:
   # --- HuggingFace Encoder ---
   encoder:
+    # BERT-base: bidirectional encoder, hidden_dim=768
     model_name: bert-base-uncased
+    # Load pretrained weights for better initialization
     pretrained: true
+    # Train encoder (unfrozen)
     freeze: false
-    # No projection, use BERT hidden_dim directly (768)
+    # No projection, use BERT hidden_dim directly (768 = GPT2 hidden_dim)
     output_dim: null
     # Sequence length L
-    max_length: 128
+    max_length: 64
 
   # --- HuggingFace Decoder ---
   decoder:
+    # GPT2: causal decoder, hidden_dim=768, vocab_size=50257
     model_name: gpt2
+    # Load pretrained weights for better initialization
     pretrained: true
+    # Train decoder (unfrozen)
     freeze: false
 
   # --- Multi-Scale Quantizer ---
@@ -49,10 +56,30 @@ model:
 # Training Configuration
 # =============================================================================
 train:
-  # Test only, batch_size used for inference
-  batch_size: 2
+  # Small batch for testing
+  batch_size: 4
+  # Conservative learning rate for fine-tuning pretrained models
+  learning_rate: 5.0e-5
+  # L2 regularization
+  weight_decay: 0.01
+  # Number of training epochs
+  num_epochs: 3
+  # Warmup steps for learning rate scheduler
+  warmup_steps: 100
+  # Gradient clipping threshold
+  gradient_clip: 1.0
 
 # =============================================================================
 # Logging Configuration
 # =============================================================================
-logging: null
+logging:
+  output_dir: ./EXPERIMENT/uTEST-ed_train
+  checkpoint_dir: ./EXPERIMENT/uTEST-ed_train/checkpoints
+  log_dir: ./EXPERIMENT/uTEST-ed_train/logs
+  # Log every N steps
+  log_interval: 10
+  save_interval: null
+  eval_interval: null
+  log_level: INFO
+  use_wandb: false
+  wandb_project: null
