@@ -35,7 +35,7 @@ model:
     # No projection, use BERT hidden_dim directly (768 = GPT2 hidden_dim)
     output_dim: null
     # Sequence length L
-    max_length: 64
+    max_length: 512
 
   # --- HuggingFace Decoder ---
   decoder:
@@ -57,7 +57,7 @@ model:
 # =============================================================================
 train:
   # Small batch for testing
-  batch_size: 4
+  batch_size: 10
   # Conservative learning rate for fine-tuning pretrained models
   learning_rate: 5.0e-5
   # L2 regularization

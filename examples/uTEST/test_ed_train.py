@@ -60,6 +60,9 @@ Restoration (inference):
 """
 
 import argparse
+import json
+from pathlib import Path
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -69,10 +72,11 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from lmbase.dataset import registry
+from transformers import AutoTokenizer
 
 from ram.models.encoder import build_encoder
 from ram.models.decoder import build_decoder
-from ram.utils import load_config
+from ram.utils import load_config, setup_environment
 
 
 def collate_fn(batch):
@@ -86,6 +90,68 @@ def collate_fn(batch):
         else:
             texts.append(str(sample))
     return texts
+
+
+def decode_logits_to_text(
+    logits: torch.Tensor,
+    tokenizer,
+    original_texts: list = None,
+) -> dict:
+    """Decode logits to text and compare with original.
+
+    Restoration procedure:
+        logits [B, L, V=50257] -> argmax(dim=-1) -> pred_ids [B, L]
+        pred_ids [B, L] -> tokenizer.decode() -> List[str] texts
+
+        V=50257 is GPT2's vocabulary size:
+        - Each position has 50257 logits (one per token)
+        - argmax over dim=-1 selects the most likely token ID
+        - tokenizer.decode converts token IDs back to text
+
+    Args:
+        logits: Decoder output [B, L, V]
+        tokenizer: Tokenizer for decoding (e.g., GPT2Tokenizer)
+        original_texts: Optional original texts for comparison
+
+    Returns:
+        dict with keys:
+            - pred_ids: List[List[int]] predicted token IDs (JSON-serializable)
+            - pred_texts: List[str] decoded texts
+            - original_texts: List[str] original input texts (if provided)
+            - comparisons: List[dict] with original/reconstructed pairs (if original_texts provided)
+    """
+    # logits [B, L, V] -> argmax(dim=-1) -> pred_ids [B, L]
+    pred_ids_tensor = logits.argmax(dim=-1)
+
+    # Convert to list for JSON serialization
+    pred_ids = pred_ids_tensor.cpu().tolist()
+
+    # pred_ids [B, L] -> tokenizer.decode() -> List[str]
+    pred_texts = []
+    for i in range(pred_ids_tensor.shape[0]):
+        text = tokenizer.decode(pred_ids_tensor[i], skip_special_tokens=True)
+        pred_texts.append(text)
+
+    result = {
+        "pred_ids": pred_ids,
+        "pred_texts": pred_texts,
+    }
+
+    # Add original texts and comparisons if provided
+    if original_texts is not None:
+        result["original_texts"] = original_texts
+        comparisons = []
+        for i, (orig, pred) in enumerate(zip(original_texts, pred_texts)):
+            comparisons.append(
+                {
+                    "index": i,
+                    "original": orig,
+                    "reconstructed": pred,
+                }
+            )
+        result["comparisons"] = comparisons
+
+    return result
 
 
 def train_ed(config: dict):
@@ -117,24 +183,28 @@ def train_ed(config: dict):
     warmup_steps = train_cfg["warmup_steps"]
     gradient_clip = train_cfg["gradient_clip"]
     log_interval = log_cfg["log_interval"]
+    output_dir = Path(log_cfg["output_dir"])
+    checkpoint_dir = Path(log_cfg["checkpoint_dir"])
+    log_dir = Path(log_cfg["log_dir"])
+    save_interval = log_cfg.get("save_interval")
+
+    # Create output directories
+    output_dir.mkdir(parents=True, exist_ok=True)
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    log_dir.mkdir(parents=True, exist_ok=True)
 
     # Dimensions
     L = enc_cfg["max_length"]
 
-    # Device
-    if env_cfg["device"] == "auto":
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    else:
-        device = torch.device(env_cfg["device"])
-
-    # Seed
-    torch.manual_seed(env_cfg["seed"])
+    # Setup environment (seed + device)
+    device = setup_environment(env_cfg)
 
     print(f"Device: {device}")
     print(f"Batch size: {batch_size}")
     print(f"Max length: {L}")
     print(f"Learning rate: {learning_rate}")
     print(f"Epochs: {num_epochs}")
+    print(f"Output dir: {output_dir}")
     print()
 
     # =================================================================
@@ -157,6 +227,9 @@ def train_ed(config: dict):
     if pad_token_id is None:
         pad_token_id = 0
     print(f"    pad_token_id: {pad_token_id}")
+
+    # Decoder tokenizer for text reconstruction
+    dec_tokenizer = AutoTokenizer.from_pretrained(decoder.model_name)
     print()
 
     # =================================================================
@@ -204,6 +277,18 @@ def train_ed(config: dict):
     encoder.train()
     decoder.train()
 
+    # Training history for logging
+    history = {
+        "train_loss": [],
+        "learning_rate": [],
+        "config": {
+            "batch_size": batch_size,
+            "learning_rate": learning_rate,
+            "num_epochs": num_epochs,
+            "max_length": L,
+        },
+    }
+
     global_step = 0
     for epoch in range(num_epochs):
         epoch_loss = 0.0
@@ -248,10 +333,14 @@ def train_ed(config: dict):
             num_batches += 1
             global_step += 1
 
+            # Record history
+            history["train_loss"].append(loss.item())
+            history["learning_rate"].append(scheduler.get_last_lr()[0])
+
             # Update progress bar
             pbar.set_postfix({"loss": f"{loss.item():.4f}"})
 
-            # Detailed logging
+            # Detailed logging and checkpoint saving at log_interval
             if global_step % log_interval == 0:
                 avg_loss = epoch_loss / num_batches
                 lr = scheduler.get_last_lr()[0]
@@ -260,13 +349,80 @@ def train_ed(config: dict):
                     f"avg_loss={avg_loss:.4f}, lr={lr:.2e}"
                 )
 
+                # Decode current batch to text for inspection
+                with torch.no_grad():
+                    decode_result = decode_logits_to_text(
+                        logits, dec_tokenizer, batch_texts
+                    )
+
+                # Save intermediate checkpoint
+                step_in_epoch = num_batches
+                checkpoint = {
+                    "epoch": epoch + 1,
+                    "step_in_epoch": step_in_epoch,
+                    "global_step": global_step,
+                    "encoder_state_dict": encoder.state_dict(),
+                    "decoder_state_dict": decoder.state_dict(),
+                    "optimizer_state_dict": optimizer.state_dict(),
+                    "scheduler_state_dict": scheduler.state_dict(),
+                    "loss": loss.item(),
+                    "avg_loss": avg_loss,
+                }
+                ckpt_name = f"checkpoint-epoch{epoch+1}-step{step_in_epoch}-global{global_step}.pt"
+                ckpt_path = checkpoint_dir / ckpt_name
+                torch.save(checkpoint, ckpt_path)
+
+                # Save decoded text samples (full results)
+                samples_path = (
+                    log_dir
+                    / f"samples-epoch{epoch+1}-step{step_in_epoch}-global{global_step}.json"
+                )
+                with open(samples_path, "w", encoding="utf-8") as f:
+                    json.dump(decode_result, f, indent=2, ensure_ascii=False)
+
+                # Save intermediate training history
+                history_path = log_dir / "training_history.json"
+                with open(history_path, "w") as f:
+                    json.dump(history, f, indent=2)
+
         # Epoch summary
         avg_epoch_loss = epoch_loss / num_batches
         print(f"Epoch {epoch+1} completed: avg_loss={avg_epoch_loss:.4f}")
         print()
 
+        # Save checkpoint at end of each epoch
+        step_in_epoch = num_batches
+        checkpoint = {
+            "epoch": epoch + 1,
+            "step_in_epoch": step_in_epoch,
+            "global_step": global_step,
+            "encoder_state_dict": encoder.state_dict(),
+            "decoder_state_dict": decoder.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
+            "scheduler_state_dict": scheduler.state_dict(),
+            "avg_loss": avg_epoch_loss,
+        }
+        ckpt_name = (
+            f"checkpoint-epoch{epoch+1}-step{step_in_epoch}-global{global_step}.pt"
+        )
+        ckpt_path = checkpoint_dir / ckpt_name
+        torch.save(checkpoint, ckpt_path)
+        print(f"    Checkpoint saved: {ckpt_path}")
+
     print("=" * 60)
     print("Training completed!")
+    print()
+
+    # Save final checkpoint
+    final_ckpt = checkpoint_dir / "checkpoint_final.pt"
+    torch.save(checkpoint, final_ckpt)
+    print(f"Final checkpoint saved: {final_ckpt}")
+
+    # Save training history
+    history_path = log_dir / "training_history.json"
+    with open(history_path, "w") as f:
+        json.dump(history, f, indent=2)
+    print(f"Training history saved: {history_path}")
     print()
 
     # =================================================================
@@ -293,11 +449,7 @@ def train_ed(config: dict):
         # logits [B, L, V=50257] -> argmax(dim=-1) -> pred_ids [B, L]
         pred_ids = logits.argmax(dim=-1)
 
-    # Decode predictions using decoder's tokenizer (GPT2)
-    from transformers import AutoTokenizer
-
-    dec_tokenizer = AutoTokenizer.from_pretrained(decoder.model_name)
-
+    # Use decode_logits_to_text for consistent decoding
     print("    Sample 1:")
     print(f"      Original:      {sample_texts[0][:80]}...")
     pred_text = dec_tokenizer.decode(pred_ids[0], skip_special_tokens=True)
