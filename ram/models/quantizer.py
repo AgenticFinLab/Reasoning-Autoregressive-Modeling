@@ -143,63 +143,86 @@ class MultiScaleQuantizer(nn.Module):
         z: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor, List[torch.Tensor]]:
         """
-        Quantize at multiple scales with accumulation.
+        Quantize at multiple scales with accumulation (following VAR's approach).
+
+        VAR's key insight: maintain f_rest at FULL resolution, update by subtraction.
+        - f_rest: residual to be quantized (starts as z, updated each scale)
+        - f_hat: accumulated quantized features (starts as zeros)
 
         Args:
-            z: [B, L, C] input features
+            z: [B, L, C] input features from encoder
 
         Returns:
             f_hat: [B, L, C] accumulated quantized features
-            loss: Scalar (commitment + codebook loss)
-            indices_per_scale: List of [B, l_k] indices
+            loss: Scalar VQ loss = β*||f_hat - z||² + ||f_hat - z||²
+            indices_per_scale: List of [B, l_k] indices, one per scale
+
+        Dimensions:
+            B = batch size
+            L = sequence length (maintained at full resolution)
+            C = codebook_dim
+            l_k = scale_lengths[k] (e.g., 1, 2, 4, 8, 16, 32)
+            V = codebook_size
+
+        Flow (for each scale k):
+            Step 1: f_rest [B, L, C] -> downsample -> rest_down [B, l_k, C]
+            Step 2: rest_down [B, l_k, C] -> codebook lookup -> indices [B, l_k]
+            Step 3: indices [B, l_k] -> codebook[indices] -> quantized [B, l_k, C]
+            Step 4: quantized [B, l_k, C] -> φ_k -> h_k [B, l_k, C]
+            Step 5: h_k [B, l_k, C] -> upsample -> h_k_up [B, L, C]
+            Step 6: f_hat += h_k_up, f_rest -= h_k_up
+
+        After loop:
+            VQ Loss = β*||f_hat - z||² + ||f_hat - z||²
+            STE: f_hat = (f_hat.detach() - z_no_grad) + z
+
+        Reference: third-part/VAR-main/models/quant.py lines 58-98
         """
         B, L, C = z.shape
         device = z.device
 
-        f_hat = torch.zeros(B, self.max_length, C, device=device, dtype=z.dtype)
-        total_loss = 0.0
+        # Initialize f_rest and f_hat at full resolution L
+        z_no_grad = z.detach()
+        f_rest = z_no_grad.clone()
+        f_hat = torch.zeros(B, L, C, device=device, dtype=z.dtype)
         indices_per_scale = []
 
+        # Multi-scale loop
         for k, scale_len in enumerate(self.scale_lengths):
-            # 1. Downsample: [B, L, C] -> [B, l_k, C]
-            z_down = self.scale_ops.downsample(z, scale_len)
+            # Step 1: Downsample f_rest
+            rest_down = self.scale_ops.downsample(f_rest, scale_len)
 
-            # 2. Compute residual
-            if k > 0:
-                f_hat_down = self.scale_ops.downsample(f_hat, scale_len)
-                residual = z_down - f_hat_down
-            else:
-                residual = z_down
-
-            # 3. Find nearest codebook entries
-            flat_residual = residual.reshape(-1, C)
+            # Step 2: Find nearest codebook entries
+            flat_rest = rest_down.reshape(-1, C)
             distances = (
-                flat_residual.pow(2).sum(dim=1, keepdim=True)
+                flat_rest.pow(2).sum(dim=1, keepdim=True)
                 + self.codebook.weight.pow(2).sum(dim=1)
-                - 2 * flat_residual @ self.codebook.weight.T
+                - 2 * flat_rest @ self.codebook.weight.T
             )
             indices = distances.argmin(dim=1)
             indices_per_scale.append(indices.view(B, scale_len))
 
-            # 4. Lookup and apply phi
+            # Step 3-4: Lookup codebook and apply phi
             quantized = self.codebook(indices).view(B, scale_len, C)
             phi = self.get_phi(k)
             h_k = phi(quantized) * self.quant_resi + quantized * (1 - self.quant_resi)
 
-            # 5. Upsample and accumulate: [B, l_k, C] -> [B, max_len, C]
-            h_k_up = self.scale_ops.upsample(h_k, self.max_length)
+            # Step 5: Upsample to full resolution
+            h_k_up = self.scale_ops.upsample(h_k, L)
+
+            # Step 6: Accumulate and update residual
             f_hat = f_hat + h_k_up
+            f_rest = f_rest - h_k_up
 
-            # 6. Loss
-            commitment_loss = F.mse_loss(residual, quantized.detach())
-            codebook_loss = F.mse_loss(residual.detach(), quantized)
-            total_loss = total_loss + commitment_loss * self.beta + codebook_loss
+        # VQ Loss
+        commitment_loss = F.mse_loss(f_hat.detach(), z)
+        codebook_loss = F.mse_loss(f_hat, z_no_grad)
+        vq_loss = commitment_loss * self.beta + codebook_loss
 
-        # Adjust to input length
-        if L != self.max_length:
-            f_hat = self.scale_ops.upsample(f_hat, L)
+        # Straight-Through Estimator
+        f_hat = (f_hat.detach() - z_no_grad) + z
 
-        return f_hat, total_loss, indices_per_scale
+        return f_hat, vq_loss, indices_per_scale
 
     def decode_indices(
         self,
@@ -207,30 +230,44 @@ class MultiScaleQuantizer(nn.Module):
         target_length: int,
     ) -> torch.Tensor:
         """
-        Decode indices back to features.
+        Decode indices back to features (reverse of quantize).
 
         Args:
-            indices_per_scale: List of [B, l_k] indices
-            target_length: Target sequence length
+            indices_per_scale: List of [B, l_k] indices, one per scale
+            target_length: Target sequence length L
 
         Returns:
             f_hat: [B, target_length, C]
+
+        Dimensions:
+            B = batch size
+            l_k = scale_lengths[k]
+            C = codebook_dim
+
+        Flow (for each scale k):
+            Step 1: indices [B, l_k] -> codebook[indices] -> quantized [B, l_k, C]
+            Step 2: quantized [B, l_k, C] -> φ_k -> h_k [B, l_k, C]
+            Step 3: h_k [B, l_k, C] -> upsample -> h_k_up [B, target_length, C]
+            Step 4: f_hat += h_k_up
         """
         B = indices_per_scale[0].shape[0]
         device = indices_per_scale[0].device
 
-        f_hat = torch.zeros(B, self.max_length, self.codebook_dim, device=device)
+        # Initialize f_hat
+        f_hat = torch.zeros(B, target_length, self.codebook_dim, device=device)
 
+        # Decode each scale and accumulate
         for k, indices in enumerate(indices_per_scale):
+            # Step 1: Lookup codebook
             quantized = self.codebook(indices)
+
+            # Step 2: Apply phi layer
             phi = self.get_phi(k)
             h_k = phi(quantized) * self.quant_resi + quantized * (1 - self.quant_resi)
 
-            h_k_up = self.scale_ops.upsample(h_k, self.max_length)
+            # Step 3-4: Upsample and accumulate
+            h_k_up = self.scale_ops.upsample(h_k, target_length)
             f_hat = f_hat + h_k_up
-
-        if target_length != self.max_length:
-            f_hat = self.scale_ops.upsample(f_hat, target_length)
 
         return f_hat
 

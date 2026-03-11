@@ -3,28 +3,62 @@
 Usage:
     python examples/uTEST/test_quantizer.py -c configs/uTEST/quantizer.yml
 
-Tests:
-    1. Encoder -> hidden states [B, L, D]
-    2. Quantizer initialization (codebook, phi layers, scale_ops)
-    3. Multi-scale quantization: f_hat, loss, indices_per_scale
-    4. Scale operations (downsample/upsample at each scale)
-    5. Decode indices back to f_hat
-    6. Reconstruction consistency
+Config (example: B=2, L=32, D=256, scales=[1,2,4,8,16,32], V=1024):
+    - B: batch size
+    - L: max sequence length (= max(scale_lengths))
+    - D: codebook_dim (encoder output_dim must match)
+    - V: codebook_size
 
 Pipeline:
     ┌─────────────────────┐
-    │ List[str] texts     │
+    │ List[str] texts     │  B texts
     └────────┬────────────┘
-             │ Encoder
+             │ Encoder (tokenize + HuggingFace + projection)
              ▼
     ┌─────────────────────┐
-    │ [B, L, D] hidden    │  (D = codebook_dim)
+    │ [B, L, D] hidden    │  [2, 32, 256] encoder output
     └────────┬────────────┘
-             │ Quantizer (multi-scale)
+             │ Quantizer.quantize()
+             │
+             │  f_rest = z.clone()               # residual starts as original
+             │  f_hat = zeros([B, L, D])          # accumulator starts as zeros
+             │
+             │  for each scale k ∈ [1, 2, 4, 8, 16, 32]:
+             │    ├─ rest_down = downsample(f_rest, k)   -> [B, k, D]
+             │    ├─ indices = codebook_lookup(rest_down) -> [B, k]
+             │    ├─ h_k = φ_k(codebook[indices])       -> [B, k, D]
+             │    ├─ h_k_up = upsample(h_k, L)          -> [B, L, D]
+             │    ├─ f_hat = f_hat + h_k_up             -> [B, L, D]
+             │    └─ f_rest = f_rest - h_k_up           -> [B, L, D] (update residual)
+             │
+             │  loss = β*||f_hat - z||² + ||f_hat - z||²  (VQ loss)
+             │
              ▼
-    ┌─────────────────────┐
-    │ [B, L, D] f_hat     │  + loss + indices_per_scale
-    └─────────────────────┘
+    ┌─────────────────────────────────────────────────────┐
+    │ f_hat: [B, L, D]           [2, 32, 256]             │
+    │ loss: scalar               commitment + codebook    │
+    │ indices_per_scale: List    [[2,1],[2,2],...,[2,32]] │
+    └─────────────────────────────────────────────────────┘
+
+Multi-Scale Detail (scales=[1,2,4,8,16,32]):
+    Scale 0: [B, 1, D]  -> 1 vector for global structure
+    Scale 1: [B, 2, D]  -> 2 vectors for coarse split
+    Scale 2: [B, 4, D]  -> 4 vectors
+    Scale 3: [B, 8, D]  -> 8 vectors
+    Scale 4: [B, 16, D] -> 16 vectors
+    Scale 5: [B, 32, D] -> 32 vectors for fine details
+
+    Total indices: B * (1+2+4+8+16+32) = B * 63 codebook entries per sample
+
+Tests:
+    [1] Encoder -> hidden [B, L, D]
+    [2] Quantizer initialization (codebook [V, D], phi layers, scale_ops)
+    [3] Multi-scale quantization: f_hat [B, L, D], loss, indices_per_scale
+    [4] Scale operations: downsample/upsample shape verification
+    [5] Decode indices -> f_hat [B, L, D]
+    [6] Reconstruction consistency: f_hat == decode_indices(indices)
+    [7] Scale ops roundtrip: down(k) -> up(L) shape preservation
+    [8] Phi layers: shared (scales 0-3) vs independent (scales 4-5)
 """
 
 import argparse

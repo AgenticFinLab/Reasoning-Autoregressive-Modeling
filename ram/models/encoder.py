@@ -167,15 +167,26 @@ class TextEncoder(nn.Module):
         Encode text to hidden states.
 
         Args:
-            inputs: List[str] raw text strings (primary input)
-            input_ids: [B, L] pre-tokenized token IDs (optional, if inputs not provided)
-            attention_mask: [B, L] attention mask (optional, auto-generated if inputs provided)
+            inputs: List[str] raw text strings (primary input), len = B
+            input_ids: [B, L] pre-tokenized token IDs (optional)
+            attention_mask: [B, L] attention mask (optional)
             max_length: Override max_length for tokenization (optional)
 
         Returns:
             hidden: [B, L, output_dim] hidden states
+
+        Dimensions:
+            B = batch size (len(inputs))
+            L = max_length (sequence length after padding/truncation)
+            hidden_dim = model hidden size (e.g., BERT: 768)
+            output_dim = final output (= hidden_dim if no proj, else config value)
+
+        Flow:
+            Step 1: inputs [B texts] -> tokenize -> input_ids [B, L], attention_mask [B, L]
+            Step 2: input_ids [B, L] -> HuggingFace Encoder -> hidden [B, L, hidden_dim]
+            Step 3: hidden [B, L, hidden_dim] -> projection (optional) -> output [B, L, output_dim]
         """
-        # Tokenize if raw text provided
+        # Step 1: Tokenize
         if inputs is not None:
             tokens = self.tokenize(inputs, max_length=max_length)
             input_ids = tokens["input_ids"].to(self.encoder.device)
@@ -185,14 +196,11 @@ class TextEncoder(nn.Module):
                 "Either 'inputs' (List[str]) or 'input_ids' (Tensor) must be provided"
             )
 
-        # Encode: [B, L] -> [B, L, hidden_dim]
-        outputs = self.encoder(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-        )
+        # Step 2: HuggingFace Encoder
+        outputs = self.encoder(input_ids=input_ids, attention_mask=attention_mask)
         hidden = outputs.last_hidden_state
 
-        # Project if needed: [B, L, hidden_dim] -> [B, L, output_dim]
+        # Step 3: Projection (optional)
         if self.proj is not None:
             hidden = self.proj(hidden)
 

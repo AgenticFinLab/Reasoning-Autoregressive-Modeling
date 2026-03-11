@@ -141,20 +141,34 @@ class TextDecoder(nn.Module):
         Decode hidden states to logits.
 
         Args:
-            hidden_states: [B, L, input_dim] from quantizer (f_hat)
+            hidden_states: [B, L, input_dim] from encoder or quantizer (f_hat)
             attention_mask: [B, L] attention mask (optional)
 
         Returns:
-            [B, L, vocab_size] logits
+            logits: [B, L, vocab_size] token logits
+
+        Dimensions:
+            B = batch size
+            L = sequence length
+            input_dim = input dimension from encoder/quantizer
+            hidden_dim = decoder hidden size (e.g., GPT2: 768)
+            vocab_size = vocabulary size (e.g., GPT2: 50257)
+
+        Flow:
+            Step 1: hidden_states [B, L, input_dim] -> projection (optional) -> [B, L, hidden_dim]
+            Step 2: [B, L, hidden_dim] -> HuggingFace Decoder -> logits [B, L, vocab_size]
+
+        Restoration (after this forward):
+            logits [B, L, vocab_size] -> argmax(dim=-1) -> token_ids [B, L]
+            token_ids [B, L] -> tokenizer.decode() -> List[str] texts
         """
-        # Project if needed: [B, L, hidden_dim]
+        # Step 1: Input Projection (optional)
         if self.input_proj is not None:
             hidden_states = self.input_proj(hidden_states)
 
-        # Use inputs_embeds instead of input_ids
+        # Step 2: HuggingFace Decoder
         outputs = self.decoder(
-            inputs_embeds=hidden_states,
-            attention_mask=attention_mask,
+            inputs_embeds=hidden_states, attention_mask=attention_mask
         )
 
         return outputs.logits
