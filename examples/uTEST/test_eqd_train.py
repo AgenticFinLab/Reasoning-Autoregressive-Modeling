@@ -374,7 +374,8 @@ def train_eqd(config: dict):
                     "step_in_epoch": num_batches,
                     "global_step": global_step,
                     "loss": total_loss.item(),
-                    "recon_loss": recon_loss.item(),
+                    # recon_loss is already a float from loss_details
+                    "recon_loss": recon_loss,
                     "vq_loss": vq_loss.item(),
                     "avg_loss": epoch_loss / num_batches,
                     "avg_recon_loss": epoch_recon_loss / num_batches,
@@ -387,7 +388,8 @@ def train_eqd(config: dict):
             pbar.set_postfix(
                 {
                     "loss": f"{total_loss.item():.4f}",
-                    "recon": f"{recon_loss.item():.4f}",
+                    # recon_loss is already a float from loss_details
+                    "recon": f"{recon_loss:.4f}",
                     "vq": f"{vq_loss.item():.4f}",
                 }
             )
