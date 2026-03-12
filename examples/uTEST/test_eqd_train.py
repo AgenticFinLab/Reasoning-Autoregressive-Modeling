@@ -143,7 +143,11 @@ def train_eqd(config: dict):
     num_epochs = train_cfg["num_epochs"]
     warmup_steps = train_cfg["warmup_steps"]
     gradient_clip = train_cfg["gradient_clip"]
-    log_interval = log_cfg["log_interval"]
+
+    # Logging intervals
+    log_interval = log_cfg["log_interval"]  # Print & save samples/history
+    checkpoint_interval = log_cfg.get("checkpoint_interval", 100)  # Save model
+
     output_dir = Path(log_cfg["output_dir"])
     checkpoint_dir = Path(log_cfg["checkpoint_dir"])
     log_dir = Path(log_cfg["log_dir"])
@@ -285,12 +289,8 @@ def train_eqd(config: dict):
     quantizer.train()
     decoder.train()
 
-    # Training history for logging
+    # Training history for logging (comprehensive metadata, no model weights)
     history = {
-        "train_loss": [],
-        "recon_loss": [],
-        "vq_loss": [],
-        "learning_rate": [],
         "config": {
             "batch_size": batch_size,
             "learning_rate": learning_rate,
@@ -299,7 +299,10 @@ def train_eqd(config: dict):
             "latent_dim": D,
             "codebook_size": quantizer.codebook_size,
             "scale_lengths": quantizer.scale_lengths,
+            "loss_type": loss_type,
+            "vq_weight": vq_weight,
         },
+        "steps": [],  # List of step records
     }
 
     global_step = 0
@@ -358,11 +361,21 @@ def train_eqd(config: dict):
             num_batches += 1
             global_step += 1
 
-            # Record history
-            history["train_loss"].append(total_loss.item())
-            history["recon_loss"].append(recon_loss.item())
-            history["vq_loss"].append(vq_loss.item())
-            history["learning_rate"].append(scheduler.get_last_lr()[0])
+            # Record history (every step)
+            history["steps"].append(
+                {
+                    "epoch": epoch + 1,
+                    "step_in_epoch": num_batches,
+                    "global_step": global_step,
+                    "loss": total_loss.item(),
+                    "recon_loss": recon_loss.item(),
+                    "vq_loss": vq_loss.item(),
+                    "avg_loss": epoch_loss / num_batches,
+                    "avg_recon_loss": epoch_recon_loss / num_batches,
+                    "avg_vq_loss": epoch_vq_loss / num_batches,
+                    "lr": scheduler.get_last_lr()[0],
+                }
+            )
 
             # Update progress bar
             pbar.set_postfix(
@@ -373,7 +386,7 @@ def train_eqd(config: dict):
                 }
             )
 
-            # Detailed logging and checkpoint saving at log_interval
+            # --- Log & save samples at log_interval ---
             if global_step % log_interval == 0:
                 avg_loss = epoch_loss / num_batches
                 avg_recon = epoch_recon_loss / num_batches
@@ -394,7 +407,22 @@ def train_eqd(config: dict):
                         idx.cpu().tolist() for idx in indices_per_scale
                     ]
 
-                # Save intermediate checkpoint
+                # Save decoded text samples (full results)
+                step_in_epoch = num_batches
+                samples_path = (
+                    log_dir
+                    / f"samples-epoch{epoch+1}-step{step_in_epoch}-global{global_step}.json"
+                )
+                with open(samples_path, "w", encoding="utf-8") as f:
+                    json.dump(decode_result, f, indent=2, ensure_ascii=False)
+
+                # Save training history
+                history_path = log_dir / "training_history.json"
+                with open(history_path, "w") as f:
+                    json.dump(history, f, indent=2)
+
+            # --- Save checkpoint at checkpoint_interval ---
+            if global_step % checkpoint_interval == 0:
                 step_in_epoch = num_batches
                 checkpoint = {
                     "epoch": epoch + 1,
@@ -412,19 +440,7 @@ def train_eqd(config: dict):
                 ckpt_name = f"checkpoint-epoch{epoch+1}-step{step_in_epoch}-global{global_step}.pt"
                 ckpt_path = checkpoint_dir / ckpt_name
                 torch.save(checkpoint, ckpt_path)
-
-                # Save decoded text samples (full results)
-                samples_path = (
-                    log_dir
-                    / f"samples-epoch{epoch+1}-step{step_in_epoch}-global{global_step}.json"
-                )
-                with open(samples_path, "w", encoding="utf-8") as f:
-                    json.dump(decode_result, f, indent=2, ensure_ascii=False)
-
-                # Save intermediate training history
-                history_path = log_dir / "training_history.json"
-                with open(history_path, "w") as f:
-                    json.dump(history, f, indent=2)
+                print(f"    [Checkpoint saved: {ckpt_name}]")
 
         # Epoch summary
         avg_epoch_loss = epoch_loss / num_batches

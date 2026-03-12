@@ -102,9 +102,13 @@ logging:
   output_dir: ./EXPERIMENT/uTEST-eqd_train
   checkpoint_dir: ./EXPERIMENT/uTEST-eqd_train/checkpoints
   log_dir: ./EXPERIMENT/uTEST-eqd_train/logs
-  # Log every N steps
+  
+  # --- Intervals ---
+  # Save decoded samples, training history & print metrics every N steps
   log_interval: 10
-  save_interval: null
+  # Save model checkpoints every N steps (less frequent to save disk space)
+  checkpoint_interval: 100
+  
   eval_interval: null
   log_level: INFO
   use_wandb: false
