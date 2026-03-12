@@ -305,7 +305,8 @@ def train_eqd(config: dict):
             "loss_type": loss_type,
             "vq_weight": vq_weight,
         },
-        "steps": [],  # List of step records
+        # List of step records
+        "steps": [],
     }
 
     global_step = 0
@@ -402,7 +403,7 @@ def train_eqd(config: dict):
                 lr = scheduler.get_last_lr()[0]
                 print(
                     f"    Step {global_step}: loss={total_loss.item():.4f}, "
-                    f"recon={recon_loss.item():.4f}, vq={vq_loss.item():.4f}, lr={lr:.2e}"
+                    f"recon={recon_loss:.4f}, vq={vq_loss.item():.4f}, lr={lr:.2e}"
                 )
 
                 # Decode current batch to text for inspection
@@ -442,7 +443,7 @@ def train_eqd(config: dict):
                     "optimizer_state_dict": optimizer.state_dict(),
                     "scheduler_state_dict": scheduler.state_dict(),
                     "loss": total_loss.item(),
-                    "recon_loss": recon_loss.item(),
+                    "recon_loss": recon_loss,
                     "vq_loss": vq_loss.item(),
                 }
                 ckpt_name = f"checkpoint-epoch{epoch+1}-step{step_in_epoch}-global{global_step}.pt"

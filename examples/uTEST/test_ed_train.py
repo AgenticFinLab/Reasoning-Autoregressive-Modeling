@@ -265,7 +265,8 @@ def train_ed(config: dict):
             "max_length": L,
             "loss_type": loss_type,
         },
-        "steps": [],  # List of step records
+        # List of step records
+        "steps": [],
     }
 
     global_step = 0
