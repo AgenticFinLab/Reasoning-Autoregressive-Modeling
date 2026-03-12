@@ -95,7 +95,8 @@ def test_encoder(config: dict):
     proj_dim = 256
     enc_cfg["output_dim"] = proj_dim
     encoder_proj = build_encoder(enc_cfg)
-    enc_cfg["output_dim"] = None  # restore
+    # Restore original config
+    enc_cfg["output_dim"] = None
 
     assert encoder_proj.proj is not None, "Projection layer should exist"
     assert encoder_proj.output_dim == proj_dim

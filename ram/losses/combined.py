@@ -229,6 +229,7 @@ class DualTokenizerVQAELoss(nn.Module):
         beta: float = 0.25,
         ignore_index: int = -100,
         max_length: int = 512,
+        label_smoothing: float = 0.0,
     ):
         super().__init__()
         self.vq_weight = vq_weight
@@ -239,6 +240,7 @@ class DualTokenizerVQAELoss(nn.Module):
             dec_vocab_size=dec_vocab_size,
             ignore_index=ignore_index,
             max_length=max_length,
+            label_smoothing=label_smoothing,
         )
         self.vq_loss_fn = VQLoss(beta=beta)
 

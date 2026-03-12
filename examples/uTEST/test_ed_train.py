@@ -125,8 +125,10 @@ def train_ed(config: dict):
     gradient_clip = train_cfg["gradient_clip"]
 
     # Logging intervals
-    log_interval = log_cfg["log_interval"]  # Print & save samples/history
-    checkpoint_interval = log_cfg.get("checkpoint_interval", 100)  # Save model
+    # Print & save samples/history
+    log_interval = log_cfg["log_interval"]
+    # Save model checkpoint
+    checkpoint_interval = log_cfg.get("checkpoint_interval", 100)
 
     output_dir = Path(log_cfg["output_dir"])
     checkpoint_dir = Path(log_cfg["checkpoint_dir"])
@@ -198,12 +200,13 @@ def train_ed(config: dict):
             print(f"      - {w}")
 
     # Build loss function
+    # Already validated above, skip re-validation
     loss_fn, _ = build_loss_from_config(
         config,
         enc_tokenizer=encoder.tokenizer,
         dec_tokenizer=dec_tokenizer,
         dec_vocab_size=V,
-        validate=False,  # Already validated above
+        validate=False,
     )
     print(f"    Loss function: {type(loss_fn).__name__}")
     print()

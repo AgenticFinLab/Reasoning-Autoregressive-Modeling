@@ -182,8 +182,8 @@ class ReconstructionLoss(nn.Module):
         # Validation: Warn if using different tokenizers
         if not self.same_tokenizer:
             if enc_vocab_size is not None and enc_vocab_size != V:
-                # This is expected - just log for clarity
-                pass  # Different vocab sizes are expected in this mode
+                # This is expected - different vocab sizes are expected in this mode
+                pass
 
         # Apply attention mask if provided
         if attention_mask is not None:

@@ -145,8 +145,10 @@ def train_eqd(config: dict):
     gradient_clip = train_cfg["gradient_clip"]
 
     # Logging intervals
-    log_interval = log_cfg["log_interval"]  # Print & save samples/history
-    checkpoint_interval = log_cfg.get("checkpoint_interval", 100)  # Save model
+    # Print & save samples/history
+    log_interval = log_cfg["log_interval"]
+    # Save model checkpoint
+    checkpoint_interval = log_cfg.get("checkpoint_interval", 100)
 
     output_dir = Path(log_cfg["output_dir"])
     checkpoint_dir = Path(log_cfg["checkpoint_dir"])
@@ -229,12 +231,13 @@ def train_eqd(config: dict):
             print(f"      - {w}")
 
     # Build loss function
+    # Already validated above, skip re-validation
     loss_fn, _ = build_loss_from_config(
         config,
         enc_tokenizer=encoder.tokenizer,
         dec_tokenizer=dec_tokenizer,
         dec_vocab_size=V,
-        validate=False,  # Already validated above
+        validate=False,
     )
     print(f"    Loss function: {type(loss_fn).__name__}")
     print()
@@ -355,8 +358,11 @@ def train_eqd(config: dict):
             scheduler.step()
 
             # Logging
+            # Note: loss_details values are already floats (from .item() in loss function)
             epoch_loss += total_loss.item()
-            epoch_recon_loss += recon_loss.item()
+            # recon_loss is already a float from loss_details
+            epoch_recon_loss += recon_loss
+            # vq_loss is a tensor from quantizer
             epoch_vq_loss += vq_loss.item()
             num_batches += 1
             global_step += 1

@@ -104,28 +104,46 @@ def get_loss(
     loss_class = _LOSS_REGISTRY[loss_type]
 
     # Build kwargs based on loss type
+    # Each loss type has specific accepted parameters:
+    #   - VQLoss: beta, reduction (NO ignore_index, NO label_smoothing)
+    #   - ReconstructionLoss: same_tokenizer, ignore_index, label_smoothing, reduction
+    #   - DualTokenizerReconstructionLoss: dec_tokenizer, dec_vocab_size, ignore_index,
+    #                                      max_length, label_smoothing
+    #   - VQAELoss: vq_weight, beta, same_tokenizer, ignore_index, label_smoothing
+    #   - DualTokenizerVQAELoss: dec_tokenizer, dec_vocab_size, vq_weight, beta,
+    #                           ignore_index, max_length, label_smoothing
     kwargs = {}
 
-    # Common parameters
+    # --- VQ-only loss (VQLoss) ---
+    if loss_type == "vq":
+        # VQLoss only accepts: beta, reduction
+        if "beta" in config:
+            kwargs["beta"] = config["beta"]
+        if "reduction" in config:
+            kwargs["reduction"] = config["reduction"]
+        return loss_class(**kwargs)
+
+    # --- Losses with reconstruction component ---
+    # These accept: ignore_index, label_smoothing
     if "ignore_index" in config:
         kwargs["ignore_index"] = config["ignore_index"]
     if "label_smoothing" in config:
         kwargs["label_smoothing"] = config["label_smoothing"]
 
-    # VQ-related parameters
-    if loss_type in {"vq", "vqae", "dual_tokenizer_vqae"}:
+    # VQ-related parameters (for vqae, dual_tokenizer_vqae)
+    if loss_type in {"vqae", "dual_tokenizer_vqae"}:
         if "beta" in config:
             kwargs["beta"] = config["beta"]
         if "vq_weight" in config:
             kwargs["vq_weight"] = config["vq_weight"]
 
-    # Same tokenizer flag
+    # Same tokenizer flag (for reconstruction, vqae)
     if loss_type == "reconstruction":
         kwargs["same_tokenizer"] = True
     elif loss_type == "vqae":
         kwargs["same_tokenizer"] = True
 
-    # Dual tokenizer requirements
+    # Dual tokenizer requirements (for dual_tokenizer_* types)
     if loss_type in _DUAL_TOKENIZER_LOSSES:
         if dec_tokenizer is None:
             raise ValueError(
