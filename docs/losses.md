@@ -187,6 +187,71 @@ All loss functions include runtime checks:
 
 ---
 
+## Loss Registry
+
+The registry provides a unified interface for building loss functions from config.
+
+### Config Format
+
+```yaml
+# In train section of config file
+train:
+  loss:
+    type: dual_tokenizer_vqae  # Loss type name
+    vq_weight: 1.0             # λ in L = L_recon + λ * L_vq
+    beta: 0.25                 # Commitment cost
+    ignore_index: -100         # Pad token
+    label_smoothing: 0.0
+```
+
+### Available Types
+
+| Type                            | Tokenizer | Quantizer | Description              |
+|---------------------------------|-----------|-----------|--------------------------|
+| `reconstruction`                | Same      | No        | Standard CE loss         |
+| `dual_tokenizer_reconstruction` | Different | No        | Re-tokenize with decoder |
+| `vqae`                          | Same      | Yes       | CE + VQ loss             |
+| `dual_tokenizer_vqae`           | Different | Yes       | Re-tokenize + VQ loss    |
+
+### Usage
+
+**Code**: [`ram/losses/registry.py`](../ram/losses/registry.py)
+
+```python
+from ram.losses import build_loss_from_config, validate_loss_config
+
+# Validate config against tokenizers (issues warnings if mismatch)
+warnings = validate_loss_config(config, enc_tokenizer, dec_tokenizer)
+for w in warnings:
+    print(f"WARNING: {w}")
+
+# Build loss function from config
+loss_fn, _ = build_loss_from_config(
+    config,
+    enc_tokenizer=enc_tokenizer,
+    dec_tokenizer=dec_tokenizer,
+    dec_vocab_size=50257,
+)
+
+# Use in training loop
+if "dual_tokenizer" in loss_type:
+    loss, details = loss_fn(logits, texts, vq_loss=vq_loss)
+else:
+    loss, details = loss_fn(logits, target_ids, vq_loss=vq_loss)
+```
+
+### Automatic Warnings
+
+The registry warns when config doesn't match tokenizer setup:
+
+```
+WARNING: Loss type 'vqae' expects same tokenizer, but encoder and decoder
+have different tokenizers (enc_vocab=30522, dec_vocab=50257).
+Consider using 'dual_tokenizer_vqae' instead.
+```
+
+---
+
 ## Dimension Reference
 
 ```

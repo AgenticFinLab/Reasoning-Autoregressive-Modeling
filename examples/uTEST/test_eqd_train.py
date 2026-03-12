@@ -40,10 +40,10 @@ Pipeline:
     ┌─────────────────────┐
     │ logits [B, L, V]    │  [4, 64, 50257] token logits
     └────────┬────────────┘
-             │ CrossEntropyLoss + vq_loss
+             │ loss_fn(logits, texts, vq_loss)
              ▼
     ┌─────────────────────┐
-    │ total_loss          │  recon_loss + vq_loss
+    │ total_loss          │  recon_loss + λ * vq_loss
     └────────┬────────────┘
              │ loss.backward() + optimizer.step()
              ▼
@@ -73,6 +73,12 @@ Restoration (inference):
     - Each position has 50257 logits (one per token)
     - argmax selects the most likely token ID
     - tokenizer.decode converts IDs back to text
+
+Loss Configuration:
+    BERT (encoder) + GPT2 (decoder) = different tokenizers + quantizer
+    -> Use "dual_tokenizer_vqae" loss type
+    -> L_total = L_recon + λ * L_vq
+    -> Target IDs computed from decoder's tokenizer internally
 """
 
 import argparse
@@ -81,7 +87,6 @@ from pathlib import Path
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import LinearLR
 from torch.utils.data import DataLoader
@@ -99,6 +104,10 @@ from ram.utils import (
     collate_fn_text,
     decode_logits_to_text,
 )
+from ram.losses import (
+    build_loss_from_config,
+    validate_loss_config,
+)
 
 
 def train_eqd(config: dict):
@@ -110,8 +119,11 @@ def train_eqd(config: dict):
         Step 2: input_ids [B, L] -> Encoder.forward() -> z [B, L, D]
         Step 3: z [B, L, D] -> Quantizer.forward() -> f_hat [B, L, D], vq_loss
         Step 4: f_hat [B, L, D] -> Decoder.forward() -> logits [B, L, V]
-        Step 5: CrossEntropyLoss(logits, input_ids) + vq_loss -> total_loss
+        Step 5: loss_fn(logits, texts, vq_loss) -> total_loss (using decoder's tokenizer!)
         Step 6: total_loss.backward() -> optimizer.step() -> update weights
+
+    NOTE: BERT (encoder) + GPT2 (decoder) have different tokenizers.
+          Target IDs are computed from DECODER's tokenizer internally.
     """
     # =================================================================
     # Extract config
@@ -187,6 +199,40 @@ def train_eqd(config: dict):
 
     # Decoder tokenizer for text reconstruction
     dec_tokenizer = AutoTokenizer.from_pretrained(decoder.model_name)
+    if dec_tokenizer.pad_token is None:
+        dec_tokenizer.pad_token = dec_tokenizer.eos_token
+    print()
+
+    # =================================================================
+    # Setup loss function (from config with validation)
+    # =================================================================
+    print("[3.5] Setting up loss function...")
+    loss_cfg = train_cfg.get("loss", {})
+    loss_type = loss_cfg.get("type", "dual_tokenizer_vqae")
+    vq_weight = loss_cfg.get("vq_weight", 1.0)
+    print(f"    Loss type: {loss_type}")
+    print(f"    VQ weight: {vq_weight}")
+
+    # Validate loss config against tokenizer setup
+    loss_warnings = validate_loss_config(
+        config,
+        enc_tokenizer=encoder.tokenizer,
+        dec_tokenizer=dec_tokenizer,
+    )
+    if loss_warnings:
+        print("    Warnings:")
+        for w in loss_warnings:
+            print(f"      - {w}")
+
+    # Build loss function
+    loss_fn, _ = build_loss_from_config(
+        config,
+        enc_tokenizer=encoder.tokenizer,
+        dec_tokenizer=dec_tokenizer,
+        dec_vocab_size=V,
+        validate=False,  # Already validated above
+    )
+    print(f"    Loss function: {type(loss_fn).__name__}")
     print()
 
     # =================================================================
@@ -283,15 +329,17 @@ def train_eqd(config: dict):
             # f_hat [B, L, D] -> logits [B, L, V]
             logits = decoder(f_hat, attention_mask=attention_mask)
 
-            # Step 5: Compute loss
-            # logits [B, L, V] vs input_ids [B, L] -> recon_loss (scalar)
-            recon_loss = F.cross_entropy(
-                logits.view(-1, V),
-                input_ids.view(-1),
-                ignore_index=pad_token_id,
-            )
-            # total_loss = recon_loss + vq_loss
-            total_loss = recon_loss + vq_loss
+            # Step 5: Compute loss using configured loss function
+            # For dual_tokenizer_vqae: loss_fn(logits, texts, vq_loss) -> total_loss, details
+            # For vqae: loss_fn(logits, target_ids, vq_loss=vq_loss) -> total_loss, details
+            if "dual_tokenizer" in loss_type:
+                total_loss, loss_details = loss_fn(logits, batch_texts, vq_loss=vq_loss)
+                recon_loss = loss_details["recon_loss"]
+            else:
+                total_loss, loss_details = loss_fn(
+                    logits, input_ids, vq_loss=vq_loss, attention_mask=attention_mask
+                )
+                recon_loss = loss_details["recon_loss"]
 
             # Step 6: Backward and optimize
             optimizer.zero_grad()

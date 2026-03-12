@@ -81,6 +81,20 @@ train:
   # Gradient clipping threshold
   gradient_clip: 1.0
 
+  # --- Loss Configuration ---
+  # Available types: reconstruction, dual_tokenizer_reconstruction, vqae, dual_tokenizer_vqae
+  # BERT (enc) + GPT2 (dec) = different tokenizers + quantizer -> dual_tokenizer_vqae
+  loss:
+    type: dual_tokenizer_vqae
+    # VQ loss weight λ in: L_total = L_recon + λ * L_vq
+    vq_weight: 1.0
+    # Commitment cost β in: L_vq = ||sg[z]-q||² + β * ||z-sg[q]||²
+    beta: 0.25
+    # Pad token ID
+    ignore_index: -100
+    # Label smoothing factor
+    label_smoothing: 0.0
+
 # =============================================================================
 # Logging Configuration
 # =============================================================================

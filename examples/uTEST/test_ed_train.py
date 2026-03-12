@@ -32,7 +32,7 @@ Pipeline:
     ┌─────────────────────┐
     │ logits [B, L, V]    │  [4, 64, 50257] token logits
     └────────┬────────────┘
-             │ CrossEntropyLoss(logits, input_ids)
+             │ loss_fn(logits, texts)
              ▼
     ┌─────────────────────┐
     │ loss (scalar)       │  reconstruction loss
@@ -57,6 +57,11 @@ Restoration (inference):
     - Each position has 50257 logits (one per token)
     - argmax selects the most likely token ID
     - tokenizer.decode converts IDs back to text
+
+Loss Configuration:
+    BERT (encoder) + GPT2 (decoder) = different tokenizers
+    -> Use "dual_tokenizer_reconstruction" loss type
+    -> Target IDs computed from decoder's tokenizer internally
 """
 
 import argparse
@@ -65,7 +70,6 @@ from pathlib import Path
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import LinearLR
 from torch.utils.data import DataLoader
@@ -82,6 +86,10 @@ from ram.utils import (
     collate_fn_text,
     decode_logits_to_text,
 )
+from ram.losses import (
+    build_loss_from_config,
+    validate_loss_config,
+)
 
 
 def train_ed(config: dict):
@@ -92,8 +100,11 @@ def train_ed(config: dict):
         Step 1: texts [B] -> Encoder.tokenize() -> input_ids [B, L]
         Step 2: input_ids [B, L] -> Encoder.forward() -> hidden [B, L, D]
         Step 3: hidden [B, L, D] -> Decoder.forward() -> logits [B, L, V]
-        Step 4: CrossEntropyLoss(logits, input_ids) -> loss (scalar)
+        Step 4: loss_fn(logits, texts) -> loss (using decoder's tokenizer!)
         Step 5: loss.backward() -> optimizer.step() -> update weights
+
+    NOTE: BERT (encoder) + GPT2 (decoder) have different tokenizers.
+          Target IDs are computed from DECODER's tokenizer internally.
     """
     # =================================================================
     # Extract config
@@ -160,6 +171,38 @@ def train_ed(config: dict):
 
     # Decoder tokenizer for text reconstruction
     dec_tokenizer = AutoTokenizer.from_pretrained(decoder.model_name)
+    if dec_tokenizer.pad_token is None:
+        dec_tokenizer.pad_token = dec_tokenizer.eos_token
+    print()
+
+    # =================================================================
+    # Setup loss function (from config with validation)
+    # =================================================================
+    print("[3.5] Setting up loss function...")
+    loss_cfg = train_cfg.get("loss", {})
+    loss_type = loss_cfg.get("type", "dual_tokenizer_reconstruction")
+    print(f"    Loss type: {loss_type}")
+
+    # Validate loss config against tokenizer setup
+    loss_warnings = validate_loss_config(
+        config,
+        enc_tokenizer=encoder.tokenizer,
+        dec_tokenizer=dec_tokenizer,
+    )
+    if loss_warnings:
+        print("    Warnings:")
+        for w in loss_warnings:
+            print(f"      - {w}")
+
+    # Build loss function
+    loss_fn, _ = build_loss_from_config(
+        config,
+        enc_tokenizer=encoder.tokenizer,
+        dec_tokenizer=dec_tokenizer,
+        dec_vocab_size=V,
+        validate=False,  # Already validated above
+    )
+    print(f"    Loss function: {type(loss_fn).__name__}")
     print()
 
     # =================================================================
@@ -240,13 +283,13 @@ def train_ed(config: dict):
             # hidden [B, L, D] -> logits [B, L, V]
             logits = decoder(hidden, attention_mask=attention_mask)
 
-            # Step 4: Compute loss
-            # logits [B, L, V] vs input_ids [B, L] -> loss (scalar)
-            loss = F.cross_entropy(
-                logits.view(-1, V),
-                input_ids.view(-1),
-                ignore_index=pad_token_id,
-            )
+            # Step 4: Compute loss using configured loss function
+            # For dual_tokenizer types: loss_fn(logits, texts) -> loss, target_ids
+            # For same_tokenizer types: loss_fn(logits, target_ids) -> loss
+            if "dual_tokenizer" in loss_type:
+                loss, _ = loss_fn(logits, batch_texts)
+            else:
+                loss = loss_fn(logits, input_ids, attention_mask=attention_mask)
 
             # Step 5: Backward and optimize
             optimizer.zero_grad()

@@ -69,6 +69,16 @@ train:
   # Gradient clipping threshold
   gradient_clip: 1.0
 
+  # --- Loss Configuration ---
+  # Available types: reconstruction, dual_tokenizer_reconstruction, vqae, dual_tokenizer_vqae
+  # BERT (enc) + GPT2 (dec) = different tokenizers -> use dual_tokenizer_*
+  loss:
+    type: dual_tokenizer_reconstruction
+    # Pad token ID for GPT2 (eos_token_id=50256)
+    ignore_index: -100
+    # Label smoothing factor
+    label_smoothing: 0.0
+
 # =============================================================================
 # Logging Configuration
 # =============================================================================

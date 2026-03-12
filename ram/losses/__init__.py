@@ -25,6 +25,17 @@ Loss Function Selection Guide:
    - Use: VQLoss or compute_vq_loss()
    - For: standalone quantizer training/debugging
 
+Registry Usage:
+===============
+    # Get loss by type name
+    loss_fn = get_loss("vqae", config)
+
+    # Build from config with validation
+    loss_fn, warnings = build_loss_from_config(config, enc_tok, dec_tok)
+
+    # Validate config consistency
+    warnings = validate_loss_config(config, enc_tok, dec_tok)
+
 Tokenizer Validation:
 =====================
     >>> from ram.losses import validate_tokenizer_compatibility
@@ -45,6 +56,10 @@ Functions:
     compute_vqae_loss           - Functional combined loss
     validate_tokenizer_compatibility - Check tokenizer compatibility
     straight_through_estimator  - STE for gradient flow through quantization
+    get_loss                    - Get loss by type name from registry
+    build_loss_from_config      - Build loss from config with validation
+    validate_loss_config        - Validate loss config against tokenizers
+    infer_loss_type             - Auto-infer appropriate loss type
 """
 
 # Reconstruction losses
@@ -70,6 +85,15 @@ from .combined import (
     compute_vqae_loss,
 )
 
+# Registry
+from .registry import (
+    get_loss,
+    get_available_losses,
+    validate_loss_config,
+    infer_loss_type,
+    build_loss_from_config,
+)
+
 __all__ = [
     # Reconstruction
     "ReconstructionLoss",
@@ -85,4 +109,10 @@ __all__ = [
     "VQAELoss",
     "DualTokenizerVQAELoss",
     "compute_vqae_loss",
+    # Registry
+    "get_loss",
+    "get_available_losses",
+    "validate_loss_config",
+    "infer_loss_type",
+    "build_loss_from_config",
 ]

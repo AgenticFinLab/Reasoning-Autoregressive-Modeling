@@ -7,6 +7,15 @@ Tests:
     1. Encoder -> Decoder forward pass
     2. Output shape: [B, L, vocab_size]
     3. Reconstruction loss computation
+
+NOTE on Tokenizer Mismatch:
+    BERT (encoder) + GPT2 (decoder) have DIFFERENT tokenizers.
+    - BERT vocab_size = 30522 (WordPiece)
+    - GPT2 vocab_size = 50257 (BPE)
+
+    For correct loss computation:
+    - Target IDs MUST come from DECODER's tokenizer (GPT2)
+    - NOT from encoder's tokenizer (BERT)
 """
 
 import argparse
@@ -92,21 +101,35 @@ def test_decoder(config: dict):
     print("    PASSED")
 
     # =================================================================
-    # 4. Reconstruction Loss
+    # 4. Reconstruction Loss (using DECODER's tokenizer for target)
     # =================================================================
     print("[4] Reconstruction Loss")
 
-    # Get target token ids from encoder's tokenizer
-    tokens = encoder.tokenize(texts)
-    target_ids = tokens["input_ids"]  # [B, L]
+    # IMPORTANT: Use DECODER's tokenizer for target_ids, NOT encoder's!
+    # BERT (encoder) and GPT2 (decoder) have different tokenizers.
+    from transformers import AutoTokenizer
+
+    dec_tokenizer = AutoTokenizer.from_pretrained(decoder.model_name)
+    if dec_tokenizer.pad_token is None:
+        dec_tokenizer.pad_token = dec_tokenizer.eos_token
+
+    # Get target token ids from DECODER's tokenizer
+    dec_tokens = dec_tokenizer(
+        texts,
+        padding="max_length",
+        truncation=True,
+        max_length=L,
+        return_tensors="pt",
+    )
+    target_ids = dec_tokens["input_ids"]  # [B, L] - GPT2 IDs!
 
     # Compute cross-entropy loss
     loss = F.cross_entropy(
         logits.view(-1, decoder.vocab_size),
         target_ids.view(-1),
-        ignore_index=encoder.tokenizer.pad_token_id or 0,
+        ignore_index=dec_tokenizer.pad_token_id or -100,
     )
-    print(f"    Target: [{target_ids.shape[0]}, {target_ids.shape[1]}]")
+    print(f"    Target: [{target_ids.shape[0]}, {target_ids.shape[1]}] (GPT2 IDs)")
     print(f"    Loss: {loss.item():.4f}")
     assert loss.item() > 0, "Loss should be positive"
     print("    PASSED")
@@ -116,16 +139,14 @@ def test_decoder(config: dict):
     # =================================================================
     print("[5] Text Reconstruction")
 
-    # logits [B, L, vocab_size] -> argmax -> pred_ids [B, L]
+    # logits [B, L, vocab_size=50257] -> argmax(dim=-1) -> pred_ids [B, L]
+    # 50257 = GPT2 vocab_size
+    # argmax selects most likely token ID at each position
     pred_ids = logits.argmax(dim=-1)  # [B, L]
     print(f"    Pred IDs: [{pred_ids.shape[0]}, {pred_ids.shape[1]}]")
 
     # Decode using decoder's tokenizer (GPT2)
-    from transformers import AutoTokenizer
-
-    dec_tokenizer = AutoTokenizer.from_pretrained(decoder.model_name)
-
-    # Reconstruct first sample
+    # pred_ids [B, L] -> tokenizer.decode() -> List[str] texts
     pred_text = dec_tokenizer.decode(pred_ids[0], skip_special_tokens=True)
     orig_text = texts[0]
 
