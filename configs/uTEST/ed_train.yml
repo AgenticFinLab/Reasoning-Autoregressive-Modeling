@@ -68,6 +68,8 @@ train:
   warmup_steps: 100
   # Gradient clipping threshold
   gradient_clip: 1.0
+  # Resume from latest checkpoint (true) or start fresh (false)
+  resume: true
 
   # --- Loss Configuration ---
   # Available types: reconstruction, dual_tokenizer_reconstruction, vqae, dual_tokenizer_vqae

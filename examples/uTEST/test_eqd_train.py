@@ -103,6 +103,8 @@ from ram.utils import (
     setup_environment,
     collate_fn_text,
     decode_logits_to_text,
+    find_latest_checkpoint,
+    resume_from_checkpoint,
 )
 from ram.losses import (
     build_loss_from_config,
@@ -143,6 +145,7 @@ def train_eqd(config: dict):
     num_epochs = train_cfg["num_epochs"]
     warmup_steps = train_cfg["warmup_steps"]
     gradient_clip = train_cfg["gradient_clip"]
+    resume = train_cfg.get("resume", False)
 
     # Logging intervals
     # Print & save samples/history
@@ -283,16 +286,10 @@ def train_eqd(config: dict):
     print()
 
     # =================================================================
-    # Training loop
+    # Resume from checkpoint if requested
     # =================================================================
-    print("[6] Starting training...")
-    print("=" * 60)
-
-    encoder.train()
-    quantizer.train()
-    decoder.train()
-
-    # Training history for logging (comprehensive metadata, no model weights)
+    start_epoch = 0
+    global_step = 0
     history = {
         "config": {
             "batch_size": batch_size,
@@ -305,12 +302,39 @@ def train_eqd(config: dict):
             "loss_type": loss_type,
             "vq_weight": vq_weight,
         },
-        # List of step records
         "steps": [],
     }
 
-    global_step = 0
-    for epoch in range(num_epochs):
+    if resume:
+        latest_ckpt = find_latest_checkpoint(checkpoint_dir)
+        if latest_ckpt is not None:
+            print(f"[5.5] Resuming from: {latest_ckpt.name}")
+            start_epoch, global_step, history = resume_from_checkpoint(
+                checkpoint_path=latest_ckpt,
+                models={"encoder": encoder, "quantizer": quantizer, "decoder": decoder},
+                optimizer=optimizer,
+                scheduler=scheduler,
+                device=device,
+                log_dir=log_dir,
+            )
+            print(f"    Resumed from epoch {start_epoch+1}, global_step {global_step}")
+            print(f"    Loaded training history: {len(history['steps'])} steps")
+            print()
+        else:
+            print("[5.5] No checkpoint found, starting fresh")
+            print()
+
+    # =================================================================
+    # Training loop
+    # =================================================================
+    print("[6] Starting training...")
+    print("=" * 60)
+
+    encoder.train()
+    quantizer.train()
+    decoder.train()
+
+    for epoch in range(start_epoch, num_epochs):
         epoch_loss = 0.0
         epoch_recon_loss = 0.0
         epoch_vq_loss = 0.0
@@ -409,7 +433,7 @@ def train_eqd(config: dict):
                 # Decode current batch to text for inspection
                 with torch.no_grad():
                     decode_result = decode_logits_to_text(
-                        logits, dec_tokenizer, batch_texts
+                        logits, dec_tokenizer, batch_texts, attention_mask
                     )
                     # Add quantization info
                     decode_result["indices_per_scale"] = [

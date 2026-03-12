@@ -9,10 +9,13 @@ Functions:
 """
 
 import random
-from typing import List
+import json
+from pathlib import Path
+from typing import List, Optional, Dict, Tuple, Any
 
 import numpy as np
 import torch
+import torch.nn as nn
 
 
 def set_seed(seed: int):
@@ -148,6 +151,7 @@ def decode_logits_to_text(
     logits: torch.Tensor,
     tokenizer,
     original_texts: List[str] = None,
+    attention_mask: torch.Tensor = None,
 ) -> dict:
     """Decode logits to text and compare with original.
 
@@ -164,6 +168,8 @@ def decode_logits_to_text(
         logits: Decoder output [B, L, V]
         tokenizer: Tokenizer for decoding (e.g., GPT2Tokenizer)
         original_texts: Optional original texts for comparison
+        attention_mask: Optional mask [B, L], 1=valid, 0=pad
+            If provided, only decodes up to actual sequence length
 
     Returns:
         dict with keys:
@@ -181,7 +187,15 @@ def decode_logits_to_text(
     # pred_ids [B, L] -> tokenizer.decode() -> List[str]
     pred_texts = []
     for i in range(pred_ids_tensor.shape[0]):
-        text = tokenizer.decode(pred_ids_tensor[i], skip_special_tokens=True)
+        if attention_mask is not None:
+            # Find actual sequence length (up to first pad position)
+            mask = attention_mask[i].cpu()
+            seq_len = mask.sum().item()
+            # Only decode up to actual length
+            ids = pred_ids_tensor[i, :seq_len]
+        else:
+            ids = pred_ids_tensor[i]
+        text = tokenizer.decode(ids, skip_special_tokens=True)
         pred_texts.append(text)
 
     result = {
@@ -204,3 +218,84 @@ def decode_logits_to_text(
         result["comparisons"] = comparisons
 
     return result
+
+
+def find_latest_checkpoint(checkpoint_dir: Path) -> Optional[Path]:
+    """Find the latest checkpoint file in directory.
+
+    Args:
+        checkpoint_dir: Directory containing checkpoint-*.pt files
+
+    Returns:
+        Path to latest checkpoint, or None if no checkpoints found
+    """
+    checkpoint_files = list(checkpoint_dir.glob("checkpoint-*.pt"))
+    if not checkpoint_files:
+        return None
+
+    # Sort by global_step (extracted from filename)
+    def get_step_from_ckpt(f):
+        # Format: checkpoint-epoch{e}-step{s}-global{g}.pt
+        name = f.stem
+        parts = name.split("-")
+        for p in parts:
+            if p.startswith("global"):
+                return int(p[6:])
+        return 0
+
+    checkpoint_files.sort(key=get_step_from_ckpt, reverse=True)
+    return checkpoint_files[0]
+
+
+def resume_from_checkpoint(
+    checkpoint_path: Path,
+    models: Dict[str, nn.Module],
+    optimizer: torch.optim.Optimizer,
+    scheduler: torch.optim.lr_scheduler.LRScheduler,
+    device: str,
+    log_dir: Optional[Path] = None,
+) -> Tuple[int, int, Dict[str, Any]]:
+    """Resume training from checkpoint.
+
+    Args:
+        checkpoint_path: Path to checkpoint file
+        models: Dict mapping model names to model instances
+            - For ed_train: {"encoder": encoder, "decoder": decoder}
+            - For eqd_train: {"encoder": encoder, "quantizer": quantizer, "decoder": decoder}
+        optimizer: Optimizer instance
+        scheduler: Learning rate scheduler
+        device: Device to load models to
+        log_dir: Optional log directory to load training history
+
+    Returns:
+        Tuple of (start_epoch, global_step, history)
+        - start_epoch: Epoch to resume from (0-indexed)
+        - global_step: Global step to resume from
+        - history: Training history dict
+    """
+    # Load checkpoint
+    ckpt = torch.load(checkpoint_path, map_location=device)
+
+    # Load model weights
+    for name, model in models.items():
+        state_key = f"{name}_state_dict"
+        if state_key in ckpt:
+            model.load_state_dict(ckpt[state_key])
+
+    # Load optimizer and scheduler
+    optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+    scheduler.load_state_dict(ckpt["scheduler_state_dict"])
+
+    # Extract training state
+    start_epoch = ckpt["epoch"] - 1  # Will increment in loop
+    global_step = ckpt["global_step"]
+
+    # Load training history if exists
+    history = {"config": {}, "steps": []}
+    if log_dir is not None:
+        history_path = log_dir / "training_history.json"
+        if history_path.exists():
+            with open(history_path, "r") as f:
+                history = json.load(f)
+
+    return start_epoch, global_step, history

@@ -15,6 +15,8 @@ from .tools import (
     setup_environment,
     collate_fn_text,
     decode_logits_to_text,
+    find_latest_checkpoint,
+    resume_from_checkpoint,
 )
 
 __all__ = [
@@ -25,4 +27,6 @@ __all__ = [
     "setup_environment",
     "collate_fn_text",
     "decode_logits_to_text",
+    "find_latest_checkpoint",
+    "resume_from_checkpoint",
 ]

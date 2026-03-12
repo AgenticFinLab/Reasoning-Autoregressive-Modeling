@@ -75,11 +75,13 @@ train:
   # L2 regularization
   weight_decay: 0.01
   # Number of training epochs
-  num_epochs: 3
-  # Warmup steps for learning rate scheduler
-  warmup_steps: 100
+  num_epochs: 50
+  # Warmup steps for learning rate scheduler (~1% of total steps)
+  warmup_steps: 500
   # Gradient clipping threshold
   gradient_clip: 1.0
+  # Resume from latest checkpoint (true) or start fresh (false)
+  resume: true
 
   # --- Loss Configuration ---
   # Available types: reconstruction, dual_tokenizer_reconstruction, vqae, dual_tokenizer_vqae
@@ -107,7 +109,7 @@ logging:
   # Save decoded samples, training history & print metrics every N steps
   log_interval: 10
   # Save model checkpoints every N steps (less frequent to save disk space)
-  checkpoint_interval: 100
+  checkpoint_interval: 1000
   
   eval_interval: null
   log_level: INFO
