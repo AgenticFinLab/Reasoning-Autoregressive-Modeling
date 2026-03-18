@@ -348,8 +348,8 @@ def train_scales(config: dict):
         for batch_texts in pbar:
             # Tokenize
             tokens = encoder.tokenize(batch_texts)
-            input_ids = tokens["input_ids"]
-            attention_mask = tokens["attention_mask"]
+            input_ids = tokens["input_ids"].to(device)
+            attention_mask = tokens["attention_mask"].to(device)
 
             # Encode
             hidden = encoder(input_ids=input_ids, attention_mask=attention_mask)

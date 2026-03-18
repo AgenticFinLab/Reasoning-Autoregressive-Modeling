@@ -788,8 +788,8 @@ def train_hierarchical(config: dict):
         for batch_texts in pbar:
             # Tokenize
             tokens = encoder.tokenize(batch_texts)
-            input_ids = tokens["input_ids"]
-            attention_mask = tokens["attention_mask"]
+            input_ids = tokens["input_ids"].to(device)
+            attention_mask = tokens["attention_mask"].to(device)
 
             # Encode
             # input_ids [B, L] → encoder → hidden [B, L, D]
