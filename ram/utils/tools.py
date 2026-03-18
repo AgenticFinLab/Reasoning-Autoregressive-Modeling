@@ -48,6 +48,7 @@ def get_device(device: str = "auto") -> torch.device:
         device: Device specification from config.
             - "auto": Auto-detect best available (cuda > mps > cpu)
             - "cuda": Force CUDA (raises error if unavailable)
+            - "cuda:0", "cuda:1", etc.: Force specific GPU
             - "mps": Force MPS (Apple Silicon)
             - "cpu": Force CPU
 
@@ -59,20 +60,88 @@ def get_device(device: str = "auto") -> torch.device:
     """
     if device == "auto":
         if torch.cuda.is_available():
-            return torch.device("cuda")
+            # Select GPU with most free memory
+            return torch.device(select_best_gpu())
         elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
             return torch.device("mps")
         return torch.device("cpu")
     elif device == "cuda":
         if not torch.cuda.is_available():
             raise RuntimeError("CUDA requested but not available")
-        return torch.device("cuda")
+        # Select GPU with most free memory
+        return torch.device(select_best_gpu())
+    elif device.startswith("cuda:"):
+        # Specific GPU requested
+        gpu_id = int(device.split(":")[1])
+        if not torch.cuda.is_available():
+            raise RuntimeError(f"CUDA requested but not available")
+        if gpu_id >= torch.cuda.device_count():
+            raise RuntimeError(
+                f"GPU {gpu_id} not available (only {torch.cuda.device_count()} GPUs)"
+            )
+        return torch.device(f"cuda:{gpu_id}")
     elif device == "mps":
         if not (hasattr(torch.backends, "mps") and torch.backends.mps.is_available()):
             raise RuntimeError("MPS requested but not available")
         return torch.device("mps")
     else:
         return torch.device(device)
+
+
+def select_best_gpu(min_memory_mb: int = 1024) -> str:
+    """Select GPU with most free memory.
+
+    Args:
+        min_memory_mb: Minimum free memory required in MB (default: 1024 = 1GB)
+
+    Returns:
+        str: Device string (e.g., "cuda:0", "cuda:1")
+
+    Raises:
+        RuntimeError: If no GPU has sufficient free memory.
+    """
+    if not torch.cuda.is_available():
+        raise RuntimeError("CUDA not available")
+
+    num_gpus = torch.cuda.device_count()
+    if num_gpus == 0:
+        raise RuntimeError("No CUDA GPUs available")
+
+    if num_gpus == 1:
+        return "cuda:0"
+
+    # Get free memory for each GPU
+    free_memory = []
+    for i in range(num_gpus):
+        props = torch.cuda.get_device_properties(i)
+        # Use memory stats if available (requires torch >= 2.0)
+        try:
+            torch.cuda.reset_peak_memory_stats(i)
+            free_mem = torch.cuda.mem_get_info(i)[0] / (1024**2)  # Convert to MB
+        except:
+            # Fallback: use total memory as approximation
+            free_mem = props.total_memory / (1024**2)
+        free_memory.append((i, free_mem))
+
+    # Sort by free memory (descending)
+    free_memory.sort(key=lambda x: x[1], reverse=True)
+
+    # Select GPU with most free memory
+    best_gpu, best_free = free_memory[0]
+
+    if best_free < min_memory_mb:
+        raise RuntimeError(
+            f"No GPU has sufficient free memory. "
+            f"Best GPU {best_gpu} has {best_free:.1f} MB free, "
+            f"but {min_memory_mb} MB required."
+        )
+
+    print(f"GPU Selection: {num_gpus} GPUs available")
+    for gpu_id, mem in free_memory:
+        marker = " <-- SELECTED" if gpu_id == best_gpu else ""
+        print(f"  cuda:{gpu_id}: {mem:.1f} MB free{marker}")
+
+    return f"cuda:{best_gpu}"
 
 
 def setup_environment(env_cfg: dict) -> torch.device:
