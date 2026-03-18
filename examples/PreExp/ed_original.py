@@ -1,18 +1,17 @@
-"""Encoder-Quantizer-Decoder Training: VQ-AE Text Reconstruction.
+"""Encoder-Decoder Training: Simple Text Reconstruction.
 
 Usage:
-    python examples/uTEST/test_eqd_train.py -c configs/uTEST/eqd_train.yml
+    python examples/uTEST/test_ed_train.py -c configs/uTEST/ed_train.yml
 
 Task:
-    Train VQ-AE (Vector Quantized Autoencoder) for text reconstruction.
-    This adds multi-scale quantization bottleneck between encoder and decoder.
+    Train encoder-decoder to reconstruct input text.
+    This is the simplest autoencoder baseline before adding quantization.
 
-Config (example: B=4, L=64, D=256, V=50257, K=1024):
+Config (example: B=4, L=64, D=768, V=50257):
     - B: batch size
     - L: max sequence length
-    - D: latent dimension (encoder output_dim = quantizer codebook_dim)
+    - D: hidden dimension (BERT=768, GPT2=768)
     - V: vocabulary size (GPT2=50257)
-    - K: codebook size (quantizer)
 
 Pipeline:
     ┌─────────────────────┐
@@ -26,44 +25,29 @@ Pipeline:
              │ Encoder.forward()
              ▼
     ┌─────────────────────┐
-    │ z [B, L, D]         │  [4, 64, 256] continuous features
-    └────────┬────────────┘
-             │ Quantizer.forward()
-             ▼
-    ┌─────────────────────┐
-    │ f_hat [B, L, D]     │  [4, 64, 256] quantized features
-    │ vq_loss (scalar)    │  VQ commitment + codebook loss
-    │ indices [K scales]  │  discrete codes per scale
+    │ hidden [B, L, D]    │  [4, 64, 768] continuous representations
     └────────┬────────────┘
              │ Decoder.forward()
              ▼
     ┌─────────────────────┐
     │ logits [B, L, V]    │  [4, 64, 50257] token logits
     └────────┬────────────┘
-             │ loss_fn(logits, texts, vq_loss)
+             │ loss_fn(logits, texts)
              ▼
     ┌─────────────────────┐
-    │ total_loss          │  recon_loss + λ * vq_loss
+    │ loss (scalar)       │  reconstruction loss
     └────────┬────────────┘
              │ loss.backward() + optimizer.step()
              ▼
     ┌─────────────────────┐
-    │ Updated weights     │  encoder + quantizer + decoder
+    │ Updated weights     │  encoder + decoder parameters
     └─────────────────────┘
-
-Multi-Scale Quantization (VAR's Innovation):
-    For each scale k ∈ [1, 2, 4, 8, 16, 32, 64]:
-        f_rest [B, L, D] -> downsample -> [B, k, D]
-        [B, k, D] -> codebook lookup -> indices [B, k]
-        [B, k, D] -> phi_k -> h_k -> upsample -> [B, L, D]
-        f_hat += h_k_up, f_rest -= h_k_up
 
 Dimensions:
     B = batch_size (e.g., 4)
     L = max_length (e.g., 64)
-    D = latent_dim (e.g., 256)
+    D = hidden_dim (BERT/GPT2: 768)
     V = vocab_size (GPT2: 50257)
-    K = codebook_size (e.g., 1024)
 
 Restoration (inference):
     logits [B, L, V=50257] -> argmax(dim=-1) -> pred_ids [B, L]
@@ -75,9 +59,8 @@ Restoration (inference):
     - tokenizer.decode converts IDs back to text
 
 Loss Configuration:
-    BERT (encoder) + GPT2 (decoder) = different tokenizers + quantizer
-    -> Use "dual_tokenizer_vqae" loss type
-    -> L_total = L_recon + λ * L_vq
+    BERT (encoder) + GPT2 (decoder) = different tokenizers
+    -> Use "dual_tokenizer_reconstruction" loss type
     -> Target IDs computed from decoder's tokenizer internally
 """
 
@@ -97,7 +80,6 @@ from transformers import AutoTokenizer
 
 from ram.models.encoder import build_encoder
 from ram.models.decoder import build_decoder
-from ram.models.quantizer import build_quantizer
 from ram.utils import (
     load_config,
     setup_environment,
@@ -112,17 +94,16 @@ from ram.losses import (
 )
 
 
-def train_eqd(config: dict):
+def train_ed(config: dict):
     """
-    Train Encoder-Quantizer-Decoder (VQ-AE) for text reconstruction.
+    Train Encoder-Decoder for text reconstruction.
 
     Training Flow:
         Step 1: texts [B] -> Encoder.tokenize() -> input_ids [B, L]
-        Step 2: input_ids [B, L] -> Encoder.forward() -> z [B, L, D]
-        Step 3: z [B, L, D] -> Quantizer.forward() -> f_hat [B, L, D], vq_loss
-        Step 4: f_hat [B, L, D] -> Decoder.forward() -> logits [B, L, V]
-        Step 5: loss_fn(logits, texts, vq_loss) -> total_loss (using decoder's tokenizer!)
-        Step 6: total_loss.backward() -> optimizer.step() -> update weights
+        Step 2: input_ids [B, L] -> Encoder.forward() -> hidden [B, L, D]
+        Step 3: hidden [B, L, D] -> Decoder.forward() -> logits [B, L, V]
+        Step 4: loss_fn(logits, texts) -> loss (using decoder's tokenizer!)
+        Step 5: loss.backward() -> optimizer.step() -> update weights
 
     NOTE: BERT (encoder) + GPT2 (decoder) have different tokenizers.
           Target IDs are computed from DECODER's tokenizer internally.
@@ -132,7 +113,6 @@ def train_eqd(config: dict):
     # =================================================================
     enc_cfg = config["model"]["encoder"]
     dec_cfg = config["model"]["decoder"]
-    quant_cfg = config["model"]["quantizer"]
     data_cfg = config["data"]
     train_cfg = config["train"]
     env_cfg = config["environment"]
@@ -145,13 +125,13 @@ def train_eqd(config: dict):
     num_epochs = train_cfg["num_epochs"]
     warmup_steps = train_cfg["warmup_steps"]
     gradient_clip = train_cfg["gradient_clip"]
-    resume = train_cfg.get("resume", False)
+    resume = train_cfg["resume"]
 
     # Logging intervals
     # Print & save samples/history
     log_interval = log_cfg["log_interval"]
     # Save model checkpoint
-    checkpoint_interval = log_cfg.get("checkpoint_interval", 100)
+    checkpoint_interval = log_cfg["checkpoint_interval"]
 
     output_dir = Path(log_cfg["output_dir"])
     checkpoint_dir = Path(log_cfg["checkpoint_dir"])
@@ -164,7 +144,6 @@ def train_eqd(config: dict):
 
     # Dimensions
     L = enc_cfg["max_length"]
-    D = enc_cfg["output_dim"]
 
     # Setup environment (seed + device)
     device = setup_environment(env_cfg)
@@ -172,7 +151,6 @@ def train_eqd(config: dict):
     print(f"Device: {device}")
     print(f"Batch size: {batch_size}")
     print(f"Max length: {L}")
-    print(f"Latent dim: {D}")
     print(f"Learning rate: {learning_rate}")
     print(f"Epochs: {num_epochs}")
     print(f"Output dir: {output_dir}")
@@ -184,17 +162,10 @@ def train_eqd(config: dict):
     print("[1] Building Encoder...")
     encoder = build_encoder(enc_cfg)
     encoder = encoder.to(device)
-    print(f"    hidden_dim: {encoder.hidden_dim}, output_dim: {encoder.output_dim}")
+    D = encoder.output_dim
+    print(f"    hidden_dim: {encoder.hidden_dim}, output_dim: {D}")
 
-    print("[2] Building Quantizer...")
-    quantizer = build_quantizer(quant_cfg)
-    quantizer = quantizer.to(device)
-    print(f"    codebook_size: {quantizer.codebook_size}")
-    print(f"    codebook_dim: {quantizer.codebook_dim}")
-    print(f"    scale_lengths: {quantizer.scale_lengths}")
-    print(f"    num_scales: {quantizer.num_scales}")
-
-    print("[3] Building Decoder...")
+    print("[2] Building Decoder...")
     decoder = build_decoder(dec_cfg, input_dim=D)
     decoder = decoder.to(device)
     V = decoder.vocab_size
@@ -216,11 +187,9 @@ def train_eqd(config: dict):
     # Setup loss function (from config with validation)
     # =================================================================
     print("[3.5] Setting up loss function...")
-    loss_cfg = train_cfg.get("loss", {})
-    loss_type = loss_cfg.get("type", "dual_tokenizer_vqae")
-    vq_weight = loss_cfg.get("vq_weight", 1.0)
+    loss_cfg = train_cfg["loss"]
+    loss_type = loss_cfg["type"]
     print(f"    Loss type: {loss_type}")
-    print(f"    VQ weight: {vq_weight}")
 
     # Validate loss config against tokenizer setup
     loss_warnings = validate_loss_config(
@@ -248,7 +217,7 @@ def train_eqd(config: dict):
     # =================================================================
     # Load data
     # =================================================================
-    print("[4] Loading dataset...")
+    print("[3] Loading dataset...")
     dataset = registry.get(data_cfg, split=data_cfg["split"])
     dataloader = DataLoader(
         dataset,
@@ -264,13 +233,9 @@ def train_eqd(config: dict):
     # =================================================================
     # Setup optimizer and scheduler
     # =================================================================
-    print("[5] Setting up optimizer...")
-    # Combine encoder, quantizer, and decoder parameters
-    params = (
-        list(encoder.parameters())
-        + list(quantizer.parameters())
-        + list(decoder.parameters())
-    )
+    print("[4] Setting up optimizer...")
+    # Combine encoder and decoder parameters
+    params = list(encoder.parameters()) + list(decoder.parameters())
     optimizer = AdamW(params, lr=learning_rate, weight_decay=weight_decay)
 
     # Linear warmup scheduler
@@ -296,11 +261,7 @@ def train_eqd(config: dict):
             "learning_rate": learning_rate,
             "num_epochs": num_epochs,
             "max_length": L,
-            "latent_dim": D,
-            "codebook_size": quantizer.codebook_size,
-            "scale_lengths": quantizer.scale_lengths,
             "loss_type": loss_type,
-            "vq_weight": vq_weight,
         },
         "steps": [],
     }
@@ -308,10 +269,10 @@ def train_eqd(config: dict):
     if resume:
         latest_ckpt = find_latest_checkpoint(checkpoint_dir)
         if latest_ckpt is not None:
-            print(f"[5.5] Resuming from: {latest_ckpt.name}")
+            print(f"[4.5] Resuming from: {latest_ckpt.name}")
             start_epoch, global_step, history = resume_from_checkpoint(
                 checkpoint_path=latest_ckpt,
-                models={"encoder": encoder, "quantizer": quantizer, "decoder": decoder},
+                models={"encoder": encoder, "decoder": decoder},
                 optimizer=optimizer,
                 scheduler=scheduler,
                 device=device,
@@ -321,23 +282,20 @@ def train_eqd(config: dict):
             print(f"    Loaded training history: {len(history['steps'])} steps")
             print()
         else:
-            print("[5.5] No checkpoint found, starting fresh")
+            print("[4.5] No checkpoint found, starting fresh")
             print()
 
     # =================================================================
     # Training loop
     # =================================================================
-    print("[6] Starting training...")
+    print("[5] Starting training...")
     print("=" * 60)
 
     encoder.train()
-    quantizer.train()
     decoder.train()
 
     for epoch in range(start_epoch, num_epochs):
         epoch_loss = 0.0
-        epoch_recon_loss = 0.0
-        epoch_vq_loss = 0.0
         num_batches = 0
 
         pbar = tqdm(dataloader, desc=f"Epoch {epoch+1}/{num_epochs}")
@@ -349,32 +307,24 @@ def train_eqd(config: dict):
             attention_mask = tokens["attention_mask"].to(device)
 
             # Step 2: Encode
-            # input_ids [B, L] -> z [B, L, D]
-            z = encoder(input_ids=input_ids, attention_mask=attention_mask)
+            # input_ids [B, L] -> hidden [B, L, D]
+            hidden = encoder(input_ids=input_ids, attention_mask=attention_mask)
 
-            # Step 3: Quantize
-            # z [B, L, D] -> f_hat [B, L, D], vq_loss, indices_per_scale
-            f_hat, vq_loss, indices_per_scale = quantizer(z)
+            # Step 3: Decode
+            # hidden [B, L, D] -> logits [B, L, V]
+            logits = decoder(hidden, attention_mask=attention_mask)
 
-            # Step 4: Decode
-            # f_hat [B, L, D] -> logits [B, L, V]
-            logits = decoder(f_hat, attention_mask=attention_mask)
-
-            # Step 5: Compute loss using configured loss function
-            # For dual_tokenizer_vqae: loss_fn(logits, texts, vq_loss) -> total_loss, details
-            # For vqae: loss_fn(logits, target_ids, vq_loss=vq_loss) -> total_loss, details
+            # Step 4: Compute loss using configured loss function
+            # For dual_tokenizer types: loss_fn(logits, texts) -> loss, target_ids
+            # For same_tokenizer types: loss_fn(logits, target_ids) -> loss
             if "dual_tokenizer" in loss_type:
-                total_loss, loss_details = loss_fn(logits, batch_texts, vq_loss=vq_loss)
-                recon_loss = loss_details["recon_loss"]
+                loss, _ = loss_fn(logits, batch_texts)
             else:
-                total_loss, loss_details = loss_fn(
-                    logits, input_ids, vq_loss=vq_loss, attention_mask=attention_mask
-                )
-                recon_loss = loss_details["recon_loss"]
+                loss = loss_fn(logits, input_ids, attention_mask=attention_mask)
 
-            # Step 6: Backward and optimize
+            # Step 5: Backward and optimize
             optimizer.zero_grad()
-            total_loss.backward()
+            loss.backward()
 
             # Gradient clipping
             nn.utils.clip_grad_norm_(params, gradient_clip)
@@ -383,12 +333,7 @@ def train_eqd(config: dict):
             scheduler.step()
 
             # Logging
-            # Note: loss_details values are already floats (from .item() in loss function)
-            epoch_loss += total_loss.item()
-            # recon_loss is already a float from loss_details
-            epoch_recon_loss += recon_loss
-            # vq_loss is a tensor from quantizer
-            epoch_vq_loss += vq_loss.item()
+            epoch_loss += loss.item()
             num_batches += 1
             global_step += 1
 
@@ -398,36 +343,22 @@ def train_eqd(config: dict):
                     "epoch": epoch + 1,
                     "step_in_epoch": num_batches,
                     "global_step": global_step,
-                    "loss": total_loss.item(),
-                    # recon_loss is already a float from loss_details
-                    "recon_loss": recon_loss,
-                    "vq_loss": vq_loss.item(),
+                    "loss": loss.item(),
                     "avg_loss": epoch_loss / num_batches,
-                    "avg_recon_loss": epoch_recon_loss / num_batches,
-                    "avg_vq_loss": epoch_vq_loss / num_batches,
                     "lr": scheduler.get_last_lr()[0],
                 }
             )
 
             # Update progress bar
-            pbar.set_postfix(
-                {
-                    "loss": f"{total_loss.item():.4f}",
-                    # recon_loss is already a float from loss_details
-                    "recon": f"{recon_loss:.4f}",
-                    "vq": f"{vq_loss.item():.4f}",
-                }
-            )
+            pbar.set_postfix({"loss": f"{loss.item():.4f}"})
 
             # --- Log & save samples at log_interval ---
             if global_step % log_interval == 0:
                 avg_loss = epoch_loss / num_batches
-                avg_recon = epoch_recon_loss / num_batches
-                avg_vq = epoch_vq_loss / num_batches
                 lr = scheduler.get_last_lr()[0]
                 print(
-                    f"    Step {global_step}: loss={total_loss.item():.4f}, "
-                    f"recon={recon_loss:.4f}, vq={vq_loss.item():.4f}, lr={lr:.2e}"
+                    f"    Step {global_step}: loss={loss.item():.4f}, "
+                    f"avg_loss={avg_loss:.4f}, lr={lr:.2e}"
                 )
 
                 # Decode current batch to text for inspection
@@ -435,10 +366,6 @@ def train_eqd(config: dict):
                     decode_result = decode_logits_to_text(
                         logits, dec_tokenizer, batch_texts, attention_mask
                     )
-                    # Add quantization info
-                    decode_result["indices_per_scale"] = [
-                        idx.cpu().tolist() for idx in indices_per_scale
-                    ]
 
                 # Save decoded text samples (full results)
                 step_in_epoch = num_batches
@@ -457,18 +384,17 @@ def train_eqd(config: dict):
             # --- Save checkpoint at checkpoint_interval ---
             if global_step % checkpoint_interval == 0:
                 step_in_epoch = num_batches
+                avg_loss = epoch_loss / num_batches
                 checkpoint = {
                     "epoch": epoch + 1,
                     "step_in_epoch": step_in_epoch,
                     "global_step": global_step,
                     "encoder_state_dict": encoder.state_dict(),
-                    "quantizer_state_dict": quantizer.state_dict(),
                     "decoder_state_dict": decoder.state_dict(),
                     "optimizer_state_dict": optimizer.state_dict(),
                     "scheduler_state_dict": scheduler.state_dict(),
-                    "loss": total_loss.item(),
-                    "recon_loss": recon_loss,
-                    "vq_loss": vq_loss.item(),
+                    "loss": loss.item(),
+                    "avg_loss": avg_loss,
                 }
                 ckpt_name = f"checkpoint-epoch{epoch+1}-step{step_in_epoch}-global{global_step}.pt"
                 ckpt_path = checkpoint_dir / ckpt_name
@@ -477,12 +403,7 @@ def train_eqd(config: dict):
 
         # Epoch summary
         avg_epoch_loss = epoch_loss / num_batches
-        avg_epoch_recon = epoch_recon_loss / num_batches
-        avg_epoch_vq = epoch_vq_loss / num_batches
-        print(
-            f"Epoch {epoch+1} completed: loss={avg_epoch_loss:.4f}, "
-            f"recon={avg_epoch_recon:.4f}, vq={avg_epoch_vq:.4f}"
-        )
+        print(f"Epoch {epoch+1} completed: avg_loss={avg_epoch_loss:.4f}")
         print()
 
         # Save checkpoint at end of each epoch
@@ -492,13 +413,10 @@ def train_eqd(config: dict):
             "step_in_epoch": step_in_epoch,
             "global_step": global_step,
             "encoder_state_dict": encoder.state_dict(),
-            "quantizer_state_dict": quantizer.state_dict(),
             "decoder_state_dict": decoder.state_dict(),
             "optimizer_state_dict": optimizer.state_dict(),
             "scheduler_state_dict": scheduler.state_dict(),
             "avg_loss": avg_epoch_loss,
-            "avg_recon_loss": avg_epoch_recon,
-            "avg_vq_loss": avg_epoch_vq,
         }
         ckpt_name = (
             f"checkpoint-epoch{epoch+1}-step{step_in_epoch}-global{global_step}.pt"
@@ -526,10 +444,9 @@ def train_eqd(config: dict):
     # =================================================================
     # Evaluation: Sample reconstruction
     # =================================================================
-    print("[7] Sample reconstruction...")
+    print("[6] Sample reconstruction...")
 
     encoder.eval()
-    quantizer.eval()
     decoder.eval()
 
     # Get a sample batch
@@ -540,13 +457,10 @@ def train_eqd(config: dict):
         tokens = encoder.tokenize(sample_texts)
         input_ids = tokens["input_ids"].to(device)
         attention_mask = tokens["attention_mask"].to(device)
-        z = encoder(input_ids=input_ids, attention_mask=attention_mask)
-
-        # Quantize
-        f_hat, vq_loss, indices_per_scale = quantizer(z)
+        hidden = encoder(input_ids=input_ids, attention_mask=attention_mask)
 
         # Decode
-        logits = decoder(f_hat, attention_mask=attention_mask)
+        logits = decoder(hidden, attention_mask=attention_mask)
 
         # logits [B, L, V=50257] -> argmax(dim=-1) -> pred_ids [B, L]
         pred_ids = logits.argmax(dim=-1)
@@ -556,7 +470,6 @@ def train_eqd(config: dict):
     print(f"      Original:      {sample_texts[0][:80]}...")
     pred_text = dec_tokenizer.decode(pred_ids[0], skip_special_tokens=True)
     print(f"      Reconstructed: {pred_text[:80]}...")
-    print(f"      VQ Loss:       {vq_loss.item():.4f}")
     print()
 
     if len(sample_texts) > 1:
@@ -573,18 +486,18 @@ def train_eqd(config: dict):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Encoder-Quantizer-Decoder Training for VQ-AE Text Reconstruction"
+        description="Encoder-Decoder Training for Text Reconstruction"
     )
     parser.add_argument(
         "-c",
         "--config",
         type=str,
         required=True,
-        help="Path to config file (e.g., configs/uTEST/eqd_train.yml)",
+        help="Path to config file (e.g., configs/uTEST/ed_train.yml)",
     )
     args = parser.parse_args()
 
     config = load_config(args.config)
     print(f"Config: {args.config}")
     print("=" * 60)
-    train_eqd(config)
+    train_ed(config)

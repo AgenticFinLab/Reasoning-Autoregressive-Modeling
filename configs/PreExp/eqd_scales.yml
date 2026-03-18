@@ -1,0 +1,95 @@
+# =============================================================================
+# Encoder-Quantizer-Decoder with Multi-Scale Quantization Configuration
+# =============================================================================
+# Purpose: Test VAR-style multi-scale residual quantization for text
+# Pipeline: Text → Encoder → z → Quantizer(multi-scale) → f_hat → Decoder → logits
+#
+# Scale Configuration Options:
+#   Option A - VAR Original (for images): [1, 2, 4, 8, 16, 32] = 63 codes (8:1 compression)
+#   Option B - More Codes (for text): [32, 64, 128, 256, 512] = 992 codes (1:2 expansion)
+#   Option C - Custom: any list of integers
+# =============================================================================
+
+# =============================================================================
+# Data Configuration
+# =============================================================================
+data:
+  data_name: math
+  data_path: ./EXPERIMENT/data
+  split: train
+
+# =============================================================================
+# Environment Configuration
+# =============================================================================
+environment:
+  seed: 42
+  device: auto
+
+# =============================================================================
+# Model Architecture
+# =============================================================================
+model:
+  # --- Encoder ---
+  encoder:
+    model_name: bert-base-uncased
+    pretrained: true
+    freeze: false
+    output_dim: 256
+    max_length: 512
+
+  # --- Latent Dimension ---
+  latent_dim: 256
+
+  # --- Quantizer (Multi-Scale VAR-style) ---
+  # scale_lengths: controls number of codes and compression ratio
+  #   [1, 2, 4, 8, 16, 32] = 63 codes → 8:1 compression (VAR original, for images)
+  #   [32, 64, 128, 256, 512] = 992 codes → 1:2 expansion (better for text)
+  quantizer:
+    type: multi_scale
+    codebook_size: 4096
+    scale_lengths: [32, 64, 128, 256, 512]  # 992 total codes (change as needed)
+    beta: 0.25
+    quant_resi: 0.5
+    share_quant_resi: 4
+    using_znorm: false
+
+  # --- Decoder ---
+  decoder:
+    model_name: gpt2
+    pretrained: true
+    freeze: false
+
+# =============================================================================
+# Training Configuration
+# =============================================================================
+train:
+  batch_size: 4
+  learning_rate: 1.0e-4
+  weight_decay: 0.01
+  num_epochs: 20
+  warmup_steps: 200
+  gradient_clip: 1.0
+  vq_loss_weight: 1.0
+  resume: true
+
+  # --- Loss Configuration ---
+  loss:
+    type: dual_tokenizer_vqae
+    ignore_index: -100
+    label_smoothing: 0.0
+
+# =============================================================================
+# Logging Configuration
+# =============================================================================
+logging:
+  output_dir: ./EXPERIMENT/PreExp-eqd_scales
+  checkpoint_dir: ./EXPERIMENT/PreExp-eqd_scales/checkpoints
+  log_dir: ./EXPERIMENT/PreExp-eqd_scales/logs
+  
+  log_interval: 50
+  checkpoint_interval: 500
+  
+  eval_interval: null
+  log_level: INFO
+  use_wandb: false
+  wandb_project: null

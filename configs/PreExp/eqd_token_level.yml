@@ -1,0 +1,86 @@
+# =============================================================================
+# Encoder-Quantizer-Decoder with Token-Level Quantization Configuration
+# =============================================================================
+# Purpose: Test standard VQ-VAE quantization (not VAR-style multi-scale)
+# Approach: Each token position gets its own discrete code (1:1 mapping)
+# Pipeline: Text → Encoder → z → TokenLevelQuantizer → q → Decoder → logits
+
+# =============================================================================
+# Data Configuration
+# =============================================================================
+data:
+  data_name: math
+  data_path: ./EXPERIMENT/data
+  split: train
+
+# =============================================================================
+# Environment Configuration
+# =============================================================================
+environment:
+  seed: 42
+  device: auto
+
+# =============================================================================
+# Model Architecture
+# =============================================================================
+model:
+  # --- Encoder ---
+  encoder:
+    model_name: bert-base-uncased
+    pretrained: true
+    freeze: false
+    output_dim: 256
+    max_length: 512
+
+  # --- Latent Dimension ---
+  latent_dim: 256
+
+  # --- Quantizer (TOKEN-LEVEL) ---
+  # Standard VQ-VAE: one code per token position
+  # Total codes per sequence: 512 (one per token)
+  quantizer:
+    type: token_level
+    codebook_size: 4096
+    beta: 0.25
+    using_znorm: false
+
+  # --- Decoder ---
+  decoder:
+    model_name: gpt2
+    pretrained: true
+    freeze: false
+
+# =============================================================================
+# Training Configuration
+# =============================================================================
+train:
+  batch_size: 4
+  learning_rate: 1.0e-4
+  weight_decay: 0.01
+  num_epochs: 20
+  warmup_steps: 200
+  gradient_clip: 1.0
+  vq_loss_weight: 1.0
+  resume: true
+
+  # --- Loss Configuration ---
+  loss:
+    type: dual_tokenizer_vqae
+    ignore_index: -100
+    label_smoothing: 0.0
+
+# =============================================================================
+# Logging Configuration
+# =============================================================================
+logging:
+  output_dir: ./EXPERIMENT/PreExp-eqd_token_level
+  checkpoint_dir: ./EXPERIMENT/PreExp-eqd_token_level/checkpoints
+  log_dir: ./EXPERIMENT/PreExp-eqd_token_level/logs
+  
+  log_interval: 50
+  checkpoint_interval: 500
+  
+  eval_interval: null
+  log_level: INFO
+  use_wandb: false
+  wandb_project: null

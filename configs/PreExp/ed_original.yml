@@ -85,9 +85,9 @@ train:
 # Logging Configuration
 # =============================================================================
 logging:
-  output_dir: ./EXPERIMENT/uTEST-ed_train
-  checkpoint_dir: ./EXPERIMENT/uTEST-ed_train/checkpoints
-  log_dir: ./EXPERIMENT/uTEST-ed_train/logs
+  output_dir: ./EXPERIMENT/PreExp-ed_original
+  checkpoint_dir: ./EXPERIMENT/PreExp-ed_original/checkpoints
+  log_dir: ./EXPERIMENT/PreExp-ed_original/logs
   
   # --- Intervals ---
   # Save decoded samples, training history & print metrics every N steps
