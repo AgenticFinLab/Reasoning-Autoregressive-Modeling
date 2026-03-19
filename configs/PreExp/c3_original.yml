@@ -1,0 +1,213 @@
+# =============================================================================
+# C3 Context Cascade Compression Configuration
+# =============================================================================
+# Used by: examples/PreExp/c3_original.py
+# Task: Verify C3Encoder and C3Decoder implementation against official code
+# Paper: "Context Cascade Compression: Exploring the Upper Limits of Text Compression"
+#         (arXiv:2511.15244)
+#
+# Official Code: third-part/C3-Context-Cascade-Compression-main/C3-master/C3/model/C3.py
+#
+# Pipeline:
+#   text + <img> + <imgpad>*N + </img>
+#       -> Encoder LLM -> hidden_states
+#       -> Extract [img_pos+1 : img_pos+N+1] -> latent_tokens [B, N, D]
+#       -> mm_projector -> projected_latent [B, N, D_decoder]
+#       -> Decoder LLM -> logits [B, L, V]
+
+# =============================================================================
+# Data Configuration
+# =============================================================================
+# Source: third-part/C3-Context-Cascade-Compression-main/C3-master/C3/utils/arguments.py
+#         Lines 20-31: DataArguments
+data:
+  data_name: fox                      # Official benchmark: Fox dataset
+  data_path: ./EXPERIMENT/data
+  split: train
+  # Source: Line 25
+  conversation_version: mpt           # Official: "mpt" conversation format
+
+# =============================================================================
+# Environment Configuration
+# =============================================================================
+# Source: third-part/C3-Context-Cascade-Compression-main/C3-master/README.md
+#         Lines 47-48: torch==2.6.0, transformers==4.49.0
+environment:
+  seed: 42
+  device: auto                        # auto: select GPU with most free memory
+  # Source: Line 99
+  dataloader_num_workers: 8           # Official: 8 workers
+  # Source: Line 97
+  tf32: true                          # Official: True for A100/H100
+
+# =============================================================================
+# Model Architecture
+# =============================================================================
+# Source: third-part/C3-Context-Cascade-Compression-main/C3-master/C3/model/C3.py
+#         Lines 25-26: C3Config inherits from Qwen2Config
+#         Line 35: self.Q = nn.Embedding(config.latent_token_len, config.contexts_compression_llm_hidden_size)
+#         Line 36: self.mm_projector = nn.Linear(config.contexts_compression_llm_hidden_size, config.hidden_size)
+model:
+  # --- C3 Encoder (llm1 in official code) ---
+  # Source: third-part/C3-Context-Cascade-Compression-main/C3-master/C3/model/C3.py
+  #         Lines 328-333, 340-346: llm1 = Qwen2ForCausalLM.from_pretrained(...)
+  #         Official uses Qwen2.5-1.5B (hidden_dim=1536)
+  encoder:
+    # Official: Qwen/Qwen2.5-1.5B (from HuggingFace liufanfanlff/C3-Context-Cascade-Compression)
+    model_name: Qwen/Qwen2.5-1.5B     # Official: Qwen/Qwen2.5-1.5B (llm1)
+    pretrained: true                  # Load pretrained weights
+    freeze: false                     # Train encoder (see train.py Lines 43-49)
+    # Source: Line 35 - config.latent_token_len
+    # Official release: 32 latent tokens (README Line 53)
+    num_latent_tokens: 32             # N = 32 (official default)
+    # Source: third-part/C3-Context-Cascade-Compression-main/C3-master/README.md
+    #         Line 97: model_max_length 8192
+    max_length: 8192                  # Official: 8192 (supports long context)
+    # Source: Line 38
+    use_im_start_end: true            # Official: True
+
+  # --- C3 Decoder (main LLM) ---
+  # Source: third-part/C3-Context-Cascade-Compression-main/C3-master/C3/model/C3.py
+  #         Lines 164-176: C3QwenForCausalLM inherits from Qwen2ForCausalLM
+  #         Official uses Qwen2.5-3B (hidden_dim=2048)
+  decoder:
+    # Official: Qwen/Qwen2.5-3B (main decoder LLM)
+    model_name: Qwen/Qwen2.5-3B       # Official: Qwen/Qwen2.5-3B
+    pretrained: true                  # Load pretrained weights
+    freeze: false                     # Train decoder
+    # Must match encoder's num_latent_tokens
+    num_latent_tokens: 32             # N = 32 (must match encoder)
+
+  # --- Multi-Scale Quantizer ---
+  # C3 does NOT use quantizer, uses learned Q embeddings instead
+  quantizer: null
+
+  # --- Latent dimension ---
+  # C3 uses encoder's hidden_dim directly, projected via mm_projector
+  # Source: Line 36: mm_projector = Linear(contexts_compression_llm_hidden_size, hidden_size)
+  latent_dim: null
+
+# =============================================================================
+# Training Configuration
+# =============================================================================
+# Source: third-part/C3-Context-Cascade-Compression-main/C3-master/README.md
+#         Lines 83-108: Training script
+train:
+  # Source: Line 101
+  batch_size: 2                       # Official: per_device_train_batch_size 2
+  # Source: Line 103
+  learning_rate: 1.0e-5               # Official: 1e-5
+  # Source: Line 93
+  weight_decay: 0.0                   # Official: 0.
+  # Source: Line 102
+  num_epochs: 5                       # Official: 5
+  # Source: Line 94
+  warmup_ratio: 0.01                  # Official: 0.01
+  # Source: Line 88
+  gradient_accumulation_steps: 16     # Official: 16
+  gradient_clip: 1.0                  # Default
+  # Source: Line 98
+  gradient_checkpointing: true        # Official: True
+  # Source: Line 87
+  bf16: true                          # Official: True (bfloat16 training)
+  # Source: Line 95
+  lr_scheduler_type: cosine           # Official: cosine
+  resume: true
+
+  # --- Loss Configuration ---
+  # Source: third-part/C3-Context-Cascade-Compression-main/C3-master/C3/model/C3.py
+  #         Lines 224-234: CrossEntropyLoss with shift
+  loss:
+    type: dual_tokenizer_reconstruction
+    ignore_index: -100
+    label_smoothing: 0.0
+
+# =============================================================================
+# Logging Configuration
+# =============================================================================
+# Source: third-part/C3-Context-Cascade-Compression-main/C3-master/README.md
+#         Lines 89-92, 106-107
+logging:
+  output_dir: ./EXPERIMENT/PreExp-c3_original
+  checkpoint_dir: ./EXPERIMENT/PreExp-c3_original/checkpoints
+  log_dir: ./EXPERIMENT/PreExp-c3_original/logs
+  
+  # Source: Line 107
+  log_interval: 10                    # Official: logging_steps 10
+  # Source: Line 91
+  checkpoint_interval: 5000           # Official: save_steps 5000
+  # Source: Line 92
+  save_total_limit: 1                 # Official: save_total_limit 1
+  
+  # Source: Line 89
+  evaluation_strategy: "no"           # Official: "no"
+  eval_interval: null
+  log_level: INFO
+  # Source: Line 100
+  use_wandb: false                    # Official: report_to none
+  wandb_project: null
+
+# =============================================================================
+# C3-Specific Configuration (Official Reference)
+# =============================================================================
+# These values are from the official implementation for reference
+# Source: third-part/C3-Context-Cascade-Compression-main/C3-master/C3/model/C3.py
+c3_reference:
+  # --- Models (from HuggingFace release) ---
+  # Source: Lines 328-333, 340-346
+  encoder_model: Qwen/Qwen2.5-1.5B    # llm1: contexts_compression_llm
+  encoder_hidden_dim: 1536            # Qwen2.5-1.5B hidden_size
+  
+  decoder_model: Qwen/Qwen2.5-3B     # main decoder LLM
+  decoder_hidden_dim: 2048            # Qwen2.5-3B hidden_size
+  
+  # --- mm_projector ---
+  # Source: Line 36
+  mm_projector_in: 1536               # contexts_compression_llm_hidden_size
+  mm_projector_out: 2048              # hidden_size (decoder)
+  
+  # --- Special Tokens ---
+  # Source: Lines 21-23
+  special_tokens:
+    im_start: <img>                   # DEFAULT_IM_START_TOKEN
+    im_end: </img>                    # DEFAULT_IM_END_TOKEN
+    im_patch: <imgpad>                # DEFAULT_IMAGE_PATCH_TOKEN
+  
+  # --- Config Keys ---
+  # Source: Line 35
+  latent_token_len: 32                # config.latent_token_len (N)
+  # Source: Line 38
+  use_im_start_end: true              # config.use_im_start_end
+  
+  # --- Compression Ratios (from paper) ---
+  # Paper reports these accuracy numbers
+  compression_ratios:
+    - ratio: 20x
+      accuracy: 98%
+      latent_tokens: 64
+      text_length: 1280
+    - ratio: 40x
+      accuracy: 93%
+      latent_tokens: 32
+      text_length: 1280
+
+  # --- Training Args (from README Lines 83-108) ---
+  training_args:
+    deepspeed_config: zero2.json
+    model_max_length: 8192
+    per_device_train_batch_size: 2
+    gradient_accumulation_steps: 16
+    num_train_epochs: 5
+    learning_rate: 1e-5
+    weight_decay: 0.0
+    warmup_ratio: 0.01
+    lr_scheduler_type: cosine
+    bf16: true
+    tf32: true
+    gradient_checkpointing: true
+    dataloader_num_workers: 8
+    save_steps: 5000
+    save_total_limit: 1
+    logging_steps: 10
+    evaluation_strategy: "no"
+    report_to: "none"
