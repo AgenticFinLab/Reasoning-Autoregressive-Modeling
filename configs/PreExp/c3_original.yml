@@ -132,7 +132,7 @@ train:
   # Source: Line 93
   weight_decay: 0.0                   # Official: 0.
   # Source: Line 102
-  num_epochs: 5                       # Official: 5
+  num_epochs: 15                       # Official: 5
   # Source: Line 94
   warmup_ratio: 0.01                  # Official: 0.01
   # Source: Line 88
