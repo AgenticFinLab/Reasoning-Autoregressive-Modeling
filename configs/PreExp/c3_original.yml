@@ -21,11 +21,9 @@
 # Source: third-part/C3-Context-Cascade-Compression-main/C3-master/C3/utils/arguments.py
 #         Lines 20-31: DataArguments
 data:
-  data_name: fox                      # Official benchmark: Fox dataset
+  data_name: math                      # Dataset: math (same as other PreExp configs)
   data_path: ./EXPERIMENT/data
   split: train
-  # Source: Line 25
-  conversation_version: mpt           # Official: "mpt" conversation format
 
 # =============================================================================
 # Environment Configuration
