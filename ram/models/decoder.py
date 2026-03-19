@@ -657,19 +657,22 @@ class C3Decoder(nn.Module):
             Step 3: Insert projected_latent between <img> and </img>
             Step 4: Autoregressive generation
         """
-        # Get device
+        # Get device and dtype from LLM
         device = self.llm.device
+        dtype = self.llm.dtype  # Get model dtype (BF16 if loaded with BF16)
 
-        # Move latent_tokens to device
-        latent_tokens = latent_tokens.to(device)
+        # Move latent_tokens to device and match dtype
+        latent_tokens = latent_tokens.to(device=device, dtype=dtype)
 
         batch_size = latent_tokens.shape[0]
         N = self.num_latent_tokens
 
         # ====================================================================
         # Step 1: Project latent tokens via mm_projector
+        # NOTE: Cast mm_projector to same dtype as model to avoid dtype mismatch
         # ====================================================================
-        projected_latent = self.mm_projector(latent_tokens)  # [B, N, D_decoder]
+        mm_projector = self.mm_projector.to(dtype=dtype)
+        projected_latent = mm_projector(latent_tokens)  # [B, N, D_decoder]
 
         # ====================================================================
         # Step 2: Create prompt with special tokens

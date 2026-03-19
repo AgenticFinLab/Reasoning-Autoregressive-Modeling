@@ -614,23 +614,25 @@ def train_c3(config: dict):
     sample_texts = collate_fn_text([dataset[i] for i in range(min(2, len(dataset)))])
 
     with torch.no_grad():
-        # Encode
-        latent_tokens = encoder(inputs=sample_texts)
-        print(f"    Input texts: {len(sample_texts[0])} chars")
-        print(f"    Latent tokens shape: {latent_tokens.shape}")
-        print(f"    Compression: {len(sample_texts[0])} chars -> {N} tokens")
+        # Use autocast for inference to match training dtype
+        with torch.amp.autocast(device_type="cuda", dtype=amp_dtype, enabled=bf16):
+            # Encode
+            latent_tokens = encoder(inputs=sample_texts)
+            print(f"    Input texts: {len(sample_texts[0])} chars")
+            print(f"    Latent tokens shape: {latent_tokens.shape}")
+            print(f"    Compression: {len(sample_texts[0])} chars -> {N} tokens")
 
-        # Transfer if pipeline mode
-        if use_pipeline:
-            latent_tokens = latent_tokens.to(decoder_device)
+            # Transfer if pipeline mode
+            if use_pipeline:
+                latent_tokens = latent_tokens.to(decoder_device)
 
-        # Generate
-        output_ids = decoder.generate(
-            latent_tokens,
-            prompt="Repeat the text: ",
-            max_new_tokens=512,
-            do_sample=False,
-        )
+            # Generate
+            output_ids = decoder.generate(
+                latent_tokens,
+                prompt="Repeat the text: ",
+                max_new_tokens=512,
+                do_sample=False,
+            )
 
     # Decode
     print()
