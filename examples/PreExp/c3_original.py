@@ -393,8 +393,10 @@ def train_c3(config: dict):
     decoder.train()
 
     # Mixed precision scalers
-    encoder_scaler = torch.amp.GradScaler("cuda", enabled=bf16)
-    decoder_scaler = torch.amp.GradScaler("cuda", enabled=bf16)
+    # NOTE: GradScaler is NOT needed for BF16 (BF16 has same exponent range as FP32)
+    # Only enable for FP16 training, disabled for BF16 and FP32
+    encoder_scaler = torch.amp.GradScaler("cuda", enabled=False)  # Disabled for BF16
+    decoder_scaler = torch.amp.GradScaler("cuda", enabled=False)  # Disabled for BF16
     amp_dtype = torch.bfloat16 if bf16 else torch.float32
 
     for epoch in range(start_epoch, num_epochs):
