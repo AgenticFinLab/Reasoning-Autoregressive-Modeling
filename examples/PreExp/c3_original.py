@@ -1,77 +1,50 @@
-"""C3 Context Cascade Compression - Complete Training.
+"""C3 Context Cascade Compression - Training with Pipeline Parallelism.
 
 Usage:
+    # Single GPU mode:
     python examples/PreExp/c3_original.py -c configs/PreExp/c3_original.yml
 
-Task:
-    Train C3 (Context Cascade Compression) to compress and reconstruct text.
-    This implements the full training pipeline from the official paper:
-    "Context Cascade Compression: Exploring the Upper Limits of Text Compression"
-    (arXiv:2511.15244)
+    # Pipeline parallel mode (2 GPUs):
+    python examples/PreExp/c3_original.py -c configs/PreExp/c3_original.yml
 
-Official Code Reference:
-    third-part/C3-Context-Cascade-Compression-main/C3-master/C3/model/C3.py
-    - Lines 21-23: Special tokens definition
-    - Line 35: Q = nn.Embedding(N, D_encoder)
-    - Line 36: mm_projector = nn.Linear(D_encoder, D_decoder)
-    - Lines 66-119: Encoder forward
-    - Lines 121-153: Decoder forward
-    - Lines 372-376: chat() function showing token structure
+Pipeline Parallelism:
+    GPU 0: C3Encoder (e.g., Qwen2.5-0.5B or Qwen2.5-1.5B)
+    GPU 1: C3Decoder (e.g., Qwen2.5-1.5B or Qwen2.5-3B)
 
-Config (example: B=2, M=1280, N=32, D_enc=1536, D_dec=2048):
-    - B: batch size
-    - M: text sequence length (max_length)
-    - N: number of latent tokens (num_latent_tokens)
-    - D_enc: encoder hidden dimension (Qwen2.5-1.5B: 1536)
-    - D_dec: decoder hidden dimension (Qwen2.5-3B: 2048)
+    This allows training larger models by splitting across two GPUs.
 
-Pipeline:
-    ┌──────────────────────────────────────────────────────────────────────┐
-    │ Input: text + <img> + <imgpad>*N + </img>                           │
-    └──────────────────────────────────────────────────────────────────────┘
-                                    │
-                                    ▼ C3Encoder (llm1: Qwen2.5-1.5B)
-    ┌──────────────────────────────────────────────────────────────────────┐
-    │ hidden_states [B, M+N+2, D_enc]                                      │
-    └──────────────────────────────────────────────────────────────────────┘
-                                    │
-                                    ▼ Extract Q positions: [img_pos+1 : img_pos+N+1]
-    ┌──────────────────────────────────────────────────────────────────────┐
-    │ latent_tokens [B, N, D_enc]    (40x compression: M=1280, N=32)      │
-    └──────────────────────────────────────────────────────────────────────┘
-                                    │
-                                    ▼ mm_projector: D_enc -> D_dec
-    ┌──────────────────────────────────────────────────────────────────────┐
-    │ projected_latent [B, N, D_dec]                                       │
-    └──────────────────────────────────────────────────────────────────────┘
-                                    │
-                                    ▼ Insert into decoder input
-    ┌──────────────────────────────────────────────────────────────────────┐
-    │ decoder_input: <img> + latent_1..N + </img> + "Repeat the text: "   │
-    └──────────────────────────────────────────────────────────────────────┘
-                                    │
-                                    ▼ C3Decoder (llm2: Qwen2.5-3B)
-    ┌──────────────────────────────────────────────────────────────────────┐
-    │ logits [B, L+N, vocab_size]                                          │
-    └──────────────────────────────────────────────────────────────────────┘
-                                    │
-                                    ▼ Cross-entropy loss
-    ┌──────────────────────────────────────────────────────────────────────┐
-    │ loss = CrossEntropy(logits, target_ids)                              │
-    └──────────────────────────────────────────────────────────────────────┘
+Architecture:
+    ┌─────────────────────────────────────────────────────────────────────┐
+    │  Single GPU Mode:                                                   │
+    │  ┌─────────────────┐           ┌─────────────────┐                  │
+    │  │ C3Encoder       │           │ C3Decoder       │                  │
+    │  │ text → latent   │ ────────▶ │ latent → logits │                  │
+    │  └─────────────────┘           └─────────────────┘                  │
+    └─────────────────────────────────────────────────────────────────────┘
 
-Compression Ratio:
-    - Input: M text tokens (e.g., 1280)
-    - Output: N latent tokens (e.g., 32)
-    - Ratio: M/N = 40x compression
-    - Paper reports 93% accuracy at 40x compression
+    ┌─────────────────────────────────────────────────────────────────────┐
+    │  Pipeline Parallel Mode (2 GPUs):                                   │
+    │  GPU 0                          GPU 1                               │
+    │  ┌─────────────────┐           ┌─────────────────┐                  │
+    │  │ C3Encoder       │           │ C3Decoder       │                  │
+    │  │ (Qwen2.5-0.5B)  │           │ (Qwen2.5-1.5B)  │                  │
+    │  │                 │           │                 │                  │
+    │  │ text → latent   │ ────────▶ │ latent → logits │                  │
+    │  └─────────────────┘  transfer └─────────────────┘                  │
+    │                        latent_tokens [B, N, D]                       │
+    └─────────────────────────────────────────────────────────────────────┘
+
+Memory Distribution:
+    Single GPU (1.5B + 3B): ~59 GB -> A100 80GB required
+    Pipeline (0.5B + 1.5B): GPU 0 ~8 GB, GPU 1 ~21 GB -> 2× RTX 4090
+    Pipeline (1.5B + 3B):   GPU 0 ~20 GB, GPU 1 ~40 GB -> 2× A100 80GB
 
 Dimensions:
     B = batch_size
     M = max_length (text sequence length)
     N = num_latent_tokens (latent token count)
-    D_enc = encoder hidden_dim (Qwen2.5-1.5B: 1536)
-    D_dec = decoder hidden_dim (Qwen2.5-3B: 2048)
+    D_enc = encoder hidden_dim
+    D_dec = decoder hidden_dim
     V = vocab_size
 """
 
@@ -99,25 +72,25 @@ from ram.models.encoder import (
 )
 from ram.utils import (
     load_config,
-    setup_environment,
+    set_seed,
     collate_fn_text,
     find_latest_checkpoint,
+    assign_model_devices,
 )
 
 
 class C3ReconstructionLoss(nn.Module):
-    """C3 Reconstruction Loss.
+    """C3 Reconstruction Loss with Teacher Forcing.
 
-    Computes cross-entropy loss for text reconstruction.
-    The decoder outputs logits for the entire sequence including latent tokens.
+    Training Flow (matching official C3):
+        1. context_ids (text to compress) -> Encoder -> latent_tokens
+        2. latent_tokens + input_ids (teacher forcing) -> Decoder -> logits
+        3. logits vs labels -> cross-entropy loss
 
-    Input:
-        logits: [B, L+N, V] decoder output (includes latent token positions)
-        target_texts: List[str] original texts to reconstruct
-
-    Output:
-        loss: scalar cross-entropy loss
-        loss_dict: dict with loss breakdown
+    Official Reference:
+        third-part/C3-Context-Cascade-Compression-main/C3-master/C3/model/C3.py
+        Lines 182-246: forward function with labels
+        Lines 224-234: loss computation
     """
 
     def __init__(
@@ -131,48 +104,47 @@ class C3ReconstructionLoss(nn.Module):
         self.max_length = max_length
         self.ignore_index = ignore_index
 
-    def forward(self, logits, target_texts, num_latent_tokens):
-        """Compute reconstruction loss.
+    def forward(self, logits, labels, num_latent_tokens):
+        """Compute reconstruction loss with teacher forcing.
 
         Args:
             logits: [B, L_total, V] decoder output
-            target_texts: List[str] original texts
+                L_total = N (latent) + L (text tokens)
+            labels: [B, L] target token IDs (shifted for next-token prediction)
             num_latent_tokens: int, number of latent tokens N
 
         Returns:
             loss: scalar
             loss_dict: dict with loss info
+
+        Dimensions:
+            logits: [B, N+L, V] where N = num_latent_tokens, L = text length
+            labels: [B, L] target token IDs
+
+        Loss Computation (official Lines 224-234):
+            # Shift logits and labels for autoregressive prediction
+            shift_logits = logits[..., :-1, :].contiguous()
+            shift_labels = labels[..., 1:].contiguous()
+            loss = CrossEntropyLoss(shift_logits, shift_labels)
         """
         B, L_total, V = logits.shape
         N = num_latent_tokens
-        L = L_total - N  # Actual text length
-
-        # Tokenize target texts
-        tokens = self.tokenizer(
-            target_texts,
-            max_length=self.max_length,
-            padding="max_length",
-            truncation=True,
-            return_tensors="pt",
-        )
-        target_ids = tokens["input_ids"].to(logits.device)  # [B, L]
-        attention_mask = tokens["attention_mask"].to(logits.device)  # [B, L]
 
         # Shift for autoregressive prediction
-        # logits contain [latent_positions, text_positions]
-        # We want to predict text from latent tokens
-        # Skip the first N positions (latent tokens) and predict text
-        pred_logits = logits[:, N:-1, :]  # [B, L-1, V] - skip latent and last
-        targets = target_ids[:, 1:]  # [B, L-1] - shifted targets
-        mask = attention_mask[:, 1:]  # [B, L-1]
+        # logits: [B, N+L, V] -> shift_logits: [B, N+L-1, V]
+        # labels: [B, L] -> shift_labels: [B, L-1]
+        shift_logits = logits[:, N:-1, :].contiguous()  # [B, L-1, V]
+        shift_labels = labels[:, 1:].contiguous()  # [B, L-1]
 
         # Mask padding positions
-        targets = targets.masked_fill(mask == 0, self.ignore_index)
+        shift_labels = shift_labels.masked_fill(
+            shift_labels == self.ignore_index, self.ignore_index
+        )
 
         # Compute cross-entropy loss
         loss = F.cross_entropy(
-            pred_logits.reshape(-1, V),
-            targets.reshape(-1),
+            shift_logits.reshape(-1, V),
+            shift_labels.reshape(-1),
             ignore_index=self.ignore_index,
         )
 
@@ -186,11 +158,21 @@ def train_c3(config: dict):
     """
     Train C3 for text compression and reconstruction.
 
-    Training Flow:
-        Step 1: texts [B] -> C3Encoder -> latent_tokens [B, N, D_enc]
-        Step 2: latent_tokens [B, N, D_enc] -> C3Decoder -> logits [B, L+N, V]
-        Step 3: loss_fn(logits, texts) -> loss
-        Step 4: loss.backward() -> optimizer.step() -> update weights
+    Supports:
+        - Single GPU mode: encoder and decoder on same GPU
+        - Pipeline parallel mode: encoder on GPU 0, decoder on GPU 1
+
+    Training Flow (matching official C3):
+        Step 1: Tokenize texts -> input_ids [B, L], labels [B, L]
+        Step 2: texts -> C3Encoder -> latent_tokens [B, N, D_enc]
+        Step 3: latent_tokens + input_ids (teacher forcing) -> C3Decoder -> logits [B, N+L, V]
+        Step 4: logits vs labels -> cross-entropy loss
+        Step 5: loss.backward() -> optimizer.step() -> update weights
+
+    Official Reference:
+        third-part/C3-Context-Cascade-Compression-main/C3-master/C3/model/C3.py
+        Lines 182-246: forward function with labels
+        Lines 224-234: loss computation
     """
     # =================================================================
     # Extract config
@@ -209,9 +191,12 @@ def train_c3(config: dict):
     num_epochs = train_cfg["num_epochs"]
     warmup_ratio = train_cfg["warmup_ratio"]
     gradient_clip = train_cfg["gradient_clip"]
-    gradient_accumulation_steps = train_cfg.get("gradient_accumulation_steps", 1)
-    bf16 = train_cfg.get("bf16", True)
+    gradient_accumulation_steps = train_cfg["gradient_accumulation_steps"]
+    bf16 = train_cfg["bf16"]
     resume = train_cfg["resume"]
+
+    # Model device config
+    model_devices_cfg = config["model_devices"]
 
     # Logging intervals
     log_interval = log_cfg["log_interval"]
@@ -230,13 +215,12 @@ def train_c3(config: dict):
     N = enc_cfg["num_latent_tokens"]
     M = enc_cfg["max_length"]
 
-    # Setup environment (seed + device)
-    device = setup_environment(env_cfg)
+    # Setup seed
+    set_seed(env_cfg["seed"])
 
     print("=" * 60)
     print("C3 Context Cascade Compression - Training")
     print("=" * 60)
-    print(f"Device: {device}")
     print(f"Batch size: {batch_size}")
     print(f"Gradient accumulation: {gradient_accumulation_steps}")
     print(f"Effective batch size: {batch_size * gradient_accumulation_steps}")
@@ -250,24 +234,32 @@ def train_c3(config: dict):
     print()
 
     # =================================================================
-    # Build models
+    # Assign GPU devices for each model
     # =================================================================
-    print("[1] Building C3Encoder (llm1)...")
+    model_devices = assign_model_devices(model_devices_cfg)
+    encoder_device = model_devices["encoder"]
+    decoder_device = model_devices["decoder"]
+    use_pipeline = encoder_device != decoder_device
+    print()
+
+    # =================================================================
+    # Build models - place on appropriate GPUs
+    # =================================================================
+    print(f"[1] Building C3Encoder on {encoder_device}...")
     encoder = build_c3_encoder(enc_cfg)
-    encoder = encoder.to(device)
+    encoder = encoder.to(encoder_device)
     D_enc = encoder.hidden_dim
     print(f"    model: {encoder.model_name}")
     print(f"    hidden_dim: {D_enc}")
     print(f"    num_latent_tokens: {encoder.num_latent_tokens}")
-    print()
 
-    print("[2] Building C3Decoder (llm2)...")
+    print(f"\n[2] Building C3Decoder on {decoder_device}...")
     decoder = build_c3_decoder(
         dec_cfg,
         encoder_hidden_dim=D_enc,
         encoder_type="C3Encoder",
     )
-    decoder = decoder.to(device)
+    decoder = decoder.to(decoder_device)
     D_dec = decoder.hidden_dim
     V = decoder.vocab_size
     print(f"    model: {decoder.model_name}")
@@ -309,22 +301,38 @@ def train_c3(config: dict):
         shuffle=True,
         collate_fn=collate_fn_text,
         drop_last=True,
-        num_workers=env_cfg.get("dataloader_num_workers", 8),
+        num_workers=env_cfg["dataloader_num_workers"],
     )
     print(f"    Dataset: {data_cfg['data_name']}, {len(dataset)} samples")
     print(f"    Batches per epoch: {len(dataloader)}")
     print()
 
     # =================================================================
-    # Setup optimizer and scheduler
+    # Setup optimizers - separate for encoder and decoder
     # =================================================================
-    print("[6] Setting up optimizer...")
-    params = list(encoder.parameters()) + list(decoder.parameters())
-    optimizer = AdamW(params, lr=learning_rate, weight_decay=weight_decay)
+    print("[6] Setting up optimizers...")
+    encoder_optimizer = AdamW(
+        encoder.parameters(),
+        lr=learning_rate,
+        weight_decay=weight_decay,
+    )
+    decoder_optimizer = AdamW(
+        decoder.parameters(),
+        lr=learning_rate,
+        weight_decay=weight_decay,
+    )
 
     total_steps = len(dataloader) * num_epochs
     warmup_steps = int(total_steps * warmup_ratio)
-    scheduler = CosineAnnealingLR(optimizer, T_max=total_steps - warmup_steps)
+
+    encoder_scheduler = CosineAnnealingLR(
+        encoder_optimizer,
+        T_max=total_steps - warmup_steps,
+    )
+    decoder_scheduler = CosineAnnealingLR(
+        decoder_optimizer,
+        T_max=total_steps - warmup_steps,
+    )
 
     print(f"    Total steps: {total_steps}")
     print(f"    Warmup steps: {warmup_steps}")
@@ -346,6 +354,9 @@ def train_c3(config: dict):
             "compression_ratio": M / N,
             "encoder_model": enc_cfg["model_name"],
             "decoder_model": dec_cfg["model_name"],
+            "use_pipeline": use_pipeline,
+            "encoder_device": encoder_device,
+            "decoder_device": decoder_device,
         },
         "steps": [],
     }
@@ -354,15 +365,27 @@ def train_c3(config: dict):
         latest_ckpt = find_latest_checkpoint(checkpoint_dir)
         if latest_ckpt is not None:
             print(f"[6.5] Resuming from: {latest_ckpt.name}")
-            checkpoint = torch.load(latest_ckpt, map_location=device)
+            checkpoint = torch.load(latest_ckpt, map_location="cpu")
             encoder.load_state_dict(checkpoint["encoder_state_dict"])
             decoder.load_state_dict(checkpoint["decoder_state_dict"])
-            optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-            scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
-            start_epoch = checkpoint.get("epoch", 0)
-            global_step = checkpoint.get("global_step", 0)
-            if "history" in checkpoint:
-                history = checkpoint["history"]
+            encoder_optimizer.load_state_dict(
+                checkpoint["encoder_optimizer_state_dict"]
+            )
+            decoder_optimizer.load_state_dict(
+                checkpoint["decoder_optimizer_state_dict"]
+            )
+            encoder_scheduler.load_state_dict(
+                checkpoint["encoder_scheduler_state_dict"]
+            )
+            decoder_scheduler.load_state_dict(
+                checkpoint["decoder_scheduler_state_dict"]
+            )
+            start_epoch = checkpoint["epoch"]
+            global_step = checkpoint["global_step"]
+            history = checkpoint["history"]
+            # Move models to correct devices after loading
+            encoder = encoder.to(encoder_device)
+            decoder = decoder.to(decoder_device)
             print(f"    Resumed from epoch {start_epoch+1}, global_step {global_step}")
             print()
         else:
@@ -378,8 +401,9 @@ def train_c3(config: dict):
     encoder.train()
     decoder.train()
 
-    # Mixed precision
-    scaler = torch.amp.GradScaler("cuda", enabled=bf16)
+    # Mixed precision scalers
+    encoder_scaler = torch.amp.GradScaler("cuda", enabled=bf16)
+    decoder_scaler = torch.amp.GradScaler("cuda", enabled=bf16)
     amp_dtype = torch.bfloat16 if bf16 else torch.float32
 
     for epoch in range(start_epoch, num_epochs):
@@ -387,44 +411,96 @@ def train_c3(config: dict):
         num_batches = 0
 
         pbar = tqdm(dataloader, desc=f"Epoch {epoch+1}/{num_epochs}")
-        optimizer.zero_grad()
+        encoder_optimizer.zero_grad()
+        decoder_optimizer.zero_grad()
 
         for batch_idx, batch_texts in enumerate(pbar):
-            # Step 1: Encode - texts -> latent_tokens
-            # texts [B] -> latent_tokens [B, N, D_enc]
-            with torch.amp.autocast("cuda", dtype=amp_dtype, enabled=bf16):
+            # =========================================================
+            # Step 1: Tokenize texts for teacher forcing
+            # context_ids: for encoder (text to compress)
+            # input_ids: for decoder (teacher forcing input)
+            # labels: for loss computation (target)
+            # =========================================================
+            tokens = tokenizer(
+                batch_texts,
+                max_length=M,
+                padding="max_length",
+                truncation=True,
+                return_tensors="pt",
+            )
+            input_ids = tokens["input_ids"]  # [B, L]
+            attention_mask = tokens["attention_mask"]  # [B, L]
+
+            # Labels: shift input_ids for next-token prediction
+            # labels[i] = input_ids[i, 1:] (predict next token)
+            labels = input_ids.clone()
+            # Mask padding tokens in labels
+            labels[attention_mask == 0] = -100  # ignore_index
+
+            # =========================================================
+            # Step 2: Encode on encoder device
+            # Encoder takes raw text and produces latent tokens
+            # =========================================================
+            with torch.amp.autocast(device_type="cuda", dtype=amp_dtype, enabled=bf16):
                 latent_tokens = encoder(inputs=batch_texts)
+            # latent_tokens: [B, N, D_enc] on encoder_device
 
-            # Step 2: Decode - latent_tokens -> logits
-            # latent_tokens [B, N, D_enc] -> logits [B, L+N, V]
-            with torch.amp.autocast("cuda", dtype=amp_dtype, enabled=bf16):
-                logits = decoder(latent_tokens)
+            # =========================================================
+            # Step 3: Transfer latent tokens if pipeline mode
+            # =========================================================
+            if use_pipeline:
+                latent_tokens = latent_tokens.to(decoder_device)
 
-            # Step 3: Compute loss
-            # logits [B, L+N, V], texts -> loss
-            with torch.amp.autocast("cuda", dtype=torch.float32, enabled=False):
-                loss, loss_dict = loss_fn(logits, batch_texts, N)
+            # =========================================================
+            # Step 4: Decode on decoder device with teacher forcing
+            # Pass input_ids for teacher forcing
+            # =========================================================
+            input_ids_dev = input_ids.to(decoder_device)
+            with torch.amp.autocast(device_type="cuda", dtype=amp_dtype, enabled=bf16):
+                logits = decoder(latent_tokens, prompt_ids=input_ids_dev)
+            # logits: [B, N+L, V] on decoder_device
+
+            # =========================================================
+            # Step 5: Compute loss
+            # =========================================================
+            labels_dev = labels.to(decoder_device)
+            with torch.amp.autocast(
+                device_type="cuda", dtype=torch.float32, enabled=False
+            ):
+                loss, loss_dict = loss_fn(logits, labels_dev, N)
 
             # Scale loss for gradient accumulation
             loss = loss / gradient_accumulation_steps
 
-            # Step 4: Backward
-            scaler.scale(loss).backward()
+            # =========================================================
+            # Step 6: Backward
+            # =========================================================
+            decoder_scaler.scale(loss).backward()
 
-            # Step 5: Optimizer step (with gradient accumulation)
+            # =========================================================
+            # Step 7: Optimizer step (with gradient accumulation)
+            # =========================================================
             if (batch_idx + 1) % gradient_accumulation_steps == 0:
                 # Gradient clipping
-                scaler.unscale_(optimizer)
-                nn.utils.clip_grad_norm_(params, gradient_clip)
+                decoder_scaler.unscale_(decoder_optimizer)
+                nn.utils.clip_grad_norm_(decoder.parameters(), gradient_clip)
 
-                # Optimizer step
-                scaler.step(optimizer)
-                scaler.update()
-                optimizer.zero_grad()
+                # Decoder optimizer step
+                decoder_scaler.step(decoder_optimizer)
+                decoder_scaler.update()
+                decoder_optimizer.zero_grad()
+
+                # Encoder optimizer step
+                encoder_scaler.unscale_(encoder_optimizer)
+                nn.utils.clip_grad_norm_(encoder.parameters(), gradient_clip)
+                encoder_scaler.step(encoder_optimizer)
+                encoder_scaler.update()
+                encoder_optimizer.zero_grad()
 
                 # Update learning rate
                 if global_step >= warmup_steps:
-                    scheduler.step()
+                    encoder_scheduler.step()
+                    decoder_scheduler.step()
 
             # Logging
             epoch_loss += loss_dict["total_loss"] * gradient_accumulation_steps
@@ -439,7 +515,8 @@ def train_c3(config: dict):
                     "global_step": global_step,
                     "loss": loss_dict["total_loss"],
                     "avg_loss": epoch_loss / num_batches,
-                    "lr": optimizer.param_groups[0]["lr"],
+                    "lr_encoder": encoder_optimizer.param_groups[0]["lr"],
+                    "lr_decoder": decoder_optimizer.param_groups[0]["lr"],
                 }
             )
 
@@ -454,10 +531,11 @@ def train_c3(config: dict):
             # --- Log at log_interval ---
             if global_step % log_interval == 0:
                 avg_loss = epoch_loss / num_batches
-                lr = optimizer.param_groups[0]["lr"]
+                lr_enc = encoder_optimizer.param_groups[0]["lr"]
+                lr_dec = decoder_optimizer.param_groups[0]["lr"]
                 print(
                     f"    Step {global_step}: loss={loss_dict['total_loss']:.4f}, "
-                    f"avg_loss={avg_loss:.4f}, lr={lr:.2e}"
+                    f"avg_loss={avg_loss:.4f}, lr_enc={lr_enc:.2e}, lr_dec={lr_dec:.2e}"
                 )
 
                 # Save training history
@@ -475,8 +553,10 @@ def train_c3(config: dict):
                     "global_step": global_step,
                     "encoder_state_dict": encoder.state_dict(),
                     "decoder_state_dict": decoder.state_dict(),
-                    "optimizer_state_dict": optimizer.state_dict(),
-                    "scheduler_state_dict": scheduler.state_dict(),
+                    "encoder_optimizer_state_dict": encoder_optimizer.state_dict(),
+                    "decoder_optimizer_state_dict": decoder_optimizer.state_dict(),
+                    "encoder_scheduler_state_dict": encoder_scheduler.state_dict(),
+                    "decoder_scheduler_state_dict": decoder_scheduler.state_dict(),
                     "loss": loss_dict["total_loss"],
                     "avg_loss": avg_loss,
                     "history": history,
@@ -499,8 +579,10 @@ def train_c3(config: dict):
             "global_step": global_step,
             "encoder_state_dict": encoder.state_dict(),
             "decoder_state_dict": decoder.state_dict(),
-            "optimizer_state_dict": optimizer.state_dict(),
-            "scheduler_state_dict": scheduler.state_dict(),
+            "encoder_optimizer_state_dict": encoder_optimizer.state_dict(),
+            "decoder_optimizer_state_dict": decoder_optimizer.state_dict(),
+            "encoder_scheduler_state_dict": encoder_scheduler.state_dict(),
+            "decoder_scheduler_state_dict": decoder_scheduler.state_dict(),
             "avg_loss": avg_epoch_loss,
             "history": history,
         }
@@ -544,6 +626,10 @@ def train_c3(config: dict):
         print(f"    Input texts: {len(sample_texts[0])} chars")
         print(f"    Latent tokens shape: {latent_tokens.shape}")
         print(f"    Compression: {len(sample_texts[0])} chars -> {N} tokens")
+
+        # Transfer if pipeline mode
+        if use_pipeline:
+            latent_tokens = latent_tokens.to(decoder_device)
 
         # Generate
         output_ids = decoder.generate(

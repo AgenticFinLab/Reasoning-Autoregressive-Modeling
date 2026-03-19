@@ -2,7 +2,7 @@
 # C3 Context Cascade Compression Configuration
 # =============================================================================
 # Used by: examples/PreExp/c3_original.py
-# Task: Verify C3Encoder and C3Decoder implementation against official code
+# Task: Train C3 with optional pipeline parallelism
 # Paper: "Context Cascade Compression: Exploring the Upper Limits of Text Compression"
 #         (arXiv:2511.15244)
 #
@@ -14,6 +14,10 @@
 #       -> Extract [img_pos+1 : img_pos+N+1] -> latent_tokens [B, N, D]
 #       -> mm_projector -> projected_latent [B, N, D_decoder]
 #       -> Decoder LLM -> logits [B, L, V]
+#
+# Modes:
+#   - Single GPU: Set pipeline.enabled=false
+#   - Pipeline: Set pipeline.enabled=true (default), auto GPU assignment
 
 # =============================================================================
 # Data Configuration
@@ -37,6 +41,36 @@ environment:
   dataloader_num_workers: 8           # Official: 8 workers
   # Source: Line 97
   tf32: true                          # Official: True for A100/H100
+
+# =============================================================================
+# Model Device Configuration
+# =============================================================================
+# Assigns GPU devices for each model based on priority.
+# Lower priority number = higher priority = gets GPU with more free memory.
+#
+# device: auto - Intelligent GPU selection based on available memory
+#   1. Scan all available GPUs and their free memory
+#   2. Assign GPUs to models by priority (lower number = better GPU)
+#   3. If only one GPU available, all models go on same GPU
+#
+# Priority semantics:
+#   - priority: 1 = highest priority (gets best GPU)
+#   - priority: 2 = second priority (gets second best GPU)
+#   - etc.
+#
+# Example outcomes with 2× RTX 4090:
+#   - decoder (priority=1) -> GPU with 24GB free
+#   - encoder (priority=2) -> GPU with 23GB free
+#
+# Example outcomes with 1× A100 80GB:
+#   - all models on GPU 0 (single GPU fallback)
+model_devices:
+  encoder:
+    device: auto                        # auto: assign GPU based on available memory
+    priority: 2                         # Lower priority than decoder (gets second best GPU)
+  decoder:
+    device: auto                        # auto: assign GPU based on available memory
+    priority: 1                         # Highest priority (gets best GPU with most free memory)
 
 # =============================================================================
 # Model Architecture

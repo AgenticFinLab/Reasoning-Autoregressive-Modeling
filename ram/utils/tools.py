@@ -144,6 +144,143 @@ def select_best_gpu(min_memory_mb: int = 1024) -> str:
     return f"cuda:{best_gpu}"
 
 
+def get_gpu_info() -> List[Tuple[int, str, float, float]]:
+    """Get detailed information about all available GPUs.
+
+    Returns:
+        List of tuples: [(gpu_id, gpu_name, total_memory_gb, free_memory_gb), ...]
+        Sorted by free memory (descending).
+    """
+    if not torch.cuda.is_available():
+        return []
+
+    num_gpus = torch.cuda.device_count()
+    gpu_info = []
+
+    for i in range(num_gpus):
+        gpu_name = torch.cuda.get_device_name(i)
+        gpu_total = torch.cuda.get_device_properties(i).total_memory / 1e9
+        free, total = torch.cuda.mem_get_info(i)
+        gpu_free = free / 1e9
+        gpu_info.append((i, gpu_name, gpu_total, gpu_free))
+
+    # Sort by free memory (descending)
+    gpu_info.sort(key=lambda x: x[3], reverse=True)
+
+    return gpu_info
+
+
+def assign_model_devices(
+    model_device_config: Dict[str, Dict[str, Any]],
+) -> Dict[str, str]:
+    """Assign GPU devices for multiple models based on priority.
+
+    Automatically distributes models across available GPUs based on priority.
+    Higher priority (lower number) gets GPU with more free memory.
+
+    Args:
+        model_device_config: Dict mapping model name to device config.
+            Each config has keys:
+            - device: str, device config ("auto", "cuda:0", "cuda:1", etc.)
+            - priority: int, lower number = higher priority (gets better GPU)
+
+    Returns:
+        Dict mapping model name to assigned device string (e.g., {"encoder": "cuda:0"})
+
+    Raises:
+        RuntimeError: If CUDA is not available.
+        ValueError: If manually specified GPU is not available.
+
+    Example:
+        >>> config = {
+        ...     "encoder": {"device": "auto", "priority": 2},
+        ...     "decoder": {"device": "auto", "priority": 1},  # decoder gets best GPU
+        ... }
+        >>> devices = assign_model_devices(config)
+        >>> print(devices)
+        {"encoder": "cuda:1", "decoder": "cuda:0"}
+    """
+    if not torch.cuda.is_available():
+        raise RuntimeError("CUDA not available")
+
+    num_gpus = torch.cuda.device_count()
+
+    # Get GPU info sorted by free memory (descending)
+    gpu_info = get_gpu_info()
+
+    # Print GPU status
+    print(f"[GPU] Available: {num_gpus}")
+    for gpu_id, gpu_name, gpu_total, gpu_free in gpu_info:
+        print(
+            f"    GPU {gpu_id}: {gpu_name} (total: {gpu_total:.1f} GB, free: {gpu_free:.1f} GB)"
+        )
+
+    # Single GPU case: all models on same GPU
+    if num_gpus == 1:
+        result = {name: "cuda:0" for name in model_device_config}
+        print(f"\n    Single GPU detected: all models on cuda:0")
+        return result
+
+    # Separate auto and manual assignments
+    auto_models = []  # [(name, priority), ...]
+    manual_assignments = {}  # {name: device}
+
+    for name, cfg in model_device_config.items():
+        device = cfg["device"]
+        priority = cfg["priority"]
+        if device == "auto":
+            auto_models.append((name, priority))
+        else:
+            manual_assignments[name] = device
+
+    # Validate manual GPU IDs
+    for name, device in manual_assignments.items():
+        gpu_id = int(device.split(":")[1])
+        if gpu_id >= num_gpus:
+            raise ValueError(
+                f"Requested GPU {gpu_id} for '{name}' not available. "
+                f"Only {num_gpus} GPUs found."
+            )
+
+    # Track used GPUs (by manual assignment)
+    used_gpu_ids = set(int(d.split(":")[1]) for d in manual_assignments.values())
+
+    # Sort auto models by priority (lower number = higher priority)
+    auto_models.sort(key=lambda x: x[1])
+
+    # Assign auto models to available GPUs
+    result = dict(manual_assignments)
+    available_gpus = [g for g in gpu_info if g[0] not in used_gpu_ids]
+
+    print(f"\n    Auto GPU assignment:")
+    for name, priority in auto_models:
+        if available_gpus:
+            # Get best available GPU
+            best_gpu = available_gpus.pop(0)  # Already sorted by free memory
+            device = f"cuda:{best_gpu[0]}"
+            result[name] = device
+            print(
+                f"      {name} (priority={priority}) -> {device} ({best_gpu[3]:.1f} GB free)"
+            )
+        else:
+            # No available GPUs, share with existing assignment
+            # Find the least loaded GPU
+            best_gpu = gpu_info[0]
+            device = f"cuda:{best_gpu[0]}"
+            result[name] = device
+            print(
+                f"      {name} (priority={priority}) -> {device} (shared, {best_gpu[3]:.1f} GB free)"
+            )
+
+    # Print manual assignments
+    if manual_assignments:
+        print(f"\n    Manual GPU assignment:")
+        for name, device in manual_assignments.items():
+            print(f"      {name} -> {device}")
+
+    return result
+
+
 def setup_environment(env_cfg: dict) -> torch.device:
     """Setup training environment from config.
 
@@ -164,11 +301,11 @@ def setup_environment(env_cfg: dict) -> torch.device:
         device = setup_environment(env_cfg)
     """
     # Set random seed
-    seed = env_cfg.get("seed", 42)
+    seed = env_cfg["seed"]
     set_seed(seed)
 
     # Get device
-    device_str = env_cfg.get("device", "auto")
+    device_str = env_cfg["device"]
     device = get_device(device_str)
 
     return device

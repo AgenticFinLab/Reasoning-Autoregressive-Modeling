@@ -523,6 +523,7 @@ class C3Encoder(nn.Module):
                 # This is a fallback for cases without special tokens
                 new_embeds = torch.cat([cur_context_embeds, query_embeds], dim=0)
                 image_start_pos = cur_context_ids.shape[0] - 1
+                image_start_positions.append(image_start_pos)
             else:
                 # Source: Lines 88-101
                 image_start_pos = image_start_tokens[0].item()
