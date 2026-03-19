@@ -1,41 +1,32 @@
-"""C3 Context Cascade Compression - Training with Pipeline Parallelism.
+"""C3 Context Cascade Compression - Training.
 
 Usage:
-    # Single GPU mode:
     python examples/PreExp/c3_original.py -c configs/PreExp/c3_original.yml
 
-    # Pipeline parallel mode (2 GPUs):
-    python examples/PreExp/c3_original.py -c configs/PreExp/c3_original.yml
+GPU Assignment (Automatic):
+    The system automatically assigns models to GPUs based on available memory:
+    - Single GPU: All models on the same GPU
+    - Multiple GPUs: Distribute by priority (decoder gets GPU with most free memory)
 
-Pipeline Parallelism:
-    GPU 0: C3Encoder (e.g., Qwen2.5-0.5B or Qwen2.5-1.5B)
-    GPU 1: C3Decoder (e.g., Qwen2.5-1.5B or Qwen2.5-3B)
-
-    This allows training larger models by splitting across two GPUs.
+    Config example (configs/PreExp/c3_original.yml):
+        model_devices:
+          encoder: {device: auto, priority: 2}  # second best GPU
+          decoder: {device: auto, priority: 1}  # best GPU (most free memory)
 
 Architecture:
     ┌─────────────────────────────────────────────────────────────────────┐
-    │  Single GPU Mode:                                                   │
+    │  Text Input                                                         │
+    │      │                                                              │
+    │      ▼                                                              │
     │  ┌─────────────────┐           ┌─────────────────┐                  │
     │  │ C3Encoder       │           │ C3Decoder       │                  │
     │  │ text → latent   │ ────────▶ │ latent → logits │                  │
+    │  │ (Qwen2.5-0.5B)  │  transfer │ (Qwen2.5-1.5B)  │                  │
     │  └─────────────────┘           └─────────────────┘                  │
-    └─────────────────────────────────────────────────────────────────────┘
-
-    ┌─────────────────────────────────────────────────────────────────────┐
-    │  Pipeline Parallel Mode (2 GPUs):                                   │
-    │  GPU 0                          GPU 1                               │
-    │  ┌─────────────────┐           ┌─────────────────┐                  │
-    │  │ C3Encoder       │           │ C3Decoder       │                  │
-    │  │ (Qwen2.5-0.5B)  │           │ (Qwen2.5-1.5B)  │                  │
-    │  │                 │           │                 │                  │
-    │  │ text → latent   │ ────────▶ │ latent → logits │                  │
-    │  └─────────────────┘  transfer └─────────────────┘                  │
     │                        latent_tokens [B, N, D]                       │
     └─────────────────────────────────────────────────────────────────────┘
 
-Memory Distribution:
-    Single GPU (1.5B + 3B): ~59 GB -> A100 80GB required
+Memory Distribution (Example):
     Pipeline (0.5B + 1.5B): GPU 0 ~8 GB, GPU 1 ~21 GB -> 2× RTX 4090
     Pipeline (1.5B + 3B):   GPU 0 ~20 GB, GPU 1 ~40 GB -> 2× A100 80GB
 

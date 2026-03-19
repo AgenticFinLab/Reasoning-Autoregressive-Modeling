@@ -86,7 +86,7 @@ model:
   #         Official uses Qwen2.5-1.5B (hidden_dim=1536)
   encoder:
     # Official: Qwen/Qwen2.5-1.5B (from HuggingFace liufanfanlff/C3-Context-Cascade-Compression)
-    model_name: Qwen/Qwen2.5-1.5B     # Official: Qwen/Qwen2.5-1.5B (llm1)
+    model_name: Qwen/Qwen2.5-0.5B     # Official: Qwen/Qwen2.5-1.5B (llm1)
     pretrained: true                  # Load pretrained weights
     freeze: false                     # Train encoder (see train.py Lines 43-49)
     # Source: Line 35 - config.latent_token_len
@@ -94,7 +94,7 @@ model:
     num_latent_tokens: 32             # N = 32 (official default)
     # Source: third-part/C3-Context-Cascade-Compression-main/C3-master/README.md
     #         Line 97: model_max_length 8192
-    max_length: 8192                  # Official: 8192 (supports long context)
+    max_length: 2048                  # Official: 8192 (supports long context)
     # Source: Line 38
     use_im_start_end: true            # Official: True
 
@@ -104,7 +104,7 @@ model:
   #         Official uses Qwen2.5-3B (hidden_dim=2048)
   decoder:
     # Official: Qwen/Qwen2.5-3B (main decoder LLM)
-    model_name: Qwen/Qwen2.5-3B       # Official: Qwen/Qwen2.5-3B
+    model_name: Qwen/Qwen2.5-1.5B       # Official: Qwen/Qwen2.5-3B
     pretrained: true                  # Load pretrained weights
     freeze: false                     # Train decoder
     # Must match encoder's num_latent_tokens
@@ -226,7 +226,7 @@ c3_reference:
   # --- Training Args (from README Lines 83-108) ---
   training_args:
     deepspeed_config: zero2.json
-    model_max_length: 8192
+    model_max_length: 2048
     per_device_train_batch_size: 2
     gradient_accumulation_steps: 16
     num_train_epochs: 5
