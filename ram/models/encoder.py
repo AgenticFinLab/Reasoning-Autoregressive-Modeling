@@ -132,11 +132,12 @@ Example:
     # Compression ratio: 1280/32 = 40x
 """
 
-from typing import Optional, Dict, Any, List, Union, Tuple
 import logging
+from typing import Any, Dict, List, Optional, Tuple, Union
+
 import torch
 import torch.nn as nn
-from transformers import AutoModel, AutoConfig, AutoTokenizer
+from transformers import AutoConfig, AutoModel, AutoTokenizer
 
 logger = logging.getLogger(__name__)
 
@@ -355,13 +356,13 @@ class C3Encoder(nn.Module):
             - model_name: HuggingFace model name (e.g., 'Qwen/Qwen2.5-1.5B')
             - pretrained: Whether to load pretrained weights
             - freeze: Whether to freeze LLM weights
-            - num_latent_tokens: Number of latent tokens N (e.g., 32, 64)
+            - latent_token_len: Number of latent tokens N (e.g., 32, 64)
             - max_length: Max text length M for tokenization
 
     Dimensions:
         B: batch size
         M: text sequence length (max_length)
-        N: number of latent tokens (num_latent_tokens)
+        N: number of latent tokens (latent_token_len)
         D: hidden dimension of encoder LLM
     """
 
@@ -374,11 +375,16 @@ class C3Encoder(nn.Module):
         model_name = config["model_name"]
         pretrained = config["pretrained"]
         freeze = config["freeze"]
-        num_latent_tokens = config["num_latent_tokens"]
+        # Use official naming: latent_token_len (C3 config key)
+        # Backward compatibility: also accept num_latent_tokens
+        latent_token_len = config.get(
+            "latent_token_len", config.get("num_latent_tokens", 32)
+        )
         max_length = config["max_length"]
 
         self.model_name = model_name
-        self.num_latent_tokens = num_latent_tokens
+        # Official C3 naming
+        self.latent_token_len = latent_token_len
         self.max_length = max_length
 
         # ====================================================================
@@ -433,8 +439,8 @@ class C3Encoder(nn.Module):
         #         Line 35: self.Q = nn.Embedding(config.latent_token_len, config.contexts_compression_llm_hidden_size)
         # ====================================================================
         # Official uses nn.Embedding, not nn.Parameter
-        # Shape: [N, D] where N = num_latent_tokens, D = hidden_dim
-        self.Q = nn.Embedding(num_latent_tokens, self.hidden_dim)
+        # Shape: [N, D] where N = latent_token_len, D = hidden_dim
+        self.Q = nn.Embedding(latent_token_len, self.hidden_dim)
         # Initialize with small values for stable training
         nn.init.normal_(self.Q.weight, mean=0.0, std=0.02)
 
@@ -493,7 +499,7 @@ class C3Encoder(nn.Module):
             image_start_positions: [B] positions of <img> tokens
         """
         batch_size = context_ids.shape[0]
-        N = self.num_latent_tokens
+        N = self.latent_token_len
         device = context_embeds.device
         dtype = context_embeds.dtype
 
@@ -502,15 +508,18 @@ class C3Encoder(nn.Module):
         # for i in range(context_embeds.shape[0]):
         #     context_features.append([self.Q.weight])
         # Each batch item gets the same Q.weight
-        query_embeds = self.Q.weight.to(device=device, dtype=dtype)  # [N, D]
+        # Shape: [N, D]
+        query_embeds = self.Q.weight.to(device=device, dtype=dtype)
 
         # Source: Lines 80-102
         new_context_embeds = []
         image_start_positions = []
 
         for b in range(batch_size):
-            cur_context_ids = context_ids[b]  # [M]
-            cur_context_embeds = context_embeds[b]  # [M, D]
+            # Shape: [M]
+            cur_context_ids = context_ids[b]
+            # Shape: [M, D]
+            cur_context_embeds = context_embeds[b]
 
             # Source: Lines 85-86
             # Find position of <img> token
@@ -538,13 +547,15 @@ class C3Encoder(nn.Module):
                 #
                 # Structure: [Text, <img>, Q_1, ..., Q_N, </img>]
                 #            [:pos+1]   [Q]         [pos+N+1:]
+                # Elements:
+                #   cur_context_embeds[: image_start_pos + 1] - Text + <img>
+                #   query_embeds - Q_1, ..., Q_N
+                #   cur_context_embeds[image_start_pos + N + 1:] - </img> + remaining
                 new_embeds = torch.cat(
                     [
-                        cur_context_embeds[: image_start_pos + 1],  # Text + <img>
-                        query_embeds,  # Q_1, ..., Q_N
-                        cur_context_embeds[
-                            image_start_pos + N + 1 :
-                        ],  # </img> + remaining
+                        cur_context_embeds[: image_start_pos + 1],
+                        query_embeds,
+                        cur_context_embeds[image_start_pos + N + 1 :],
                     ],
                     dim=0,
                 )
@@ -601,7 +612,7 @@ class C3Encoder(nn.Module):
             texts_with_tokens = [
                 text
                 + C3_IM_START_TOKEN
-                + C3_IM_PATCH_TOKEN * self.num_latent_tokens
+                + C3_IM_PATCH_TOKEN * self.latent_token_len
                 + C3_IM_END_TOKEN
                 for text in inputs
             ]
@@ -619,7 +630,7 @@ class C3Encoder(nn.Module):
             )
 
         batch_size = context_ids.shape[0]
-        N = self.num_latent_tokens
+        N = self.latent_token_len
         D = self.hidden_dim
 
         # ====================================================================
@@ -662,7 +673,8 @@ class C3Encoder(nn.Module):
             return_dict=True,
         )
         # Source: Line 114 - use last hidden state
-        hidden_states = outputs.last_hidden_state  # [B, M+N, D]
+        # Shape: [B, M+N, D]
+        hidden_states = outputs.last_hidden_state
 
         # ====================================================================
         # Step 5: Extract latent tokens at Q positions
@@ -701,7 +713,7 @@ class C3Encoder(nn.Module):
         Returns:
             Compression ratio M/N
         """
-        return text_length / self.num_latent_tokens
+        return text_length / self.latent_token_len
 
 
 def build_c3_encoder(config: Dict[str, Any]) -> C3Encoder:
@@ -711,7 +723,7 @@ def build_c3_encoder(config: Dict[str, Any]) -> C3Encoder:
         - model_name: str - HuggingFace model name (e.g., 'Qwen/Qwen2.5-1.5B')
         - pretrained: bool - Whether to load pretrained weights
         - freeze: bool - Whether to freeze LLM weights
-        - num_latent_tokens: int - Number of latent tokens N (e.g., 32, 64)
+        - latent_token_len: int - Number of latent tokens N (e.g., 32, 64)
         - max_length: int - Max text length M for tokenization
 
     Example Config:
@@ -719,7 +731,7 @@ def build_c3_encoder(config: Dict[str, Any]) -> C3Encoder:
             "model_name": "Qwen/Qwen2.5-1.5B",
             "pretrained": True,
             "freeze": False,
-            "num_latent_tokens": 32,
+            "latent_token_len": 32,
             "max_length": 1280,  # 40x compression ratio
         }
         encoder = build_c3_encoder(config)
@@ -728,13 +740,15 @@ def build_c3_encoder(config: Dict[str, Any]) -> C3Encoder:
 
     # Logging
     freeze_str = "frozen" if config["freeze"] else "trainable"
-    compression_ratio = config["max_length"] / config["num_latent_tokens"]
+    # Backward compatibility: also accept num_latent_tokens
+    latent_len = config.get("latent_token_len", config.get("num_latent_tokens", 32))
+    compression_ratio = config["max_length"] / latent_len
     logger.info(
         "[C3Encoder] %s (%s) - text(%d) -> latent(%d) = %.1fx compression, hidden(%d)",
         encoder.model_name,
         freeze_str,
         config["max_length"],
-        config["num_latent_tokens"],
+        latent_len,
         compression_ratio,
         encoder.hidden_dim,
     )

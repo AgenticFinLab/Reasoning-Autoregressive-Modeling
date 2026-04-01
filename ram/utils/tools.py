@@ -8,10 +8,10 @@ Functions:
     count_parameters  - Count model parameters
 """
 
-import random
 import json
 from pathlib import Path
-from typing import List, Optional, Dict, Tuple, Any
+import random
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import torch
@@ -117,7 +117,8 @@ def select_best_gpu(min_memory_mb: int = 1024) -> str:
         # Use memory stats if available (requires torch >= 2.0)
         try:
             torch.cuda.reset_peak_memory_stats(i)
-            free_mem = torch.cuda.mem_get_info(i)[0] / (1024**2)  # Convert to MB
+            # Convert to MB
+            free_mem = torch.cuda.mem_get_info(i)[0] / (1024**2)
         except:
             # Fallback: use total memory as approximation
             free_mem = props.total_memory / (1024**2)
@@ -222,8 +223,10 @@ def assign_model_devices(
         return result
 
     # Separate auto and manual assignments
-    auto_models = []  # [(name, priority), ...]
-    manual_assignments = {}  # {name: device}
+    # auto_models: list of (name, priority) tuples
+    # manual_assignments: dict of {name: device}
+    auto_models = []
+    manual_assignments = {}
 
     for name, cfg in model_device_config.items():
         device = cfg["device"]
@@ -255,8 +258,8 @@ def assign_model_devices(
     print(f"\n    Auto GPU assignment:")
     for name, priority in auto_models:
         if available_gpus:
-            # Get best available GPU
-            best_gpu = available_gpus.pop(0)  # Already sorted by free memory
+            # Get best available GPU (already sorted by free memory)
+            best_gpu = available_gpus.pop(0)
             device = f"cuda:{best_gpu[0]}"
             result[name] = device
             print(
@@ -456,8 +459,11 @@ def find_latest_checkpoint(checkpoint_dir: Path) -> Optional[Path]:
 def resume_from_checkpoint(
     checkpoint_path: Path,
     models: Dict[str, nn.Module],
-    optimizer: torch.optim.Optimizer,
-    scheduler: torch.optim.lr_scheduler.LRScheduler,
+    optimizer: Union[torch.optim.Optimizer, Dict[str, torch.optim.Optimizer]],
+    scheduler: Union[
+        torch.optim.lr_scheduler.LRScheduler,
+        Dict[str, torch.optim.lr_scheduler.LRScheduler],
+    ],
     device: str,
     log_dir: Optional[Path] = None,
 ) -> Tuple[int, int, Dict[str, Any]]:
@@ -468,8 +474,12 @@ def resume_from_checkpoint(
         models: Dict mapping model names to model instances
             - For ed_train: {"encoder": encoder, "decoder": decoder}
             - For eqd_train: {"encoder": encoder, "quantizer": quantizer, "decoder": decoder}
-        optimizer: Optimizer instance
-        scheduler: Learning rate scheduler
+        optimizer: Optimizer instance or dict of optimizers
+            - Single: optimizer (shared for all models)
+            - Multiple: {"encoder": enc_opt, "decoder": dec_opt} (C3 pipeline mode)
+        scheduler: Scheduler instance or dict of schedulers
+            - Single: scheduler (shared for all models)
+            - Multiple: {"encoder": enc_sched, "decoder": dec_sched} (C3 pipeline mode)
         device: Device to load models to
         log_dir: Optional log directory to load training history
 
@@ -488,12 +498,37 @@ def resume_from_checkpoint(
         if state_key in ckpt:
             model.load_state_dict(ckpt[state_key])
 
-    # Load optimizer and scheduler
-    optimizer.load_state_dict(ckpt["optimizer_state_dict"])
-    scheduler.load_state_dict(ckpt["scheduler_state_dict"])
+    # Load optimizer(s)
+    if isinstance(optimizer, dict):
+        # Multiple optimizers (C3 pipeline mode)
+        for name, opt in optimizer.items():
+            state_key = f"{name}_optimizer_state_dict"
+            if state_key in ckpt:
+                opt.load_state_dict(ckpt[state_key])
+            elif "optimizer_state_dict" in ckpt:
+                # Fallback: try shared optimizer state
+                opt.load_state_dict(ckpt["optimizer_state_dict"])
+    else:
+        # Single optimizer
+        optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+
+    # Load scheduler(s)
+    if isinstance(scheduler, dict):
+        # Multiple schedulers (C3 pipeline mode)
+        for name, sched in scheduler.items():
+            state_key = f"{name}_scheduler_state_dict"
+            if state_key in ckpt:
+                sched.load_state_dict(ckpt[state_key])
+            elif "scheduler_state_dict" in ckpt:
+                # Fallback: try shared scheduler state
+                sched.load_state_dict(ckpt["scheduler_state_dict"])
+    else:
+        # Single scheduler
+        scheduler.load_state_dict(ckpt["scheduler_state_dict"])
 
     # Extract training state
-    start_epoch = ckpt["epoch"] - 1  # Will increment in loop
+    # Will increment in loop
+    start_epoch = ckpt["epoch"] - 1
     global_step = ckpt["global_step"]
 
     # Load training history if exists
@@ -505,3 +540,66 @@ def resume_from_checkpoint(
                 history = json.load(f)
 
     return start_epoch, global_step, history
+
+
+def save_checkpoint(
+    checkpoint_path: Path,
+    models: Dict[str, nn.Module],
+    optimizer: Union[torch.optim.Optimizer, Dict[str, torch.optim.Optimizer]],
+    scheduler: Union[
+        torch.optim.lr_scheduler.LRScheduler,
+        Dict[str, torch.optim.lr_scheduler.LRScheduler],
+    ],
+    epoch: int,
+    global_step: int,
+    extra_info: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Save training checkpoint.
+
+    Args:
+        checkpoint_path: Path to save checkpoint file
+        models: Dict mapping model names to model instances
+            - For ed_train: {"encoder": encoder, "decoder": decoder}
+            - For c3_train: {"encoder": encoder, "decoder": decoder}
+        optimizer: Optimizer instance or dict of optimizers
+            - Single: optimizer (shared for all models)
+            - Multiple: {"encoder": enc_opt, "decoder": dec_opt}
+        scheduler: Scheduler instance or dict of schedulers
+            - Single: scheduler (shared for all models)
+            - Multiple: {"encoder": enc_sched, "decoder": dec_sched}
+        epoch: Current epoch number (1-indexed)
+        global_step: Current global step
+        extra_info: Optional dict of extra info to save (loss, history, etc.)
+    """
+    checkpoint = {
+        "epoch": epoch,
+        "global_step": global_step,
+    }
+
+    # Save model weights
+    for name, model in models.items():
+        checkpoint[f"{name}_state_dict"] = model.state_dict()
+
+    # Save optimizer(s)
+    if isinstance(optimizer, dict):
+        for name, opt in optimizer.items():
+            checkpoint[f"{name}_optimizer_state_dict"] = opt.state_dict()
+    else:
+        checkpoint["optimizer_state_dict"] = optimizer.state_dict()
+
+    # Save scheduler(s)
+    if isinstance(scheduler, dict):
+        for name, sched in scheduler.items():
+            checkpoint[f"{name}_scheduler_state_dict"] = sched.state_dict()
+    else:
+        checkpoint["scheduler_state_dict"] = scheduler.state_dict()
+
+    # Save extra info
+    if extra_info is not None:
+        checkpoint.update(extra_info)
+
+    # Create parent directory if needed
+    checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Save checkpoint
+    torch.save(checkpoint, checkpoint_path)

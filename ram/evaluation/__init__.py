@@ -29,7 +29,8 @@ from .text_reconstruction import (
     evaluate_reconstruction,
     evaluate_batch,
     TextReconstructionEvaluator,
-    C3ReconstructionEvaluator,  # Backward compatibility alias
+    # Backward compatibility alias
+    C3ReconstructionEvaluator,
 )
 
 __all__ = [

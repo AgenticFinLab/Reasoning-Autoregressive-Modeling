@@ -20,6 +20,7 @@ from .tools import (
     decode_logits_to_text,
     find_latest_checkpoint,
     resume_from_checkpoint,
+    save_checkpoint,
 )
 
 __all__ = [
@@ -35,4 +36,5 @@ __all__ = [
     "decode_logits_to_text",
     "find_latest_checkpoint",
     "resume_from_checkpoint",
+    "save_checkpoint",
 ]

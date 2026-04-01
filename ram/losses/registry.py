@@ -124,11 +124,17 @@ def get_loss(
         return loss_class(**kwargs)
 
     # --- Losses with reconstruction component ---
-    # These accept: ignore_index, label_smoothing
+    # These accept: ignore_index, label_smoothing, latent_token_len
     if "ignore_index" in config:
         kwargs["ignore_index"] = config["ignore_index"]
     if "label_smoothing" in config:
         kwargs["label_smoothing"] = config["label_smoothing"]
+    # Use official naming: latent_token_len (C3 config key)
+    # Backward compatibility: also accept num_latent_tokens
+    if "latent_token_len" in config:
+        kwargs["latent_token_len"] = config["latent_token_len"]
+    elif "num_latent_tokens" in config:
+        kwargs["latent_token_len"] = config["num_latent_tokens"]
 
     # VQ-related parameters (for vqae, dual_tokenizer_vqae)
     if loss_type in {"vqae", "dual_tokenizer_vqae"}:

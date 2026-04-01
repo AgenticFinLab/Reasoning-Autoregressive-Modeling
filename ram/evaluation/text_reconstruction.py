@@ -183,21 +183,25 @@ def compute_edit_distance(
     dp = [[0] * (n + 1) for _ in range(m + 1)]
 
     # Initialize base cases
+    # Deletions: transforming original[0:i] to empty string
     for i in range(m + 1):
-        dp[i][0] = i  # deletions
+        dp[i][0] = i
+    # Insertions: transforming empty string to reconstructed[0:j]
     for j in range(n + 1):
-        dp[0][j] = j  # insertions
+        dp[0][j] = j
 
     # Fill the matrix
     for i in range(1, m + 1):
         for j in range(1, n + 1):
             if original[i - 1] == reconstructed[j - 1]:
-                dp[i][j] = dp[i - 1][j - 1]  # no edit needed
+                # No edit needed
+                dp[i][j] = dp[i - 1][j - 1]
             else:
+                # Take minimum of: deletion, insertion, substitution
                 dp[i][j] = 1 + min(
-                    dp[i - 1][j],  # deletion
-                    dp[i][j - 1],  # insertion
-                    dp[i - 1][j - 1],  # substitution
+                    dp[i - 1][j],
+                    dp[i][j - 1],
+                    dp[i - 1][j - 1],
                 )
 
     return dp[m][n]

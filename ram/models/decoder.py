@@ -132,11 +132,12 @@ Dimensions:
     vocab_size: vocabulary size of decoder LLM
 """
 
-from typing import Optional, Dict, Any, List, Tuple
 import logging
+from typing import Any, Dict, List, Optional, Tuple
+
 import torch
 import torch.nn as nn
-from transformers import AutoModelForCausalLM, AutoConfig, AutoTokenizer
+from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
 logger = logging.getLogger(__name__)
 
@@ -319,7 +320,7 @@ class C3Decoder(nn.Module):
             - model_name: HuggingFace model name (e.g., 'Qwen/Qwen2.5-3B')
             - pretrained: Whether to load pretrained weights
             - freeze: Whether to freeze LLM weights
-            - num_latent_tokens: Number of latent tokens N (must match encoder)
+            - latent_token_len: Number of latent tokens N (must match encoder)
         encoder_hidden_dim: Hidden dimension from C3Encoder (required)
 
     Dimensions:
@@ -351,11 +352,16 @@ class C3Decoder(nn.Module):
         model_name = config["model_name"]
         pretrained = config["pretrained"]
         freeze = config["freeze"]
-        num_latent_tokens = config["num_latent_tokens"]
+        # Use official naming: latent_token_len (C3 config key)
+        # Backward compatibility: also accept num_latent_tokens
+        latent_token_len = config.get(
+            "latent_token_len", config.get("num_latent_tokens", 32)
+        )
 
         self.model_name = model_name
         self.encoder_hidden_dim = encoder_hidden_dim
-        self.num_latent_tokens = num_latent_tokens
+        # Official C3 naming
+        self.latent_token_len = latent_token_len
 
         # ====================================================================
         # Load Tokenizer
@@ -469,7 +475,7 @@ class C3Decoder(nn.Module):
             new_input_embeds: [B, L+N, D_decoder] embeddings with latent tokens inserted
         """
         batch_size = input_ids.shape[0]
-        N = self.num_latent_tokens
+        N = self.latent_token_len
         device = input_embeds.device
         dtype = input_embeds.dtype
 
@@ -477,9 +483,12 @@ class C3Decoder(nn.Module):
         new_input_embeds = []
 
         for b in range(batch_size):
-            cur_input_ids = input_ids[b]  # [L]
-            cur_input_embeds = input_embeds[b]  # [L, D_decoder]
-            cur_latent_features = latent_features[b]  # [N, D_decoder]
+            # Shape: [L]
+            cur_input_ids = input_ids[b]
+            # Shape: [L, D_decoder]
+            cur_input_embeds = input_embeds[b]
+            # Shape: [N, D_decoder]
+            cur_latent_features = latent_features[b]
 
             # Source: Lines 135
             # Find position of <img> token
@@ -501,11 +510,15 @@ class C3Decoder(nn.Module):
                 #
                 # Structure: [<img>, latent_1, ..., latent_N, </img>, prompt]
                 #            [:pos+1]  [latent]          [pos+N+1:]
+                # Elements:
+                #   cur_input_embeds[: image_start_pos + 1] - <img>
+                #   cur_latent_features - latent_1, ..., latent_N
+                #   cur_input_embeds[image_start_pos + N + 1:] - </img> + prompt
                 new_embeds = torch.cat(
                     [
-                        cur_input_embeds[: image_start_pos + 1],  # <img>
-                        cur_latent_features,  # latent_1, ..., latent_N
-                        cur_input_embeds[image_start_pos + N + 1 :],  # </img> + prompt
+                        cur_input_embeds[: image_start_pos + 1],
+                        cur_latent_features,
+                        cur_input_embeds[image_start_pos + N + 1 :],
                     ],
                     dim=0,
                 )
@@ -553,15 +566,16 @@ class C3Decoder(nn.Module):
         latent_tokens = latent_tokens.to(device)
 
         batch_size = latent_tokens.shape[0]
-        N = self.num_latent_tokens
+        N = self.latent_token_len
 
         # ====================================================================
         # Step 1: Project latent tokens via mm_projector
         # Source: Lines 124-126
         # for latent_context in latent_contexts:
         #     latent_context = self.mm_projector(latent_context)
+        # Shape: [B, N, D_decoder]
         # ====================================================================
-        projected_latent = self.mm_projector(latent_tokens)  # [B, N, D_decoder]
+        projected_latent = self.mm_projector(latent_tokens)
 
         # ====================================================================
         # Step 2: Prepare decoder input
@@ -659,20 +673,22 @@ class C3Decoder(nn.Module):
         """
         # Get device and dtype from LLM
         device = self.llm.device
-        dtype = self.llm.dtype  # Get model dtype (BF16 if loaded with BF16)
+        # Get model dtype (BF16 if loaded with BF16)
+        dtype = self.llm.dtype
 
         # Move latent_tokens to device and match dtype
         latent_tokens = latent_tokens.to(device=device, dtype=dtype)
 
         batch_size = latent_tokens.shape[0]
-        N = self.num_latent_tokens
+        N = self.latent_token_len
 
         # ====================================================================
         # Step 1: Project latent tokens via mm_projector
         # NOTE: Cast mm_projector to same dtype as model to avoid dtype mismatch
         # ====================================================================
         mm_projector = self.mm_projector.to(dtype=dtype)
-        projected_latent = mm_projector(latent_tokens)  # [B, N, D_decoder]
+        # Shape: [B, N, D_decoder]
+        projected_latent = mm_projector(latent_tokens)
 
         # ====================================================================
         # Step 2: Create prompt with special tokens
@@ -759,7 +775,7 @@ def build_c3_decoder(
         - model_name: str - HuggingFace model name (e.g., 'Qwen/Qwen2.5-3B')
         - pretrained: bool - Whether to load pretrained weights
         - freeze: bool - Whether to freeze LLM weights
-        - num_latent_tokens: int - Number of latent tokens N (must match encoder)
+        - latent_token_len: int - Number of latent tokens N (must match encoder)
 
     Args:
         config: Config dict
@@ -772,7 +788,7 @@ def build_c3_decoder(
             "model_name": "Qwen/Qwen2.5-1.5B",
             "pretrained": True,
             "freeze": False,
-            "num_latent_tokens": 32,
+            "latent_token_len": 32,
             "max_length": 1280,
         }
 
@@ -781,7 +797,7 @@ def build_c3_decoder(
             "model_name": "Qwen/Qwen2.5-3B",
             "pretrained": True,
             "freeze": False,
-            "num_latent_tokens": 32,  # Must match encoder
+            "latent_token_len": 32,  # Must match encoder
         }
 
         encoder = build_c3_encoder(encoder_config)

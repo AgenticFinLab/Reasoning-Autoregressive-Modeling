@@ -33,7 +33,7 @@ Memory Distribution (Example):
 Dimensions:
     B = batch_size
     M = max_length (text sequence length)
-    N = num_latent_tokens (latent token count)
+    N = latent_token_len (latent token count, official naming)
     D_enc = encoder hidden_dim
     D_dec = decoder hidden_dim
     V = vocab_size
@@ -43,6 +43,7 @@ import argparse
 import json
 from pathlib import Path
 
+from lmbase.dataset import registry
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -50,23 +51,19 @@ from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-
-from lmbase.dataset import registry
 from transformers import AutoTokenizer
 
 from ram.models.encoder import build_c3_encoder
 from ram.models.decoder import build_c3_decoder
-from ram.models.encoder import (
-    C3_IM_START_TOKEN,
-    C3_IM_END_TOKEN,
-    C3_IM_PATCH_TOKEN,
-)
 from ram.utils import (
     load_config,
-    set_seed,
+    setup_environment,
     collate_fn_text,
     find_latest_checkpoint,
     assign_model_devices,
+    decode_logits_to_text,
+    resume_from_checkpoint,
+    save_checkpoint,
 )
 
 
@@ -95,21 +92,21 @@ class C3ReconstructionLoss(nn.Module):
         self.max_length = max_length
         self.ignore_index = ignore_index
 
-    def forward(self, logits, labels, num_latent_tokens):
+    def forward(self, logits, labels, latent_token_len):
         """Compute reconstruction loss with teacher forcing.
 
         Args:
             logits: [B, L_total, V] decoder output
                 L_total = N (latent) + L (text tokens)
             labels: [B, L] target token IDs (shifted for next-token prediction)
-            num_latent_tokens: int, number of latent tokens N
+            latent_token_len: int, number of latent tokens N (official naming)
 
         Returns:
             loss: scalar
             loss_dict: dict with loss info
 
         Dimensions:
-            logits: [B, N+L, V] where N = num_latent_tokens, L = text length
+            logits: [B, N+L, V] where N = latent_token_len, L = text length
             labels: [B, L] target token IDs
 
         Loss Computation (official Lines 224-234):
@@ -119,29 +116,42 @@ class C3ReconstructionLoss(nn.Module):
             loss = CrossEntropyLoss(shift_logits, shift_labels)
         """
         B, L_total, V = logits.shape
-        N = num_latent_tokens
+        N = latent_token_len
 
         # Shift for autoregressive prediction
         # logits: [B, N+L, V] -> shift_logits: [B, N+L-1, V]
         # labels: [B, L] -> shift_labels: [B, L-1]
-        shift_logits = logits[:, N:-1, :].contiguous()  # [B, L-1, V]
-        shift_labels = labels[:, 1:].contiguous()  # [B, L-1]
+        # shift_logits shape: [B, L-1, V]
+        # shift_labels shape: [B, L-1]
+        shift_logits = logits[:, N:-1, :].contiguous()
+        shift_labels = labels[:, 1:].contiguous()
 
         # Mask padding positions
         shift_labels = shift_labels.masked_fill(
             shift_labels == self.ignore_index, self.ignore_index
         )
 
-        # Compute cross-entropy loss
-        loss = F.cross_entropy(
+        # Compute cross-entropy loss (reconstruction loss)
+        recon_loss = F.cross_entropy(
             shift_logits.reshape(-1, V),
             shift_labels.reshape(-1),
             ignore_index=self.ignore_index,
         )
 
-        return loss, {
-            "recon_loss": loss.item(),
-            "total_loss": loss.item(),
+        # Currently only one loss component, but structure supports multiple:
+        # - recon_loss: reconstruction loss (cross-entropy)
+        # - reg_loss: regularization (if added in future)
+        # - total_loss: sum of all components
+        # Sum of all loss components
+        recon_loss_val = recon_loss.item()
+        total_loss = recon_loss
+
+        # Return total loss and loss dictionary for logging
+        # recon_loss: Reconstruction loss (cross-entropy)
+        # total_loss: Total = sum of all components
+        return total_loss, {
+            "recon_loss": recon_loss_val,
+            "total_loss": recon_loss_val,
         }
 
 
@@ -203,11 +213,15 @@ def train_c3(config: dict):
     log_dir.mkdir(parents=True, exist_ok=True)
 
     # Dimensions
-    N = enc_cfg["num_latent_tokens"]
+    # Use official naming: latent_token_len (C3 config key)
+    # Backward compatibility: also accept num_latent_tokens
+    N = enc_cfg.get("latent_token_len", enc_cfg.get("num_latent_tokens", 32))
     M = enc_cfg["max_length"]
 
-    # Setup seed
-    set_seed(env_cfg["seed"])
+    # Setup environment (seed only, device assignment is done by assign_model_devices)
+    setup_environment(
+        {"seed": env_cfg["seed"], "device": "cpu"}
+    )  # device=cpu means no GPU assignment here
 
     print("=" * 60)
     print("C3 Context Cascade Compression - Training")
@@ -216,7 +230,7 @@ def train_c3(config: dict):
     print(f"Gradient accumulation: {gradient_accumulation_steps}")
     print(f"Effective batch size: {batch_size * gradient_accumulation_steps}")
     print(f"Max length (M): {M}")
-    print(f"Num latent tokens (N): {N}")
+    print(f"Latent token len (N): {N}")
     print(f"Compression ratio: {M/N:.1f}x")
     print(f"Learning rate: {learning_rate}")
     print(f"Epochs: {num_epochs}")
@@ -242,7 +256,7 @@ def train_c3(config: dict):
     D_enc = encoder.hidden_dim
     print(f"    model: {encoder.model_name}")
     print(f"    hidden_dim: {D_enc}")
-    print(f"    num_latent_tokens: {encoder.num_latent_tokens}")
+    print(f"    latent_token_len: {encoder.latent_token_len}")
 
     print(f"\n[2] Building C3Decoder on {decoder_device}...")
     decoder = build_c3_decoder(
@@ -341,7 +355,7 @@ def train_c3(config: dict):
             "learning_rate": learning_rate,
             "num_epochs": num_epochs,
             "max_length": M,
-            "num_latent_tokens": N,
+            "latent_token_len": N,  # Official naming
             "compression_ratio": M / N,
             "encoder_model": enc_cfg["model_name"],
             "decoder_model": dec_cfg["model_name"],
@@ -356,24 +370,21 @@ def train_c3(config: dict):
         latest_ckpt = find_latest_checkpoint(checkpoint_dir)
         if latest_ckpt is not None:
             print(f"[6.5] Resuming from: {latest_ckpt.name}")
-            checkpoint = torch.load(latest_ckpt, map_location="cpu")
-            encoder.load_state_dict(checkpoint["encoder_state_dict"])
-            decoder.load_state_dict(checkpoint["decoder_state_dict"])
-            encoder_optimizer.load_state_dict(
-                checkpoint["encoder_optimizer_state_dict"]
+            # Use resume_from_checkpoint with multiple optimizers/schedulers
+            start_epoch, global_step, history = resume_from_checkpoint(
+                checkpoint_path=latest_ckpt,
+                models={"encoder": encoder, "decoder": decoder},
+                optimizer={
+                    "encoder": encoder_optimizer,
+                    "decoder": decoder_optimizer,
+                },
+                scheduler={
+                    "encoder": encoder_scheduler,
+                    "decoder": decoder_scheduler,
+                },
+                device="cpu",  # Load to CPU first, then move to correct devices
+                log_dir=log_dir,
             )
-            decoder_optimizer.load_state_dict(
-                checkpoint["decoder_optimizer_state_dict"]
-            )
-            encoder_scheduler.load_state_dict(
-                checkpoint["encoder_scheduler_state_dict"]
-            )
-            decoder_scheduler.load_state_dict(
-                checkpoint["decoder_scheduler_state_dict"]
-            )
-            start_epoch = checkpoint["epoch"]
-            global_step = checkpoint["global_step"]
-            history = checkpoint["history"]
             # Move models to correct devices after loading
             encoder = encoder.to(encoder_device)
             decoder = decoder.to(decoder_device)
@@ -402,6 +413,22 @@ def train_c3(config: dict):
     for epoch in range(start_epoch, num_epochs):
         epoch_loss = 0.0
         num_batches = 0
+
+        # =========================================================
+        # Save epoch-start checkpoint (before any optimization)
+        # =========================================================
+        if epoch > 0 or start_epoch > 0:
+            ckpt_name = f"checkpoint-epoch{epoch}-start.pt"
+            save_checkpoint(
+                checkpoint_path=checkpoint_dir / ckpt_name,
+                models={"encoder": encoder, "decoder": decoder},
+                optimizer={"encoder": encoder_optimizer, "decoder": decoder_optimizer},
+                scheduler={"encoder": encoder_scheduler, "decoder": decoder_scheduler},
+                epoch=epoch,
+                global_step=global_step,
+                extra_info={"step_in_epoch": 0, "history": history},
+            )
+            print(f"    [Epoch-start checkpoint saved: {ckpt_name}]")
 
         pbar = tqdm(dataloader, desc=f"Epoch {epoch+1}/{num_epochs}")
         encoder_optimizer.zero_grad()
@@ -496,17 +523,21 @@ def train_c3(config: dict):
                     decoder_scheduler.step()
 
             # Logging
-            epoch_loss += loss_dict["total_loss"] * gradient_accumulation_steps
+            # Record unscaled loss for accurate averaging
+            # (loss was scaled for grad accumulation, but we want true loss for logging)
+            unscaled_loss = loss_dict["total_loss"]
+            epoch_loss += unscaled_loss
             num_batches += 1
             global_step += 1
 
-            # Record history
+            # Record history with all loss components
             history["steps"].append(
                 {
                     "epoch": epoch + 1,
                     "step_in_epoch": num_batches,
                     "global_step": global_step,
-                    "loss": loss_dict["total_loss"],
+                    "recon_loss": loss_dict["recon_loss"],  # Reconstruction loss
+                    "total_loss": loss_dict["total_loss"],  # Total loss (sum of all)
                     "avg_loss": epoch_loss / num_batches,
                     "lr_encoder": encoder_optimizer.param_groups[0]["lr"],
                     "lr_decoder": decoder_optimizer.param_groups[0]["lr"],
@@ -531,6 +562,24 @@ def train_c3(config: dict):
                     f"avg_loss={avg_loss:.4f}, lr_enc={lr_enc:.2e}, lr_dec={lr_dec:.2e}"
                 )
 
+                # --- Save reconstruction samples ---
+                # Use training logits for reconstruction (teacher forcing output)
+                # logits: [B, N+L, V] -> skip N latent tokens -> [B, L, V]
+                with torch.no_grad():
+                    # Skip latent token positions for decoding
+                    text_logits = logits[:, N:, :]  # [B, L, V]
+                    decode_result = decode_logits_to_text(
+                        text_logits, tokenizer, batch_texts, attention_mask
+                    )
+
+                samples_path = (
+                    log_dir
+                    / f"samples-epoch{epoch+1}-step{num_batches}-global{global_step}.json"
+                )
+                with open(samples_path, "w", encoding="utf-8") as f:
+                    json.dump(decode_result, f, indent=2, ensure_ascii=False)
+                print(f"    [Samples saved: {samples_path.name}]")
+
                 # Save training history
                 history_path = log_dir / "training_history.json"
                 with open(history_path, "w") as f:
@@ -540,23 +589,27 @@ def train_c3(config: dict):
             if global_step % checkpoint_interval == 0:
                 step_in_epoch = num_batches
                 avg_loss = epoch_loss / num_batches
-                checkpoint = {
-                    "epoch": epoch + 1,
-                    "step_in_epoch": step_in_epoch,
-                    "global_step": global_step,
-                    "encoder_state_dict": encoder.state_dict(),
-                    "decoder_state_dict": decoder.state_dict(),
-                    "encoder_optimizer_state_dict": encoder_optimizer.state_dict(),
-                    "decoder_optimizer_state_dict": decoder_optimizer.state_dict(),
-                    "encoder_scheduler_state_dict": encoder_scheduler.state_dict(),
-                    "decoder_scheduler_state_dict": decoder_scheduler.state_dict(),
-                    "loss": loss_dict["total_loss"],
-                    "avg_loss": avg_loss,
-                    "history": history,
-                }
                 ckpt_name = f"checkpoint-epoch{epoch+1}-step{step_in_epoch}-global{global_step}.pt"
-                ckpt_path = checkpoint_dir / ckpt_name
-                torch.save(checkpoint, ckpt_path)
+                save_checkpoint(
+                    checkpoint_path=checkpoint_dir / ckpt_name,
+                    models={"encoder": encoder, "decoder": decoder},
+                    optimizer={
+                        "encoder": encoder_optimizer,
+                        "decoder": decoder_optimizer,
+                    },
+                    scheduler={
+                        "encoder": encoder_scheduler,
+                        "decoder": decoder_scheduler,
+                    },
+                    epoch=epoch + 1,
+                    global_step=global_step,
+                    extra_info={
+                        "step_in_epoch": step_in_epoch,
+                        "loss": loss_dict["total_loss"],
+                        "avg_loss": avg_loss,
+                        "history": history,
+                    },
+                )
                 print(f"    [Checkpoint saved: {ckpt_name}]")
 
         # Epoch summary
@@ -566,25 +619,23 @@ def train_c3(config: dict):
 
         # Save checkpoint at end of each epoch
         step_in_epoch = num_batches
-        checkpoint = {
-            "epoch": epoch + 1,
-            "step_in_epoch": step_in_epoch,
-            "global_step": global_step,
-            "encoder_state_dict": encoder.state_dict(),
-            "decoder_state_dict": decoder.state_dict(),
-            "encoder_optimizer_state_dict": encoder_optimizer.state_dict(),
-            "decoder_optimizer_state_dict": decoder_optimizer.state_dict(),
-            "encoder_scheduler_state_dict": encoder_scheduler.state_dict(),
-            "decoder_scheduler_state_dict": decoder_scheduler.state_dict(),
-            "avg_loss": avg_epoch_loss,
-            "history": history,
-        }
         ckpt_name = (
             f"checkpoint-epoch{epoch+1}-step{step_in_epoch}-global{global_step}.pt"
         )
-        ckpt_path = checkpoint_dir / ckpt_name
-        torch.save(checkpoint, ckpt_path)
-        print(f"    Checkpoint saved: {ckpt_path}")
+        save_checkpoint(
+            checkpoint_path=checkpoint_dir / ckpt_name,
+            models={"encoder": encoder, "decoder": decoder},
+            optimizer={"encoder": encoder_optimizer, "decoder": decoder_optimizer},
+            scheduler={"encoder": encoder_scheduler, "decoder": decoder_scheduler},
+            epoch=epoch + 1,
+            global_step=global_step,
+            extra_info={
+                "step_in_epoch": step_in_epoch,
+                "avg_loss": avg_epoch_loss,
+                "history": history,
+            },
+        )
+        print(f"    Checkpoint saved: {checkpoint_dir / ckpt_name}")
 
     print("=" * 60)
     print("Training completed!")
@@ -592,7 +643,19 @@ def train_c3(config: dict):
 
     # Save final checkpoint
     final_ckpt = checkpoint_dir / "checkpoint_final.pt"
-    torch.save(checkpoint, final_ckpt)
+    save_checkpoint(
+        checkpoint_path=final_ckpt,
+        models={"encoder": encoder, "decoder": decoder},
+        optimizer={"encoder": encoder_optimizer, "decoder": decoder_optimizer},
+        scheduler={"encoder": encoder_scheduler, "decoder": decoder_scheduler},
+        epoch=epoch + 1,
+        global_step=global_step,
+        extra_info={
+            "step_in_epoch": step_in_epoch,
+            "avg_loss": avg_epoch_loss,
+            "history": history,
+        },
+    )
     print(f"Final checkpoint saved: {final_ckpt}")
 
     # Save training history

@@ -125,12 +125,15 @@ class ReconstructionLoss(nn.Module):
         ignore_index: int = -100,
         label_smoothing: float = 0.0,
         reduction: str = "mean",
+        latent_token_len: int = 0,
     ):
         super().__init__()
         self.same_tokenizer = same_tokenizer
         self.ignore_index = ignore_index
         self.label_smoothing = label_smoothing
         self.reduction = reduction
+        # Official C3 naming
+        self.latent_token_len = latent_token_len
 
         self.ce_loss = nn.CrossEntropyLoss(
             ignore_index=ignore_index,
@@ -149,7 +152,7 @@ class ReconstructionLoss(nn.Module):
         """Compute reconstruction loss with validation.
 
         Args:
-            logits: Decoder output [B, L, V]
+            logits: Decoder output [B, L, V] or [B, N+L, V] if latent_token_len > 0
             target_ids: Target token IDs [B, L]
             attention_mask: Optional mask [B, L], 1=valid, 0=pad
             enc_vocab_size: Encoder vocab size (for validation when same_tokenizer=False)
@@ -161,7 +164,15 @@ class ReconstructionLoss(nn.Module):
         Raises:
             ValueError: If tokenizer mismatch detected or invalid configuration
         """
-        B, L, V = logits.shape
+        B, L_total, V = logits.shape
+        N = self.latent_token_len
+
+        # Handle latent tokens: skip first N positions in logits
+        # logits: [B, N+L, V] -> text_logits: [B, L, V]
+        if N > 0:
+            # Skip first N latent tokens
+            logits = logits[:, N:, :]
+            L_total = logits.shape[1]
 
         # Validation: Check vocab size consistency
         if dec_vocab_size is not None and V != dec_vocab_size:
@@ -177,6 +188,13 @@ class ReconstructionLoss(nn.Module):
                 f"target_ids contains ID {max_target_id} >= vocab_size {V}. "
                 f"This indicates tokenizer mismatch! "
                 f"When same_tokenizer=False, target_ids MUST come from decoder's tokenizer."
+            )
+
+        # Validation: Check sequence length match
+        if target_ids.shape[1] != L_total:
+            raise ValueError(
+                f"target_ids length ({target_ids.shape[1]}) != logits length ({L_total}). "
+                f"Check latent_token_len setting!"
             )
 
         # Validation: Warn if using different tokenizers
@@ -236,9 +254,10 @@ class DualTokenizerReconstructionLoss(nn.Module):
         ignore_index: Pad token ID to ignore
         max_length: Maximum sequence length for decoder tokenization
         label_smoothing: Label smoothing factor
+        latent_token_len: Number of latent tokens to skip in logits (default: 0)
 
     Input:
-        logits: [B, L, V_dec] decoder output
+        logits: [B, L, V_dec] decoder output or [B, N+L, V_dec] if latent_token_len > 0
         texts: List[str] original input texts (will be re-tokenized)
 
     Output:
@@ -253,12 +272,15 @@ class DualTokenizerReconstructionLoss(nn.Module):
         ignore_index: int = -100,
         max_length: int = 512,
         label_smoothing: float = 0.0,
+        latent_token_len: int = 0,
     ):
         super().__init__()
         self.dec_tokenizer = dec_tokenizer
         self.dec_vocab_size = dec_vocab_size
         self.ignore_index = ignore_index
         self.max_length = max_length
+        # Official C3 naming
+        self.latent_token_len = latent_token_len
 
         # Set pad token if not set
         if self.dec_tokenizer.pad_token is None:
@@ -278,7 +300,7 @@ class DualTokenizerReconstructionLoss(nn.Module):
         """Compute loss using decoder-tokenized targets.
 
         Args:
-            logits: Decoder output [B, L, V_dec]
+            logits: Decoder output [B, L, V_dec] or [B, N+L, V_dec] if latent_token_len > 0
             texts: List of B input texts
 
         Returns:
@@ -289,8 +311,9 @@ class DualTokenizerReconstructionLoss(nn.Module):
             texts → dec_tokenizer → dec_target_ids [B, L]
             logits [B, L, V] + dec_target_ids [B, L] → CrossEntropyLoss → loss
         """
-        B, L, V = logits.shape
+        B, L_total, V = logits.shape
         device = logits.device
+        N = self.latent_token_len
 
         # Validation
         if V != self.dec_vocab_size:
@@ -299,12 +322,19 @@ class DualTokenizerReconstructionLoss(nn.Module):
                 f"Ensure decoder output matches expected vocabulary!"
             )
 
+        # Handle latent tokens: skip first N positions in logits
+        # logits: [B, N+L, V] -> text_logits: [B, L, V]
+        if N > 0:
+            # Skip first N latent tokens
+            logits = logits[:, N:, :]
+            L_total = logits.shape[1]
+
         # Tokenize with DECODER's tokenizer
         dec_tokens = self.dec_tokenizer(
             texts,
             padding="max_length",
             truncation=True,
-            max_length=L,  # Match logits sequence length
+            max_length=L_total,  # Match logits sequence length after skipping latent tokens
             return_tensors="pt",
         )
         dec_target_ids = dec_tokens["input_ids"].to(device)

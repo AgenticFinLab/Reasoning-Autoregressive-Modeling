@@ -91,7 +91,7 @@ model:
     freeze: false                     # Train encoder (see train.py Lines 43-49)
     # Source: Line 35 - config.latent_token_len
     # Official release: 32 latent tokens (README Line 53)
-    num_latent_tokens: 32             # N = 32 (official default)
+    latent_token_len: 32              # N = 32 (official default)
     # Source: third-part/C3-Context-Cascade-Compression-main/C3-master/README.md
     #         Line 97: model_max_length 8192
     max_length: 2048                  # Official: 8192 (supports long context)
@@ -107,8 +107,8 @@ model:
     model_name: Qwen/Qwen2.5-1.5B       # Official: Qwen/Qwen2.5-3B
     pretrained: true                  # Load pretrained weights
     freeze: false                     # Train decoder
-    # Must match encoder's num_latent_tokens
-    num_latent_tokens: 32             # N = 32 (must match encoder)
+    # Must match encoder's latent_token_len
+    latent_token_len: 32              # N = 32 (must match encoder)
 
   # --- Multi-Scale Quantizer ---
   # C3 does NOT use quantizer, uses learned Q embeddings instead
@@ -153,6 +153,7 @@ train:
     type: dual_tokenizer_reconstruction
     ignore_index: -100
     label_smoothing: 0.0
+    latent_token_len: 32  # Must match encoder.latent_token_len
 
 # =============================================================================
 # Logging Configuration
