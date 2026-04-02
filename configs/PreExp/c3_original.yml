@@ -58,7 +58,7 @@ model:
     pretrained: &pretrained true
     freeze: &freeze false
     latent_token_len: &latent_token_len 32
-    max_length: 2048
+    max_length: 1024
     use_im_start_end: true
 
   decoder:
@@ -77,12 +77,11 @@ model:
 # =============================================================================
 training:
   batch_size: 1
-  num_epochs: 15
+  num_epochs: 5
 
   gradient:
     max_grad_norm: 1.0
     accumulation_steps: 16
-    checkpointing: true
 
   trainable: true
   use_value_head: false
