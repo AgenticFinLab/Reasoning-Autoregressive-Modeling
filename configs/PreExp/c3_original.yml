@@ -76,7 +76,7 @@ model:
 # BLOCK 4: Training Configuration
 # =============================================================================
 training:
-  batch_size: 2
+  batch_size: 1
   num_epochs: 15
 
   gradient:
