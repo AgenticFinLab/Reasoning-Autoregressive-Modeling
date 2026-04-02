@@ -81,7 +81,7 @@ training:
 
   gradient:
     max_grad_norm: 1.0
-    accumulation_steps: 16
+    accumulation_steps: 8
 
   trainable: true
   use_value_head: false
