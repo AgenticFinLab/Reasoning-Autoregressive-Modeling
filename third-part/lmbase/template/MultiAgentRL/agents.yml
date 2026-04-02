@@ -1,0 +1,128 @@
+# =============================================================================
+# Agents Configuration Template
+# =============================================================================
+# Agent Schema:
+#   name: "AgentName"                    # Display name (required)
+#   class: "module.path:ClassName"       # Python class path (required)
+#   num_instances: 1                     # Number of instances (default: 1)
+#   trainable: true                      # Whether policy is trainable (RL only)
+#   config:                              # Agent-specific config (required)
+#     model:                             # Model settings
+#       lm_type: "huggingface"           # "api", "huggingface", "vllm", "none"
+#       lm_name: "model-identifier"      # Model name or path
+#       use_value_head: true             # Attach value head for PPO (trainable agents)
+#     inference_config: {...}            # Device, dtype, entropy settings
+#     generation_config: {...}           # Temperature, max_tokens, etc.
+#     latent_config: {...}               # Latent reasoning configuration (optional)
+#     sys_message: "module:VAR"          # System prompt reference
+#     user_message: "module:VAR"         # User prompt reference
+#     lora: {...}                        # LoRA settings
+#     train: {...}                       # Training hyperparameters
+# =============================================================================
+
+Planner:
+  name: "Planner"
+  class: "eparl.agent_base:PlannerAgent"
+  num_instances: 1
+  trainable: true
+  
+  config:
+    model:
+      lm_type: "huggingface"
+      lm_name: "Qwen/Qwen2.5-0.5B-Instruct"
+      use_value_head: true
+    
+    inference_config:
+      # Device selection: "auto", "cpu", "cuda", "mps"
+      device: "auto"
+      
+      # Data type: "float32", "float16", "bfloat16", "auto"
+      torch_dtype: "auto"
+      
+      # Entropy computation configuration for KV analysis
+      entropy_config:
+        topk_v: inf          # Top-k value for entropy calculation (inf = all tokens)
+        topk_adaptive: false # Whether to use adaptive top-k
+        temperature: 0.0     # Temperature for entropy calculation
+    
+    generation_config:
+      max_new_tokens: 128
+      temperature: 0.7
+      top_p: 0.9
+      do_sample: true
+    
+    # Latent reasoning configuration (optional, set latent_steps > 0 to enable)
+    latent_config:
+      latent_steps: 0        # Number of latent reasoning steps (0 = disabled)
+      tail_truncate_n: 0     # Keep N tokens from end (0 = no truncation)
+      head_truncate_n: 0     # Keep N tokens from beginning (0 = no truncation)
+      truncate_mode: "target"  # Truncation mode: "target", "latent_only", "sequential", "last_n"
+      add_think: false       # Whether to add <think> tokens
+    
+    sys_message: "examples.prompts.planner:PR_PLANNER_SYS"
+    user_message: "examples.prompts.planner:PR_PLANNER_USER"
+    
+    lora:
+      r: 8
+      lora_alpha: 16
+      lora_dropout: 0.1
+    
+    train:
+      learning_rate: 1.0e-5
+      clip_ratio: 0.2
+      entropy_coef: 0.0
+      mini_batch_size: 4
+      ppo_epochs: 4
+      gamma: 0.99
+      lam: 0.95
+
+Reasoner:
+  name: "Reasoner"
+  class: "eparl.agent_base:ReasonerAgent"
+  num_instances: 1
+  trainable: true
+  
+  config:
+    model:
+      lm_type: "huggingface"
+      lm_name: "Qwen/Qwen2.5-0.5B-Instruct"
+      use_value_head: true
+    
+    inference_config:
+      device: "auto"
+      torch_dtype: "auto"
+      
+      entropy_config:
+        topk_v: inf
+        topk_adaptive: false
+        temperature: 0.0
+    
+    generation_config:
+      max_new_tokens: 128
+      temperature: 0.7
+      top_p: 0.9
+      do_sample: true
+    
+    latent_config:
+      latent_steps: 0
+      tail_truncate_n: 0
+      head_truncate_n: 0
+      truncate_mode: "target"
+      add_think: false
+    
+    sys_message: "examples.prompts.reasoner:PR_REASONER_SYS"
+    user_message: "examples.prompts.reasoner:PR_REASONER_USER"
+    
+    lora:
+      r: 8
+      lora_alpha: 16
+      lora_dropout: 0.1
+    
+    train:
+      learning_rate: 1.0e-5
+      clip_ratio: 0.2
+      entropy_coef: 0.0
+      mini_batch_size: 4
+      ppo_epochs: 4
+      gamma: 0.99
+      lam: 0.95

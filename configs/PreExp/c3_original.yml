@@ -179,6 +179,14 @@ logging:
   # Source: Line 100
   use_wandb: false                    # Official: report_to none
   wandb_project: null
+  
+  # --- History Buffer Configuration ---
+  # Memory-efficient training history storage using lmbase.utils.history.HistoryBuffer
+  # Hot storage: recent entries in memory (entry_limit)
+  # Cold storage: older entries on disk (block files)
+  history:
+    entry_limit: 2                    # Max items in hot memory (default: 2)
+    block_size: 500                   # Items per block file on disk
 
 # =============================================================================
 # C3-Specific Configuration (Official Reference)

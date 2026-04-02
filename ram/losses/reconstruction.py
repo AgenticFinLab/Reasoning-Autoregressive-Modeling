@@ -330,11 +330,12 @@ class DualTokenizerReconstructionLoss(nn.Module):
             L_total = logits.shape[1]
 
         # Tokenize with DECODER's tokenizer
+        # Match logits sequence length after skipping latent tokens
         dec_tokens = self.dec_tokenizer(
             texts,
             padding="max_length",
             truncation=True,
-            max_length=L_total,  # Match logits sequence length after skipping latent tokens
+            max_length=L_total,
             return_tensors="pt",
         )
         dec_target_ids = dec_tokens["input_ids"].to(device)
@@ -424,15 +425,17 @@ def validate_tokenizer_compatibility(
         )
 
     # Detailed comparison on sample texts
+    # Limit to 3 samples
     if sample_texts:
         comparison = []
-        for text in sample_texts[:3]:  # Limit to 3 samples
+        for text in sample_texts[:3]:
             enc_ids = enc_tokenizer.encode(text, add_special_tokens=True)
             dec_ids = dec_tokenizer.encode(text, add_special_tokens=True)
+            # First 10 tokens for comparison
             comparison.append(
                 {
                     "text": text[:50] + "..." if len(text) > 50 else text,
-                    "enc_ids": enc_ids[:10],  # First 10 tokens
+                    "enc_ids": enc_ids[:10],
                     "dec_ids": dec_ids[:10],
                     "enc_len": len(enc_ids),
                     "dec_len": len(dec_ids),

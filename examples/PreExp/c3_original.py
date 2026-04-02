@@ -40,7 +40,6 @@ Dimensions:
 """
 
 import argparse
-import json
 from pathlib import Path
 
 from lmbase.dataset import registry
@@ -62,8 +61,17 @@ from ram.utils import (
     find_latest_checkpoint,
     assign_model_devices,
     decode_logits_to_text,
-    resume_from_checkpoint,
-    save_checkpoint,
+)
+from ram.utils.tools import save_checkpoint, resume_from_checkpoint
+from ram import (
+    TrainingConfig,
+    TrainingStep,
+    TrainingHistory,
+    TrainingLogger,
+    CheckpointData,
+    CheckpointMetadata,
+    ReconstructionSampleStore,
+    create_reconstruction_samples,
 )
 
 
@@ -115,7 +123,8 @@ class C3ReconstructionLoss(nn.Module):
             shift_labels = labels[..., 1:].contiguous()
             loss = CrossEntropyLoss(shift_logits, shift_labels)
         """
-        B, L_total, V = logits.shape
+        # Shape: [B, N+L, V] where N = latent_token_len, L = text length
+        _, _, V = logits.shape
         N = latent_token_len
 
         # Shift for autoregressive prediction
@@ -212,31 +221,27 @@ def train_c3(config: dict):
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
     log_dir.mkdir(parents=True, exist_ok=True)
 
+    # =================================================================
+    # Setup unified logging
+    # =================================================================
+    logger = TrainingLogger(
+        name="c3_train",
+        log_file=log_dir / "training.log",
+    )
+
+    logger.log_header("C3 Context Cascade Compression - Training")
+
+    # =================================================================
     # Dimensions
+    # =================================================================
     # Use official naming: latent_token_len (C3 config key)
     # Backward compatibility: also accept num_latent_tokens
     N = enc_cfg.get("latent_token_len", enc_cfg.get("num_latent_tokens", 32))
     M = enc_cfg["max_length"]
 
     # Setup environment (seed only, device assignment is done by assign_model_devices)
-    setup_environment(
-        {"seed": env_cfg["seed"], "device": "cpu"}
-    )  # device=cpu means no GPU assignment here
-
-    print("=" * 60)
-    print("C3 Context Cascade Compression - Training")
-    print("=" * 60)
-    print(f"Batch size: {batch_size}")
-    print(f"Gradient accumulation: {gradient_accumulation_steps}")
-    print(f"Effective batch size: {batch_size * gradient_accumulation_steps}")
-    print(f"Max length (M): {M}")
-    print(f"Latent token len (N): {N}")
-    print(f"Compression ratio: {M/N:.1f}x")
-    print(f"Learning rate: {learning_rate}")
-    print(f"Epochs: {num_epochs}")
-    print(f"BFloat16: {bf16}")
-    print(f"Output dir: {output_dir}")
-    print()
+    # device=cpu means no GPU assignment here
+    setup_environment({"seed": env_cfg["seed"], "device": "cpu"})
 
     # =================================================================
     # Assign GPU devices for each model
@@ -245,20 +250,43 @@ def train_c3(config: dict):
     encoder_device = model_devices["encoder"]
     decoder_device = model_devices["decoder"]
     use_pipeline = encoder_device != decoder_device
-    print()
+
+    # =================================================================
+    # Create TrainingConfig
+    # =================================================================
+    training_config = TrainingConfig(
+        experiment_name="c3_original",
+        batch_size=batch_size,
+        learning_rate=learning_rate,
+        weight_decay=weight_decay,
+        num_epochs=num_epochs,
+        warmup_ratio=warmup_ratio,
+        gradient_accumulation_steps=gradient_accumulation_steps,
+        gradient_clip=gradient_clip,
+        bf16=bf16,
+        latent_token_len=N,
+        max_length=M,
+        compression_ratio=M / N,
+        use_pipeline=use_pipeline,
+        encoder_device=encoder_device,
+        decoder_device=decoder_device,
+    )
+    logger.log_config(training_config)
+    logger.info("")
 
     # =================================================================
     # Build models - place on appropriate GPUs
     # =================================================================
-    print(f"[1] Building C3Encoder on {encoder_device}...")
+    logger.info(f"[1] Building C3Encoder on {encoder_device}...")
     encoder = build_c3_encoder(enc_cfg)
     encoder = encoder.to(encoder_device)
     D_enc = encoder.hidden_dim
-    print(f"    model: {encoder.model_name}")
-    print(f"    hidden_dim: {D_enc}")
-    print(f"    latent_token_len: {encoder.latent_token_len}")
+    logger.info(f"    model: {encoder.model_name}")
+    logger.info(f"    hidden_dim: {D_enc}")
+    logger.info(f"    latent_token_len: {encoder.latent_token_len}")
 
-    print(f"\n[2] Building C3Decoder on {decoder_device}...")
+    logger.info("")
+    logger.info(f"[2] Building C3Decoder on {decoder_device}...")
     decoder = build_c3_decoder(
         dec_cfg,
         encoder_hidden_dim=D_enc,
@@ -267,38 +295,41 @@ def train_c3(config: dict):
     decoder = decoder.to(decoder_device)
     D_dec = decoder.hidden_dim
     V = decoder.vocab_size
-    print(f"    model: {decoder.model_name}")
-    print(f"    hidden_dim: {D_dec}")
-    print(f"    vocab_size: {V}")
-    print(f"    mm_projector: {D_enc} -> {D_dec}")
-    print()
+    logger.info(f"    model: {decoder.model_name}")
+    logger.info(f"    hidden_dim: {D_dec}")
+    logger.info(f"    vocab_size: {V}")
+    logger.info(f"    mm_projector: {D_enc} -> {D_dec}")
+    logger.info("")
 
     # =================================================================
     # Tokenizer for loss computation
     # =================================================================
-    print("[3] Setting up tokenizer...")
+    logger.info("[3] Setting up tokenizer...")
     tokenizer = AutoTokenizer.from_pretrained(dec_cfg["model_name"])
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
-    print(f"    pad_token_id: {tokenizer.pad_token_id}")
-    print()
+    logger.info(f"    pad_token_id: {tokenizer.pad_token_id}")
+    logger.info("")
 
     # =================================================================
     # Setup loss function
     # =================================================================
-    print("[4] Setting up loss function...")
+    logger.info("[4] Setting up loss function...")
+    # Read loss config
+    loss_cfg = train_cfg["loss"]
+    ignore_index = loss_cfg["ignore_index"]
     loss_fn = C3ReconstructionLoss(
         tokenizer=tokenizer,
         max_length=M,
-        ignore_index=-100,
+        ignore_index=ignore_index,
     )
-    print(f"    Loss: C3ReconstructionLoss")
-    print()
+    logger.info(f"    Loss: C3ReconstructionLoss, ignore_index={ignore_index}")
+    logger.info("")
 
     # =================================================================
     # Load data
     # =================================================================
-    print("[5] Loading dataset...")
+    logger.info("[5] Loading dataset...")
     dataset = registry.get(data_cfg, split=data_cfg["split"])
     dataloader = DataLoader(
         dataset,
@@ -308,14 +339,14 @@ def train_c3(config: dict):
         drop_last=True,
         num_workers=env_cfg["dataloader_num_workers"],
     )
-    print(f"    Dataset: {data_cfg['data_name']}, {len(dataset)} samples")
-    print(f"    Batches per epoch: {len(dataloader)}")
-    print()
+    logger.info(f"    Dataset: {data_cfg['data_name']}, {len(dataset)} samples")
+    logger.info(f"    Batches per epoch: {len(dataloader)}")
+    logger.info("")
 
     # =================================================================
     # Setup optimizers - separate for encoder and decoder
     # =================================================================
-    print("[6] Setting up optimizers...")
+    logger.info("[6] Setting up optimizers...")
     encoder_optimizer = AdamW(
         encoder.parameters(),
         lr=learning_rate,
@@ -339,39 +370,44 @@ def train_c3(config: dict):
         T_max=total_steps - warmup_steps,
     )
 
-    print(f"    Total steps: {total_steps}")
-    print(f"    Warmup steps: {warmup_steps}")
-    print(f"    LR scheduler: cosine")
-    print()
+    logger.info(f"    Total steps: {total_steps}")
+    logger.info(f"    Warmup steps: {warmup_steps}")
+    logger.info("    LR scheduler: cosine")
+    logger.info("")
 
     # =================================================================
     # Resume from checkpoint
     # =================================================================
     start_epoch = 0
     global_step = 0
-    history = {
-        "config": {
-            "batch_size": batch_size,
-            "learning_rate": learning_rate,
-            "num_epochs": num_epochs,
-            "max_length": M,
-            "latent_token_len": N,  # Official naming
-            "compression_ratio": M / N,
-            "encoder_model": enc_cfg["model_name"],
-            "decoder_model": dec_cfg["model_name"],
-            "use_pipeline": use_pipeline,
-            "encoder_device": encoder_device,
-            "decoder_device": decoder_device,
-        },
-        "steps": [],
-    }
+
+    # =================================================================
+    # Setup training history and save config
+    # =================================================================
+    # Save training config (one-time snapshot)
+    config_path = log_dir / "train_config.json"
+    training_config.save(config_path)
+    logger.info(f"    Training config saved: {config_path}")
+
+    # Setup training history manager
+    history_path = log_dir / "training_history.json"
+    history = TrainingHistory(training_config, history_path)
+    logger.info(f"    History file: {history_path}")
+
+    # Setup reconstruction sample store (block-based storage)
+    samples_store = ReconstructionSampleStore(
+        folder=str(log_dir / "samples"),
+        block_size=50,
+    )
+    logger.info(f"    Samples store: {log_dir / 'samples'}")
+    logger.info("")
 
     if resume:
         latest_ckpt = find_latest_checkpoint(checkpoint_dir)
         if latest_ckpt is not None:
-            print(f"[6.5] Resuming from: {latest_ckpt.name}")
+            logger.info(f"[6.5] Resuming from: {latest_ckpt.name}")
             # Use resume_from_checkpoint with multiple optimizers/schedulers
-            start_epoch, global_step, history = resume_from_checkpoint(
+            start_epoch, global_step, _ = resume_from_checkpoint(
                 checkpoint_path=latest_ckpt,
                 models={"encoder": encoder, "decoder": decoder},
                 optimizer={
@@ -382,23 +418,25 @@ def train_c3(config: dict):
                     "encoder": encoder_scheduler,
                     "decoder": decoder_scheduler,
                 },
-                device="cpu",  # Load to CPU first, then move to correct devices
+                # Load to CPU first, then move to correct devices
+                device="cpu",
                 log_dir=log_dir,
             )
             # Move models to correct devices after loading
             encoder = encoder.to(encoder_device)
             decoder = decoder.to(decoder_device)
-            print(f"    Resumed from epoch {start_epoch+1}, global_step {global_step}")
-            print()
+            logger.info(
+                f"    Resumed from epoch {start_epoch+1}, global_step {global_step}"
+            )
+            logger.info("")
         else:
-            print("[6.5] No checkpoint found, starting fresh")
-            print()
+            logger.info("[6.5] No checkpoint found, starting fresh")
+            logger.info("")
 
     # =================================================================
     # Training loop
     # =================================================================
-    print("[7] Starting training...")
-    print("=" * 60)
+    logger.log_subheader("[7] Starting training...")
 
     encoder.train()
     decoder.train()
@@ -406,8 +444,9 @@ def train_c3(config: dict):
     # Mixed precision scalers
     # NOTE: GradScaler is NOT needed for BF16 (BF16 has same exponent range as FP32)
     # Only enable for FP16 training, disabled for BF16 and FP32
-    encoder_scaler = torch.amp.GradScaler("cuda", enabled=False)  # Disabled for BF16
-    decoder_scaler = torch.amp.GradScaler("cuda", enabled=False)  # Disabled for BF16
+    # Disabled for BF16
+    encoder_scaler = torch.amp.GradScaler("cuda", enabled=False)
+    decoder_scaler = torch.amp.GradScaler("cuda", enabled=False)
     amp_dtype = torch.bfloat16 if bf16 else torch.float32
 
     for epoch in range(start_epoch, num_epochs):
@@ -426,9 +465,9 @@ def train_c3(config: dict):
                 scheduler={"encoder": encoder_scheduler, "decoder": decoder_scheduler},
                 epoch=epoch,
                 global_step=global_step,
-                extra_info={"step_in_epoch": 0, "history": history},
+                extra_info={"step_in_epoch": 0, "total_steps": len(history)},
             )
-            print(f"    [Epoch-start checkpoint saved: {ckpt_name}]")
+            logger.info(f"    [Epoch-start checkpoint saved: {ckpt_name}]")
 
         pbar = tqdm(dataloader, desc=f"Epoch {epoch+1}/{num_epochs}")
         encoder_optimizer.zero_grad()
@@ -448,14 +487,15 @@ def train_c3(config: dict):
                 truncation=True,
                 return_tensors="pt",
             )
-            input_ids = tokens["input_ids"]  # [B, L]
-            attention_mask = tokens["attention_mask"]  # [B, L]
+            # Token outputs: [B, L]
+            input_ids = tokens["input_ids"]
+            attention_mask = tokens["attention_mask"]
 
             # Labels: shift input_ids for next-token prediction
             # labels[i] = input_ids[i, 1:] (predict next token)
             labels = input_ids.clone()
             # Mask padding tokens in labels
-            labels[attention_mask == 0] = -100  # ignore_index
+            labels[attention_mask == 0] = ignore_index
 
             # =========================================================
             # Step 2: Encode on encoder device
@@ -530,19 +570,18 @@ def train_c3(config: dict):
             num_batches += 1
             global_step += 1
 
-            # Record history with all loss components
-            history["steps"].append(
-                {
-                    "epoch": epoch + 1,
-                    "step_in_epoch": num_batches,
-                    "global_step": global_step,
-                    "recon_loss": loss_dict["recon_loss"],  # Reconstruction loss
-                    "total_loss": loss_dict["total_loss"],  # Total loss (sum of all)
-                    "avg_loss": epoch_loss / num_batches,
-                    "lr_encoder": encoder_optimizer.param_groups[0]["lr"],
-                    "lr_decoder": decoder_optimizer.param_groups[0]["lr"],
-                }
+            # Record history with TrainingStep
+            step_record = TrainingStep(
+                epoch=epoch + 1,
+                step_in_epoch=num_batches,
+                global_step=global_step,
+                total_loss=loss_dict["total_loss"],
+                recon_loss=loss_dict["recon_loss"],
+                avg_loss=epoch_loss / num_batches,
+                lr_encoder=encoder_optimizer.param_groups[0]["lr"],
+                lr_decoder=decoder_optimizer.param_groups[0]["lr"],
             )
+            history.append(step_record)
 
             # Update progress bar
             pbar.set_postfix(
@@ -554,121 +593,114 @@ def train_c3(config: dict):
 
             # --- Log at log_interval ---
             if global_step % log_interval == 0:
-                avg_loss = epoch_loss / num_batches
-                lr_enc = encoder_optimizer.param_groups[0]["lr"]
-                lr_dec = decoder_optimizer.param_groups[0]["lr"]
-                print(
-                    f"    Step {global_step}: loss={loss_dict['total_loss']:.4f}, "
-                    f"avg_loss={avg_loss:.4f}, lr_enc={lr_enc:.2e}, lr_dec={lr_dec:.2e}"
-                )
+                logger.log_step(step_record, log_interval=1)
 
                 # --- Save reconstruction samples ---
                 # Use training logits for reconstruction (teacher forcing output)
                 # logits: [B, N+L, V] -> skip N latent tokens -> [B, L, V]
                 with torch.no_grad():
                     # Skip latent token positions for decoding
-                    text_logits = logits[:, N:, :]  # [B, L, V]
+                    # text_logits: [B, L, V]
+                    text_logits = logits[:, N:, :]
                     decode_result = decode_logits_to_text(
                         text_logits, tokenizer, batch_texts, attention_mask
                     )
 
-                samples_path = (
-                    log_dir
-                    / f"samples-epoch{epoch+1}-step{num_batches}-global{global_step}.json"
-                )
-                with open(samples_path, "w", encoding="utf-8") as f:
-                    json.dump(decode_result, f, indent=2, ensure_ascii=False)
-                print(f"    [Samples saved: {samples_path.name}]")
+                # Create reconstruction samples and add to step record
+                recon_samples = create_reconstruction_samples(decode_result)
+                step_record.reconstruction_samples = recon_samples
 
-                # Save training history
-                history_path = log_dir / "training_history.json"
-                with open(history_path, "w") as f:
-                    json.dump(history, f, indent=2)
+                # Save samples to block-based store for alignment with training history
+                sample_key = samples_store.save_samples(step_record, recon_samples)
+                logger.info(f"    [Samples saved: {sample_key}]")
 
             # --- Save checkpoint at checkpoint_interval ---
             if global_step % checkpoint_interval == 0:
                 step_in_epoch = num_batches
                 avg_loss = epoch_loss / num_batches
                 ckpt_name = f"checkpoint-epoch{epoch+1}-step{step_in_epoch}-global{global_step}.pt"
-                save_checkpoint(
-                    checkpoint_path=checkpoint_dir / ckpt_name,
+                # Create checkpoint metadata
+                ckpt_metadata = CheckpointMetadata(
+                    epoch=epoch + 1,
+                    global_step=global_step,
+                    step_in_epoch=step_in_epoch,
+                    avg_loss=avg_loss,
+                    experiment_name="c3_original",
+                )
+                # Create checkpoint data
+                ckpt_data = CheckpointData.from_models(
                     models={"encoder": encoder, "decoder": decoder},
-                    optimizer={
+                    optimizers={
                         "encoder": encoder_optimizer,
                         "decoder": decoder_optimizer,
                     },
-                    scheduler={
+                    schedulers={
                         "encoder": encoder_scheduler,
                         "decoder": decoder_scheduler,
                     },
-                    epoch=epoch + 1,
-                    global_step=global_step,
-                    extra_info={
-                        "step_in_epoch": step_in_epoch,
-                        "loss": loss_dict["total_loss"],
-                        "avg_loss": avg_loss,
-                        "history": history,
-                    },
+                    metadata=ckpt_metadata,
+                    extra={"total_steps": len(history)},
                 )
-                print(f"    [Checkpoint saved: {ckpt_name}]")
+                ckpt_data.save(checkpoint_dir / ckpt_name)
+                logger.info(f"    [Checkpoint saved: {ckpt_name}]")
 
         # Epoch summary
         avg_epoch_loss = epoch_loss / num_batches
-        print(f"Epoch {epoch+1} completed: avg_loss={avg_epoch_loss:.4f}")
-        print()
+        logger.log_epoch(epoch + 1, avg_epoch_loss, num_epochs)
 
         # Save checkpoint at end of each epoch
         step_in_epoch = num_batches
         ckpt_name = (
             f"checkpoint-epoch{epoch+1}-step{step_in_epoch}-global{global_step}.pt"
         )
-        save_checkpoint(
-            checkpoint_path=checkpoint_dir / ckpt_name,
-            models={"encoder": encoder, "decoder": decoder},
-            optimizer={"encoder": encoder_optimizer, "decoder": decoder_optimizer},
-            scheduler={"encoder": encoder_scheduler, "decoder": decoder_scheduler},
+        # Create checkpoint metadata
+        ckpt_metadata = CheckpointMetadata(
             epoch=epoch + 1,
             global_step=global_step,
-            extra_info={
-                "step_in_epoch": step_in_epoch,
-                "avg_loss": avg_epoch_loss,
-                "history": history,
-            },
+            step_in_epoch=step_in_epoch,
+            avg_loss=avg_epoch_loss,
+            experiment_name="c3_original",
         )
-        print(f"    Checkpoint saved: {checkpoint_dir / ckpt_name}")
+        ckpt_data = CheckpointData.from_models(
+            models={"encoder": encoder, "decoder": decoder},
+            optimizers={"encoder": encoder_optimizer, "decoder": decoder_optimizer},
+            schedulers={"encoder": encoder_scheduler, "decoder": decoder_scheduler},
+            metadata=ckpt_metadata,
+            extra={"total_steps": len(history)},
+        )
+        ckpt_data.save(checkpoint_dir / ckpt_name)
+        logger.info(f"    Checkpoint saved: {checkpoint_dir / ckpt_name}")
 
-    print("=" * 60)
-    print("Training completed!")
-    print()
+    logger.log_header("Training completed!")
 
     # Save final checkpoint
     final_ckpt = checkpoint_dir / "checkpoint_final.pt"
-    save_checkpoint(
-        checkpoint_path=final_ckpt,
-        models={"encoder": encoder, "decoder": decoder},
-        optimizer={"encoder": encoder_optimizer, "decoder": decoder_optimizer},
-        scheduler={"encoder": encoder_scheduler, "decoder": decoder_scheduler},
+    ckpt_metadata = CheckpointMetadata(
         epoch=epoch + 1,
         global_step=global_step,
-        extra_info={
-            "step_in_epoch": step_in_epoch,
-            "avg_loss": avg_epoch_loss,
-            "history": history,
-        },
+        step_in_epoch=step_in_epoch,
+        avg_loss=avg_epoch_loss,
+        experiment_name="c3_original",
     )
-    print(f"Final checkpoint saved: {final_ckpt}")
+    ckpt_data = CheckpointData.from_models(
+        models={"encoder": encoder, "decoder": decoder},
+        optimizers={"encoder": encoder_optimizer, "decoder": decoder_optimizer},
+        schedulers={"encoder": encoder_scheduler, "decoder": decoder_scheduler},
+        metadata=ckpt_metadata,
+        extra={"total_steps": len(history)},
+    )
+    ckpt_data.save(final_ckpt)
+    logger.info(f"Final checkpoint saved: {final_ckpt}")
 
-    # Save training history
-    history_path = log_dir / "training_history.json"
-    with open(history_path, "w") as f:
-        json.dump(history, f, indent=2)
-    print(f"Training history saved: {history_path}")
-    print()
+    # Flush and persist training history to disk
+    history.flush()
+    logger.info(f"Training history saved: {history_path} ({len(history)} steps)")
+    logger.info("")
 
     # =================================================================
     # Evaluation: Sample reconstruction
     # =================================================================
-    print("[8] Sample reconstruction...")
+    logger.info("[8] Sample reconstruction...")
 
     encoder.eval()
     decoder.eval()
@@ -681,9 +713,9 @@ def train_c3(config: dict):
         with torch.amp.autocast(device_type="cuda", dtype=amp_dtype, enabled=bf16):
             # Encode
             latent_tokens = encoder(inputs=sample_texts)
-            print(f"    Input texts: {len(sample_texts[0])} chars")
-            print(f"    Latent tokens shape: {latent_tokens.shape}")
-            print(f"    Compression: {len(sample_texts[0])} chars -> {N} tokens")
+            logger.info(f"    Input texts: {len(sample_texts[0])} chars")
+            logger.info(f"    Latent tokens shape: {latent_tokens.shape}")
+            logger.info(f"    Compression: {len(sample_texts[0])} chars -> {N} tokens")
 
             # Transfer if pipeline mode
             if use_pipeline:
@@ -698,23 +730,21 @@ def train_c3(config: dict):
             )
 
     # Decode
-    print()
-    print("    Sample 1:")
-    print(f"      Original:      {sample_texts[0][:100]}...")
+    logger.info("")
+    logger.info("    Sample 1:")
+    logger.info(f"      Original:      {sample_texts[0][:100]}...")
     pred_text = tokenizer.decode(output_ids[0], skip_special_tokens=True)
-    print(f"      Reconstructed: {pred_text[:100]}...")
+    logger.info(f"      Reconstructed: {pred_text[:100]}...")
 
     if len(sample_texts) > 1:
-        print()
-        print("    Sample 2:")
-        print(f"      Original:      {sample_texts[1][:100]}...")
+        logger.info("")
+        logger.info("    Sample 2:")
+        logger.info(f"      Original:      {sample_texts[1][:100]}...")
         pred_text = tokenizer.decode(output_ids[1], skip_special_tokens=True)
-        print(f"      Reconstructed: {pred_text[:100]}...")
+        logger.info(f"      Reconstructed: {pred_text[:100]}...")
 
-    print()
-    print("=" * 60)
-    print("ALL DONE")
-    print("=" * 60)
+    logger.info("")
+    logger.log_header("ALL DONE")
 
 
 if __name__ == "__main__":
@@ -731,6 +761,4 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     config = load_config(args.config)
-    print(f"Config: {args.config}")
-    print("=" * 60)
     train_c3(config)

@@ -1,0 +1,86 @@
+# =============================================================================
+# TEMPLATE-LEARN: RL Learning Configuration Template
+# =============================================================================
+# Structure:
+#   1. data        - Dataset configuration
+#   2. environment - Environment variables and paths
+#   3. agents      - Agent definitions (included from agents.yml)
+#   4. topology    - Agent interaction topology (included from topology.yml)
+#   5. log         - Logging and output configuration
+#   6. learn       - Training and reward configuration
+#   7. evaluation  - Evaluation settings
+# =============================================================================
+
+# =============================================================================
+# BLOCK 1: Data Configuration
+# =============================================================================
+data:
+  data_name: "GSM8K"
+  data_path: "EXPERIMENT/data/GSM8K"
+  split: "train"
+
+# =============================================================================
+# BLOCK 2: Environment Configuration
+# =============================================================================
+environment:
+  dotenv_path: ".env"
+  seed: 42
+
+# =============================================================================
+# BLOCK 3: Agents Configuration
+# =============================================================================
+# Agent definitions are in agents.yml
+# Each agent has its own:
+#   - model.lm_name: Model identifier
+#   - inference_config: Device, dtype, entropy settings
+#   - generation_config: Temperature, max_tokens, etc.
+#   - latent_config: Latent reasoning steps (if applicable)
+agents: !include "agents.yml"
+
+# =============================================================================
+# BLOCK 4: Topology Configuration
+# =============================================================================
+topology: !include "topology.yml"
+
+# =============================================================================
+# BLOCK 5: Log Configuration
+# =============================================================================
+log:
+  # Output directory for experiment results
+  save_folder: "EXPERIMENT/HRL/template"
+  
+  trace_save_frequency: 1
+  log_level: "INFO"
+  checkpoint_frequency: 100
+
+# =============================================================================
+# BLOCK 6: Learn Configuration
+# =============================================================================
+learn:
+  training:
+    batch_size: 1
+    num_epochs: 1
+    gradient:
+      max_grad_norm: 1.0
+      accumulation_steps: 1
+  
+  reward:
+    accuracy_weight: 1.0
+    format_weight: 0.1
+    shaping:
+      enabled: false
+
+# =============================================================================
+# BLOCK 7: Evaluation Configuration
+# =============================================================================
+evaluation:
+  enabled: true
+  frequency: 100
+  datasets:
+    - name: "GSM8K_test"
+      path: "EXPERIMENT/data/GSM8K"
+      split: "test"
+      num_samples: 100
+  metrics:
+    - "accuracy"
+    - "format_correctness"
