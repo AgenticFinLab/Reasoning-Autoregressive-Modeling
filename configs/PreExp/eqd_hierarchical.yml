@@ -1,92 +1,129 @@
 # =============================================================================
-# Encoder-Quantizer-Decoder with Hierarchical Text Structure Configuration
+# Encoder-Quantizer-Decoder Hierarchical Configuration
 # =============================================================================
-# Purpose: Test text-native hierarchical quantization (True TAR)
-# Approach: Linguistically motivated scales: sentence → clause → phrase → word → subword
-# Pipeline: Text → Encoder → z → HierarchicalQuantizer → f_hat → Decoder → logits
+# Purpose:
+#   Configuration for encoder-quantizer-decoder model with hierarchical
+#   quantization structure.
+#
+# Structure:
+#   1. data        - Dataset configuration
+#   2. environment - Runtime environment settings
+#   3. encoder     - Encoder model definition
+#   4. quantizer   - Quantizer configuration (hierarchical)
+#   5. decoder     - Decoder model definition
+#   6. training    - Training settings
+#   7. log         - Logging and checkpointing
+#   8. evaluation  - Evaluation settings
+# =============================================================================
 
 # =============================================================================
-# Data Configuration
+# BLOCK 1: Data Configuration
 # =============================================================================
 data:
-  data_name: math
-  data_path: ./EXPERIMENT/data
-  split: train
+  data_name: "YourDataset"
+  data_path: "EXPERIMENT/data/YourDataset"
+  split: "train"
+  subset: ""
 
 # =============================================================================
-# Environment Configuration
+# BLOCK 2: Environment Configuration
 # =============================================================================
 environment:
+  dotenv_path: ".env"
   seed: 42
-  device: auto
+  device_map:
+    encoder:
+      device: "auto"
+      priority: 3
+    quantizer:
+      device: "auto"
+      priority: 2
+    decoder:
+      device: "auto"
+      priority: 1
+  dataloader_num_workers: 8
+  tf32: true
 
 # =============================================================================
-# Model Architecture
+# BLOCK 3: Model Configuration - Encoder
 # =============================================================================
-model:
-  # --- Encoder ---
-  encoder:
-    model_name: bert-base-uncased
-    pretrained: true
-    freeze: false
-    output_dim: 256
-    max_length: 256  # Shorter for hierarchical structure
+lm_type: "huggingface"
 
-  # --- Latent Dimension ---
+encoder:
+  lm_type: "huggingface"
+  lm_name: "YourEncoderModel"
+  inference_config:
+    device: "auto"
+    torch_dtype: "auto"
+  pretrained: true
+  freeze: false
+
+# =============================================================================
+# BLOCK 4: Model Configuration - Quantizer
+# =============================================================================
+# Hierarchical quantizer configuration with multiple scales/levels.
+# =============================================================================
+quantizer:
+  type: "hierarchical"
+  num_levels: 4
+  codebook_size: 8192
   latent_dim: 256
+  commitment_cost: 0.25
 
-  # --- Quantizer (HIERARCHICAL TEXT) ---
-  # Text-native hierarchy:
-  # Scale 0: [1]   → sentence embedding (topic)
-  # Scale 1: [4]   → clause embeddings (structure)
-  # Scale 2: [16]  → phrase embeddings (phrasing)
-  # Scale 3: [64]  → word embeddings (words)
-  # Scale 4: [256] → subword embeddings (tokens)
-  # Total: 341 codes
-  quantizer:
-    type: hierarchical
-    codebook_size: 4096
-    scale_lengths: [1, 4, 16, 64, 256]  # 341 total codes
-    beta: 0.25
-    quant_resi: 0.5
-
-  # --- Decoder ---
-  decoder:
-    model_name: gpt2
-    pretrained: true
-    freeze: false
+  # Hierarchical-specific settings
+  hierarchy:
+    share_codebook: false
+    level_dims: [64, 128, 256, 512]
 
 # =============================================================================
-# Training Configuration
+# BLOCK 5: Model Configuration - Decoder
 # =============================================================================
-train:
-  batch_size: 4
-  learning_rate: 1.0e-4
-  weight_decay: 0.01
-  num_epochs: 20
-  warmup_steps: 200
-  gradient_clip: 1.0
-  vq_loss_weight: 1.0
-  resume: true
-
-  # --- Loss Configuration ---
-  loss:
-    type: dual_tokenizer_vqae
-    ignore_index: -100
-    label_smoothing: 0.0
+decoder:
+  lm_type: "huggingface"
+  lm_name: "YourDecoderModel"
+  inference_config:
+    device: "auto"
+    torch_dtype: "auto"
+  pretrained: true
+  freeze: false
 
 # =============================================================================
-# Logging Configuration
+# BLOCK 6: Training Configuration
 # =============================================================================
-logging:
-  output_dir: ./EXPERIMENT/PreExp-eqd_hierarchical
-  checkpoint_dir: ./EXPERIMENT/PreExp-eqd_hierarchical/checkpoints
-  log_dir: ./EXPERIMENT/PreExp-eqd_hierarchical/logs
-  
-  log_interval: 50
-  checkpoint_interval: 500
-  
-  eval_interval: null
-  log_level: INFO
-  use_wandb: false
-  wandb_project: null
+batch_size: 1
+num_epochs: 1
+
+gradient:
+  max_grad_norm: 1.0
+  accumulation_steps: 1
+  checkpointing: true
+
+trainable: true
+use_value_head: false
+
+learning_rate: 1.0e-5
+weight_decay: 0.0
+warmup_ratio: 0.01
+lr_scheduler_type: "cosine"
+
+bf16: true
+resume: true
+
+# =============================================================================
+# BLOCK 7: Log Configuration
+# =============================================================================
+log:
+  save_folder: "EXPERIMENT/PreExp/eqd_hierarchical"
+  log_level: "INFO"
+  checkpoint_step_interval: 100
+  log_step_interval: 10
+  save_total_limit: 1
+
+# =============================================================================
+# BLOCK 8: Evaluation Configuration
+# =============================================================================
+evaluation:
+  enabled: false
+  eval_step_interval: null
+  datasets: null
+  metrics: null

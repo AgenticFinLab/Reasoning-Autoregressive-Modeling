@@ -1,11 +1,12 @@
 # =============================================================================
 # C3 Context Cascade Compression Configuration
 # =============================================================================
-# Used by: examples/PreExp/c3_original.py
-# Task: Train C3 with optional pipeline parallelism
+# Purpose:
+#   Configuration for training C3 (Context Cascade Compression) model.
+#   C3 uses separate encoder and decoder LLMs with latent token compression.
+#
 # Paper: "Context Cascade Compression: Exploring the Upper Limits of Text Compression"
 #         (arXiv:2511.15244)
-#
 # Official Code: third-part/C3-Context-Cascade-Compression-main/C3-master/C3/model/C3.py
 #
 # Pipeline:
@@ -16,239 +17,265 @@
 #       -> Decoder LLM -> logits [B, L, V]
 #
 # Modes:
-#   - Single GPU: Set pipeline.enabled=false
-#   - Pipeline: Set pipeline.enabled=true (default), auto GPU assignment
+#   - Single GPU: Set device_map all to same device
+#   - Pipeline: Auto GPU assignment by priority
+#
+# Structure:
+#   1. data        - Dataset configuration (name, path, split, subset)
+#   2. environment - Runtime environment (seed, device, dataloader, precision)
+#   3. encoder     - Encoder model definition and inference settings
+#   4. decoder     - Decoder model definition and inference settings
+#   5. quantizer   - Quantizer configuration (null for C3)
+#   6. training    - Model training settings
+#   7. log         - Logging, checkpointing, and output configuration
+#   8. evaluation  - Evaluation datasets and metrics
+#   9. reference   - Official C3 values for reference
+# =============================================================================
 
 # =============================================================================
-# Data Configuration
+# BLOCK 1: Data Configuration
 # =============================================================================
-# Source: third-part/C3-Context-Cascade-Compression-main/C3-master/C3/utils/arguments.py
-#         Lines 20-31: DataArguments
+# Dataset settings for training.
+# =============================================================================
 data:
-  data_name: math                      # Dataset: math (same as other PreExp configs)
-  data_path: ./EXPERIMENT/data
-  split: train
+  # Dataset identifier - must match registry key in dataset module
+  data_name: "math"
+
+  # Local path for storing dataset cache and demo samples
+  data_path: "EXPERIMENT/data/math"
+
+  # Dataset split to use for training
+  split: "train"
+
+  # Subset configuration (optional)
+  # Leave empty for datasets without subset requirements.
+  subset: ""
 
 # =============================================================================
-# Environment Configuration
+# BLOCK 2: Environment Configuration
 # =============================================================================
-# Source: third-part/C3-Context-Cascade-Compression-main/C3-master/README.md
-#         Lines 47-48: torch==2.6.0, transformers==4.49.0
+# Runtime environment settings including random seed, device mapping,
+# dataloader, and precision settings.
+# =============================================================================
 environment:
+  # Path to environment variables file (API keys, etc.)
+  dotenv_path: ".env"
+
+  # Random seed for reproducibility
   seed: 42
-  device: auto                        # auto: select GPU with most free memory
-  # Source: Line 99
-  dataloader_num_workers: 8           # Official: 8 workers
-  # Source: Line 97
-  tf32: true                          # Official: True for A100/H100
+
+  # Device mapping for model components
+  # Lower priority number = higher priority = gets GPU with more free memory
+  # device: auto - Intelligent GPU selection based on available memory
+  device_map:
+    encoder:
+      device: "auto"
+      priority: 2
+    decoder:
+      device: "auto"
+      priority: 1
+
+  # DataLoader settings
+  dataloader_num_workers: 8
+
+  # TF32 acceleration for A100/H100
+  tf32: true
 
 # =============================================================================
-# Model Device Configuration
+# BLOCK 3: Model Configuration - Encoder
 # =============================================================================
-# Assigns GPU devices for each model based on priority.
-# Lower priority number = higher priority = gets GPU with more free memory.
-#
-# device: auto - Intelligent GPU selection based on available memory
-#   1. Scan all available GPUs and their free memory
-#   2. Assign GPUs to models by priority (lower number = better GPU)
-#   3. If only one GPU available, all models go on same GPU
-#
-# Priority semantics:
-#   - priority: 1 = highest priority (gets best GPU)
-#   - priority: 2 = second priority (gets second best GPU)
-#   - etc.
-#
-# Example outcomes with 2× RTX 4090:
-#   - decoder (priority=1) -> GPU with 24GB free
-#   - encoder (priority=2) -> GPU with 23GB free
-#
-# Example outcomes with 1× A100 80GB:
-#   - all models on GPU 0 (single GPU fallback)
-model_devices:
-  encoder:
-    device: auto                        # auto: assign GPU based on available memory
-    priority: 2                         # Lower priority than decoder (gets second best GPU)
-  decoder:
-    device: auto                        # auto: assign GPU based on available memory
-    priority: 1                         # Highest priority (gets best GPU with most free memory)
+# C3 Encoder (llm1 in official code) - compresses text into latent tokens.
+# Official model: Qwen/Qwen2.5-1.5B (hidden_dim=1536)
+# =============================================================================
+
+# Model type - determines how the model is loaded and called
+# Options: "huggingface", "api", "vllm", "none"
+lm_type: "huggingface"
+
+encoder:
+  # --- Model Identity ---
+  lm_type: "huggingface"
+  lm_name: "Qwen/Qwen2.5-0.5B"
+
+  # --- Inference Configuration ---
+  inference_config:
+    device: "auto"
+    torch_dtype: "auto"
+
+  # --- Encoder-Specific Settings ---
+  pretrained: true
+  freeze: false
+
+  # C3 latent token configuration
+  # Official release: 32 latent tokens
+  latent_token_len: 32
+  max_length: 2048
+  use_im_start_end: true
 
 # =============================================================================
-# Model Architecture
+# BLOCK 4: Model Configuration - Decoder
 # =============================================================================
-# Source: third-part/C3-Context-Cascade-Compression-main/C3-master/C3/model/C3.py
-#         Lines 25-26: C3Config inherits from Qwen2Config
-#         Line 35: self.Q = nn.Embedding(config.latent_token_len, config.contexts_compression_llm_hidden_size)
-#         Line 36: self.mm_projector = nn.Linear(config.contexts_compression_llm_hidden_size, config.hidden_size)
-model:
-  # --- C3 Encoder (llm1 in official code) ---
-  # Source: third-part/C3-Context-Cascade-Compression-main/C3-master/C3/model/C3.py
-  #         Lines 328-333, 340-346: llm1 = Qwen2ForCausalLM.from_pretrained(...)
-  #         Official uses Qwen2.5-1.5B (hidden_dim=1536)
-  encoder:
-    # Official: Qwen/Qwen2.5-1.5B (from HuggingFace liufanfanlff/C3-Context-Cascade-Compression)
-    model_name: Qwen/Qwen2.5-0.5B     # Official: Qwen/Qwen2.5-1.5B (llm1)
-    pretrained: true                  # Load pretrained weights
-    freeze: false                     # Train encoder (see train.py Lines 43-49)
-    # Source: Line 35 - config.latent_token_len
-    # Official release: 32 latent tokens (README Line 53)
-    latent_token_len: 32              # N = 32 (official default)
-    # Source: third-part/C3-Context-Cascade-Compression-main/C3-master/README.md
-    #         Line 97: model_max_length 8192
-    max_length: 2048                  # Official: 8192 (supports long context)
-    # Source: Line 38
-    use_im_start_end: true            # Official: True
+# C3 Decoder (main LLM) - reconstructs text from latent tokens.
+# Official model: Qwen/Qwen2.5-3B (hidden_dim=2048)
+# =============================================================================
 
-  # --- C3 Decoder (main LLM) ---
-  # Source: third-part/C3-Context-Cascade-Compression-main/C3-master/C3/model/C3.py
-  #         Lines 164-176: C3QwenForCausalLM inherits from Qwen2ForCausalLM
-  #         Official uses Qwen2.5-3B (hidden_dim=2048)
-  decoder:
-    # Official: Qwen/Qwen2.5-3B (main decoder LLM)
-    model_name: Qwen/Qwen2.5-1.5B       # Official: Qwen/Qwen2.5-3B
-    pretrained: true                  # Load pretrained weights
-    freeze: false                     # Train decoder
-    # Must match encoder's latent_token_len
-    latent_token_len: 32              # N = 32 (must match encoder)
+decoder:
+  # --- Model Identity ---
+  lm_type: "huggingface"
+  lm_name: "Qwen/Qwen2.5-1.5B"
 
-  # --- Multi-Scale Quantizer ---
-  # C3 does NOT use quantizer, uses learned Q embeddings instead
-  quantizer: null
+  # --- Inference Configuration ---
+  inference_config:
+    device: "auto"
+    torch_dtype: "auto"
 
-  # --- Latent dimension ---
-  # C3 uses encoder's hidden_dim directly, projected via mm_projector
-  # Source: Line 36: mm_projector = Linear(contexts_compression_llm_hidden_size, hidden_size)
-  latent_dim: null
+  # --- Decoder-Specific Settings ---
+  pretrained: true
+  freeze: false
+
+  # Must match encoder's latent_token_len
+  latent_token_len: 32
 
 # =============================================================================
-# Training Configuration
+# BLOCK 5: Model Configuration - Quantizer
 # =============================================================================
-# Source: third-part/C3-Context-Cascade-Compression-main/C3-master/README.md
-#         Lines 83-108: Training script
-train:
-  # Source: Line 101
-  batch_size: 2                       # Official: per_device_train_batch_size 2
-  # Source: Line 103
-  learning_rate: 1.0e-5               # Official: 1e-5
-  # Source: Line 93
-  weight_decay: 0.0                   # Official: 0.
-  # Source: Line 102
-  num_epochs: 15                       # Official: 5
-  # Source: Line 94
-  warmup_ratio: 0.01                  # Official: 0.01
-  # Source: Line 88
-  gradient_accumulation_steps: 16     # Official: 16
-  gradient_clip: 1.0                  # Default
-  # Source: Line 98
-  gradient_checkpointing: true        # Official: True
-  # Source: Line 87
-  bf16: true                          # Official: True (bfloat16 training)
-  # Source: Line 95
-  lr_scheduler_type: cosine           # Official: cosine
-  resume: true
-
-  # --- Loss Configuration ---
-  # Source: third-part/C3-Context-Cascade-Compression-main/C3-master/C3/model/C3.py
-  #         Lines 224-234: CrossEntropyLoss with shift
-  loss:
-    type: dual_tokenizer_reconstruction
-    ignore_index: -100
-    label_smoothing: 0.0
-    latent_token_len: 32  # Must match encoder.latent_token_len
+# C3 does NOT use quantizer, uses learned Q embeddings instead.
+# Set to null for C3 experiments.
+# =============================================================================
+quantizer: null
 
 # =============================================================================
-# Logging Configuration
+# BLOCK 6: Model Configuration - Latent Dimension
 # =============================================================================
-# Source: third-part/C3-Context-Cascade-Compression-main/C3-master/README.md
-#         Lines 89-92, 106-107
-logging:
-  output_dir: ./EXPERIMENT/PreExp-c3_original
-  checkpoint_dir: ./EXPERIMENT/PreExp-c3_original/checkpoints
-  log_dir: ./EXPERIMENT/PreExp-c3_original/logs
-  
-  # Source: Line 107
-  log_interval: 10                    # Official: logging_steps 10
-  # Source: Line 91
-  checkpoint_interval: 5000           # Official: save_steps 5000
-  # Source: Line 92
-  save_total_limit: 1                 # Official: save_total_limit 1
-  
-  # Source: Line 89
-  evaluation_strategy: "no"           # Official: "no"
-  eval_interval: null
-  log_level: INFO
-  # Source: Line 100
-  use_wandb: false                    # Official: report_to none
-  wandb_project: null
-  
+# C3 uses encoder's hidden_dim directly, projected via mm_projector.
+# Set to null for C3 experiments.
+# =============================================================================
+latent_dim: null
+
+# =============================================================================
+# BLOCK 7: Training Configuration
+# =============================================================================
+# Training hyperparameters and settings for C3 model.
+# =============================================================================
+
+# Number of samples processed before gradient update
+batch_size: 2
+
+# Number of passes over the entire dataset
+num_epochs: 15
+
+# --- Gradient Settings ---
+gradient:
+  # Maximum gradient norm for clipping (prevents exploding gradients)
+  max_grad_norm: 1.0
+
+  # Number of steps to accumulate gradients before optimizer step
+  accumulation_steps: 16
+
+  # Enable gradient checkpointing for memory efficiency
+  checkpointing: true
+
+# --- Model Trainability ---
+trainable: true
+use_value_head: false
+
+# --- Optimizer Settings ---
+learning_rate: 1.0e-5
+weight_decay: 0.0
+warmup_ratio: 0.01
+lr_scheduler_type: "cosine"
+
+# --- Precision ---
+bf16: true
+
+# --- Resume Training ---
+resume: true
+
+# --- Loss Configuration ---
+# Source: C3 model Lines 224-234: CrossEntropyLoss with shift
+loss:
+  type: "dual_tokenizer_reconstruction"
+  ignore_index: -100
+  label_smoothing: 0.0
+  latent_token_len: 32
+
+# =============================================================================
+# BLOCK 8: Log Configuration
+# =============================================================================
+# Logging, checkpointing, and output settings.
+# =============================================================================
+log:
+  # Output directory for experiment results
+  save_folder: "EXPERIMENT/PreExp/c3_original"
+
+  # Logging verbosity level
+  # Options: "DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"
+  log_level: "INFO"
+
+  # =========================================================================
+  # Step Intervals (all values are TRAINING STEPS)
+  # =========================================================================
+  # Checkpoint save interval (in training steps)
+  checkpoint_step_interval: 5000
+
+  # Metrics logging interval (in training steps)
+  log_step_interval: 10
+
+  # Maximum checkpoints to keep
+  save_total_limit: 1
+
   # --- History Buffer Configuration ---
-  # Memory-efficient training history storage using lmbase.utils.history.HistoryBuffer
-  # Hot storage: recent entries in memory (entry_limit)
-  # Cold storage: older entries on disk (block files)
+  # Memory-efficient training history storage
   history:
-    entry_limit: 2                    # Max items in hot memory (default: 2)
-    block_size: 500                   # Items per block file on disk
+    entry_limit: 2
+    block_size: 500
+
+  # --- Wandb Configuration ---
+  use_wandb: false
+  wandb_project: null
 
 # =============================================================================
-# C3-Specific Configuration (Official Reference)
+# BLOCK 9: Evaluation Configuration
 # =============================================================================
-# These values are from the official implementation for reference
-# Source: third-part/C3-Context-Cascade-Compression-main/C3-master/C3/model/C3.py
+# Settings for periodic evaluation during training.
+# C3 official: no evaluation during training.
+# =============================================================================
+evaluation:
+  enabled: false
+  eval_step_interval: null
+  datasets: null
+  metrics: null
+
+# =============================================================================
+# BLOCK 10: Reference Configuration (Official C3 Values)
+# =============================================================================
+# These values are from the official implementation for reference.
+# =============================================================================
 c3_reference:
   # --- Models (from HuggingFace release) ---
-  # Source: Lines 328-333, 340-346
-  encoder_model: Qwen/Qwen2.5-1.5B    # llm1: contexts_compression_llm
-  encoder_hidden_dim: 1536            # Qwen2.5-1.5B hidden_size
-  
-  decoder_model: Qwen/Qwen2.5-3B     # main decoder LLM
-  decoder_hidden_dim: 2048            # Qwen2.5-3B hidden_size
-  
+  encoder_model: "Qwen/Qwen2.5-1.5B"
+  encoder_hidden_dim: 1536
+
+  decoder_model: "Qwen/Qwen2.5-3B"
+  decoder_hidden_dim: 2048
+
   # --- mm_projector ---
-  # Source: Line 36
-  mm_projector_in: 1536               # contexts_compression_llm_hidden_size
-  mm_projector_out: 2048              # hidden_size (decoder)
-  
+  mm_projector_in: 1536
+  mm_projector_out: 2048
+
   # --- Special Tokens ---
-  # Source: Lines 21-23
   special_tokens:
-    im_start: <img>                   # DEFAULT_IM_START_TOKEN
-    im_end: </img>                    # DEFAULT_IM_END_TOKEN
-    im_patch: <imgpad>                # DEFAULT_IMAGE_PATCH_TOKEN
-  
-  # --- Config Keys ---
-  # Source: Line 35
-  latent_token_len: 32                # config.latent_token_len (N)
-  # Source: Line 38
-  use_im_start_end: true              # config.use_im_start_end
-  
+    im_start: "<img>"
+    im_end: "</img>"
+    im_patch: "<imgpad>"
+
   # --- Compression Ratios (from paper) ---
-  # Paper reports these accuracy numbers
   compression_ratios:
-    - ratio: 20x
-      accuracy: 98%
+    - ratio: "20x"
+      accuracy: "98%"
       latent_tokens: 64
       text_length: 1280
-    - ratio: 40x
-      accuracy: 93%
+    - ratio: "40x"
+      accuracy: "93%"
       latent_tokens: 32
       text_length: 1280
-
-  # --- Training Args (from README Lines 83-108) ---
-  training_args:
-    deepspeed_config: zero2.json
-    model_max_length: 2048
-    per_device_train_batch_size: 2
-    gradient_accumulation_steps: 16
-    num_train_epochs: 5
-    learning_rate: 1e-5
-    weight_decay: 0.0
-    warmup_ratio: 0.01
-    lr_scheduler_type: cosine
-    bf16: true
-    tf32: true
-    gradient_checkpointing: true
-    dataloader_num_workers: 8
-    save_steps: 5000
-    save_total_limit: 1
-    logging_steps: 10
-    evaluation_strategy: "no"
-    report_to: "none"

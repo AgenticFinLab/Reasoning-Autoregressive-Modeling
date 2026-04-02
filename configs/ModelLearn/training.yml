@@ -1,0 +1,92 @@
+# =============================================================================
+# TEMPLATE-TRAINING: Training Configuration Template
+# =============================================================================
+# Purpose:
+#   Training hyperparameters and settings for single-model learning.
+#
+# Structure:
+#   batch_size, num_epochs, gradient  - General training settings
+#   trainable, use_value_head         - Model trainability
+#   lora:                             - LoRA fine-tuning (optional)
+#   learning_rate                     - Optimizer settings
+#   ppo:                              - RL-specific optimizer (optional)
+#   rl:                               - RL-specific settings (optional)
+#     reward, shaping
+#
+# Separation of Concerns:
+#   - model.yml:     Inference settings (model identity, generation, prompts)
+#   - training.yml:  Training settings (batch/epoch, trainability, lora, lr)
+#   - main.yml:      Experiment orchestration (data, environment, log)
+# =============================================================================
+
+# =============================================================================
+# General Training Settings
+# =============================================================================
+
+# Number of samples processed before gradient update
+# For gradient accumulation: effective_batch_size = batch_size * accumulation_steps
+batch_size: 1
+
+# Number of passes over the entire dataset
+num_epochs: 1
+
+gradient:
+  # Maximum gradient norm for clipping (prevents exploding gradients)
+  max_grad_norm: 1.0
+
+  # Number of steps to accumulate gradients before optimizer step
+  # Use this to simulate larger batch sizes with limited memory
+  accumulation_steps: 1
+
+# =============================================================================
+# Model Trainability
+# =============================================================================
+
+# Whether the model's parameters are updated during training
+trainable: true
+
+# Attach value head for RL methods (PPO, GRPO, etc.)
+# Set true only when using RL with a value function
+use_value_head: false
+
+# =============================================================================
+# LoRA Configuration (Optional)
+# =============================================================================
+# Parameter-efficient fine-tuning via Low-Rank Adaptation.
+# Remove this section entirely to use full fine-tuning instead.
+# =============================================================================
+lora:
+  r: 8                    # LoRA rank (higher = more capacity)
+  lora_alpha: 16          # Scaling factor (alpha/r determines effective LR)
+  lora_dropout: 0.1       # Dropout rate for LoRA layers
+
+# =============================================================================
+# Optimizer Settings
+# =============================================================================
+learning_rate: 1.0e-5     # Learning rate for the optimizer
+
+# =============================================================================
+# PPO-Specific Settings (Optional)
+# =============================================================================
+# Uncomment if using PPO or other policy-gradient RL methods.
+# =============================================================================
+# ppo:
+#   clip_ratio: 0.2       # PPO clipping parameter
+#   entropy_coef: 0.0     # Entropy bonus coefficient
+#   gamma: 0.99           # Discount factor
+#   lam: 0.95             # GAE lambda
+#   mini_batch_size: 4    # Mini-batch size for PPO updates
+#   ppo_epochs: 4         # Number of PPO epochs per iteration
+
+# =============================================================================
+# RL Settings (Optional)
+# =============================================================================
+# Uncomment and configure only when using reinforcement learning.
+# =============================================================================
+# rl:
+#   reward:
+#     accuracy_weight: 1.0       # Weight for accuracy-based reward
+#     format_weight: 0.1         # Weight for format correctness reward
+#
+#   shaping:
+#     enabled: false             # Enable dense reward signals

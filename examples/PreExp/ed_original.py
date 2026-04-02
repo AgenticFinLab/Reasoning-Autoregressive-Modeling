@@ -114,9 +114,9 @@ def train_ed(config: dict):
     enc_cfg = config["model"]["encoder"]
     dec_cfg = config["model"]["decoder"]
     data_cfg = config["data"]
-    train_cfg = config["train"]
+    train_cfg = config["training"]
     env_cfg = config["environment"]
-    log_cfg = config["logging"]
+    log_cfg = config["log"]
 
     # Training hyperparameters
     batch_size = train_cfg["batch_size"]
@@ -129,13 +129,13 @@ def train_ed(config: dict):
 
     # Logging intervals
     # Print & save samples/history
-    log_interval = log_cfg["log_interval"]
+    log_interval = log_cfg["log_step_interval"]
     # Save model checkpoint
-    checkpoint_interval = log_cfg["checkpoint_interval"]
+    checkpoint_interval = log_cfg["checkpoint_step_interval"]
 
-    output_dir = Path(log_cfg["output_dir"])
-    checkpoint_dir = Path(log_cfg["checkpoint_dir"])
-    log_dir = Path(log_cfg["log_dir"])
+    output_dir = Path(log_cfg["save_folder"])
+    checkpoint_dir = output_dir / "checkpoints"
+    log_dir = output_dir / "logs"
 
     # Create output directories
     output_dir.mkdir(parents=True, exist_ok=True)

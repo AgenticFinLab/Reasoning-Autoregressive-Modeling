@@ -24,7 +24,7 @@ def test_encoder(config: dict):
     """
     enc_cfg = config["model"]["encoder"]
     data_cfg = config["data"]
-    train_cfg = config["train"]
+    train_cfg = config["training"]
 
     B = train_cfg["batch_size"]
     L = enc_cfg["max_length"]

@@ -37,7 +37,7 @@ def test_decoder(config: dict):
     enc_cfg = config["model"]["encoder"]
     dec_cfg = config["model"]["decoder"]
     data_cfg = config["data"]
-    train_cfg = config["train"]
+    train_cfg = config["training"]
 
     B = train_cfg["batch_size"]
     L = enc_cfg["max_length"]

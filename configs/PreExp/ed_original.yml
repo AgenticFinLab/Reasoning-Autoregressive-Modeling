@@ -1,101 +1,108 @@
 # =============================================================================
-# Encoder-Decoder Training Configuration
+# Encoder-Decoder Original Configuration
 # =============================================================================
-# Used by: examples/uTEST/test_ed_train.py
-# Task: Simple text reconstruction (Encoder -> Decoder)
-# Pipeline: texts -> Encoder -> [B, L, D] -> Decoder -> [B, L, V] -> loss
+# Purpose:
+#   Configuration for basic encoder-decoder model experiments.
+#   Template for standard encoder-decoder architectures without quantization.
+#
+# Structure:
+#   1. data        - Dataset configuration
+#   2. environment - Runtime environment settings
+#   3. encoder     - Encoder model definition
+#   4. decoder     - Decoder model definition
+#   5. training    - Training settings
+#   6. log         - Logging and checkpointing
+#   7. evaluation  - Evaluation settings
+# =============================================================================
 
 # =============================================================================
-# Data Configuration
+# BLOCK 1: Data Configuration
 # =============================================================================
 data:
-  data_name: math
-  data_path: ./EXPERIMENT/data
-  split: train
+  data_name: "YourDataset"
+  data_path: "EXPERIMENT/data/YourDataset"
+  split: "train"
+  subset: ""
 
 # =============================================================================
-# Environment Configuration
+# BLOCK 2: Environment Configuration
 # =============================================================================
 environment:
+  dotenv_path: ".env"
   seed: 42
-  device: auto
+  device_map:
+    encoder:
+      device: "auto"
+      priority: 2
+    decoder:
+      device: "auto"
+      priority: 1
+  dataloader_num_workers: 8
+  tf32: true
 
 # =============================================================================
-# Model Architecture
+# BLOCK 3: Model Configuration - Encoder
 # =============================================================================
-model:
-  # --- HuggingFace Encoder ---
-  encoder:
-    # BERT-base: bidirectional encoder, hidden_dim=768
-    model_name: bert-base-uncased
-    # Load pretrained weights for better initialization
-    pretrained: true
-    # Train encoder (unfrozen)
-    freeze: false
-    # No projection, use BERT hidden_dim directly (768 = GPT2 hidden_dim)
-    output_dim: null
-    # Sequence length L
-    max_length: 512
+lm_type: "huggingface"
 
-  # --- HuggingFace Decoder ---
-  decoder:
-    # GPT2: causal decoder, hidden_dim=768, vocab_size=50257
-    model_name: gpt2
-    # Load pretrained weights for better initialization
-    pretrained: true
-    # Train decoder (unfrozen)
-    freeze: false
-
-  # --- Multi-Scale Quantizer ---
-  quantizer: null
-
-  # --- Latent dimension ---
-  latent_dim: null
+encoder:
+  lm_type: "huggingface"
+  lm_name: "YourEncoderModel"
+  inference_config:
+    device: "auto"
+    torch_dtype: "auto"
+  pretrained: true
+  freeze: false
 
 # =============================================================================
-# Training Configuration
+# BLOCK 4: Model Configuration - Decoder
 # =============================================================================
-train:
-  # Small batch for testing
-  batch_size: 10
-  # Conservative learning rate for fine-tuning pretrained models
-  learning_rate: 5.0e-5
-  # L2 regularization
-  weight_decay: 0.01
-  # Number of training epochs
-  num_epochs: 50
-  # Warmup steps for learning rate scheduler (~1% of total steps)
-  warmup_steps: 500
-  # Gradient clipping threshold
-  gradient_clip: 1.0
-  # Resume from latest checkpoint (true) or start fresh (false)
-  resume: true
-
-  # --- Loss Configuration ---
-  # Available types: reconstruction, dual_tokenizer_reconstruction, vqae, dual_tokenizer_vqae
-  # BERT (enc) + GPT2 (dec) = different tokenizers -> use dual_tokenizer_*
-  loss:
-    type: dual_tokenizer_reconstruction
-    # Pad token ID for GPT2 (eos_token_id=50256)
-    ignore_index: -100
-    # Label smoothing factor
-    label_smoothing: 0.0
+decoder:
+  lm_type: "huggingface"
+  lm_name: "YourDecoderModel"
+  inference_config:
+    device: "auto"
+    torch_dtype: "auto"
+  pretrained: true
+  freeze: false
 
 # =============================================================================
-# Logging Configuration
+# BLOCK 5: Training Configuration
 # =============================================================================
-logging:
-  output_dir: ./EXPERIMENT/PreExp-ed_original
-  checkpoint_dir: ./EXPERIMENT/PreExp-ed_original/checkpoints
-  log_dir: ./EXPERIMENT/PreExp-ed_original/logs
-  
-  # --- Intervals ---
-  # Save decoded samples, training history & print metrics every N steps
-  log_interval: 10
-  # Save model checkpoints every N steps (less frequent to save disk space)
-  checkpoint_interval: 1000
-  
-  eval_interval: null
-  log_level: INFO
-  use_wandb: false
-  wandb_project: null
+batch_size: 1
+num_epochs: 1
+
+gradient:
+  max_grad_norm: 1.0
+  accumulation_steps: 1
+  checkpointing: true
+
+trainable: true
+use_value_head: false
+
+learning_rate: 1.0e-5
+weight_decay: 0.0
+warmup_ratio: 0.01
+lr_scheduler_type: "cosine"
+
+bf16: true
+resume: true
+
+# =============================================================================
+# BLOCK 6: Log Configuration
+# =============================================================================
+log:
+  save_folder: "EXPERIMENT/PreExp/ed_original"
+  log_level: "INFO"
+  checkpoint_step_interval: 100
+  log_step_interval: 10
+  save_total_limit: 1
+
+# =============================================================================
+# BLOCK 7: Evaluation Configuration
+# =============================================================================
+evaluation:
+  enabled: false
+  eval_step_interval: null
+  datasets: null
+  metrics: null

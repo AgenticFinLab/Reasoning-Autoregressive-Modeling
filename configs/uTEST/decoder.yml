@@ -1,58 +1,40 @@
 # =============================================================================
-# Decoder Unit Test Configuration
+# Unit Test: Decoder Configuration
 # =============================================================================
-# Used by: examples/uTEST/test_decoder.py
-# Tests: Encoder -> Decoder pipeline (no quantizer)
+# Purpose:
+#   Configuration template for testing decoder models.
+#   Used for unit testing decoder-specific functionality.
+# =============================================================================
 
 # =============================================================================
-# Data Configuration
+# Model Configuration
 # =============================================================================
-data:
-  data_name: math
-  data_path: ./EXPERIMENT/data
-  split: train
+lm_type: "huggingface"
+
+decoder:
+  lm_type: "huggingface"
+  lm_name: "Qwen/Qwen2.5-0.5B"
+
+  inference_config:
+    device: "auto"
+    torch_dtype: "auto"
+
+  # Decoder-specific settings
+  pretrained: true
+  freeze: false
 
 # =============================================================================
-# Environment Configuration
+# Generation Configuration
 # =============================================================================
-environment:
-  seed: 42
-  device: auto
+generation_config:
+  max_new_tokens: 128
+  temperature: 0.7
+  top_p: 0.9
+  do_sample: true
 
 # =============================================================================
-# Model Architecture
+# Test Settings
 # =============================================================================
-model:
-  # --- HuggingFace Encoder ---
-  encoder:
-    model_name: bert-base-uncased
-    pretrained: true
-    freeze: false
-    # No projection, use BERT hidden_dim directly (768)
-    output_dim: null
-    # Sequence length L
-    max_length: 512
-
-  # --- HuggingFace Decoder ---
-  decoder:
-    model_name: gpt2
-    pretrained: true
-    freeze: false
-
-  # --- Multi-Scale Quantizer ---
-  quantizer: null
-
-  # --- Latent dimension ---
-  latent_dim: null
-
-# =============================================================================
-# Training Configuration
-# =============================================================================
-train:
-  # Test only, batch_size used for inference
-  batch_size: 2
-
-# =============================================================================
-# Logging Configuration
-# =============================================================================
-logging: null
+test:
+  batch_size: 1
+  latent_token_len: 32

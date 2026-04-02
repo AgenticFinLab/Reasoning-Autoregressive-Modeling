@@ -1,62 +1,46 @@
 # =============================================================================
-# Quantizer Unit Test Configuration
+# Unit Test: Quantizer Configuration
 # =============================================================================
-# Used by: examples/uTEST/test_quantizer.py
-# Tests: Encoder -> Quantizer (multi-scale) pipeline
+# Purpose:
+#   Configuration template for testing quantizer models.
+#   Used for unit testing quantizer-specific functionality.
+# =============================================================================
 
 # =============================================================================
-# Data Configuration
+# Quantizer Configuration
 # =============================================================================
-data:
-  data_name: math
-  data_path: ./EXPERIMENT/data
-  split: train
+quantizer:
+  type: "vqvae"
+
+  # Codebook settings
+  codebook_size: 8192
+  latent_dim: 256
+  num_codebooks: 1
+
+  # VQ-VAE specific settings
+  commitment_cost: 0.25
+  decay: 0.99
+  epsilon: 1.0e-5
+
+  # Quantization settings
+  share_codebook: true
+  use_ema: true
 
 # =============================================================================
-# Environment Configuration
+# Encoder Configuration (for testing quantizer with encoder output)
 # =============================================================================
-environment:
-  seed: 42
-  device: auto
+encoder:
+  lm_type: "huggingface"
+  lm_name: "Qwen/Qwen2.5-0.5B"
+  inference_config:
+    device: "auto"
+    torch_dtype: "auto"
+  pretrained: true
 
 # =============================================================================
-# Model Architecture
+# Test Settings
 # =============================================================================
-model:
-  # --- HuggingFace Encoder ---
-  encoder:
-    model_name: bert-base-uncased
-    pretrained: true
-    freeze: false
-    # Project to match quantizer codebook_dim
-    output_dim: 256
-    # Sequence length L (tokenizer padding/truncation)
-    max_length: 32
-
-  # --- HuggingFace Decoder ---
-  decoder: null
-
-  # --- Multi-Scale Quantizer ---
-  quantizer:
-    codebook_size: 1024
-    codebook_dim: 256
-    # max(scale_lengths) should <= max_length
-    scale_lengths: [1, 2, 4, 8, 16, 32]
-    beta: 0.25
-    quant_resi: 0.5
-    share_quant_resi: 4
-
-  # --- Latent dimension ---
-  latent_dim: null
-
-# =============================================================================
-# Training Configuration
-# =============================================================================
-train:
-  # Test only, batch_size used for inference
-  batch_size: 2
-
-# =============================================================================
-# Logging Configuration
-# =============================================================================
-logging: null
+test:
+  batch_size: 1
+  latent_token_len: 32
+  input_dim: 896  # Qwen2.5-0.5B hidden dim

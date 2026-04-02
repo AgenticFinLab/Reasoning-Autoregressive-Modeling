@@ -85,7 +85,7 @@ def test_quantizer(config: dict):
     enc_cfg = config["model"]["encoder"]
     quant_cfg = config["model"]["quantizer"]
     data_cfg = config["data"]
-    train_cfg = config["train"]
+    train_cfg = config["training"]
 
     B = train_cfg["batch_size"]
     L = enc_cfg["max_length"]

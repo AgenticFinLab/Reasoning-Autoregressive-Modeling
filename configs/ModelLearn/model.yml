@@ -1,0 +1,80 @@
+# =============================================================================
+# TEMPLATE-MODEL: Model Configuration Template
+# =============================================================================
+# Purpose:
+#   Defines the model and its inference settings for single-model experiments.
+#   Contains ONLY INFERENCE-related settings.
+#
+# Model Schema:
+#   lm_type: "huggingface"            # "huggingface", "api", "vllm", "none"
+#   lm_name: "model-id"              # Model identifier or local path
+#   inference_config: {...}           # Runtime settings (device, dtype)
+#   generation_config: {...}          # Generation parameters
+#   sys_message: "module:VAR"        # System prompt reference
+#   user_message: "module:VAR"       # User prompt reference
+#   latent_config: {...}             # Latent reasoning (optional, add when needed)
+#
+# Separation of Concerns:
+#   - model.yml:  Inference settings (model identity, generation, prompts)
+#   - learn.yml:  Training settings (trainable, lora, lr, epochs)
+# =============================================================================
+
+# =============================================================================
+# Model Identity
+# =============================================================================
+# Model type - determines how the model is loaded and called
+# Options: "huggingface", "api", "vllm", "none"
+lm_type: "huggingface"
+
+# Model identifier or local path
+# HuggingFace: "Qwen/Qwen2.5-0.5B-Instruct", "meta-llama/Llama-3.1-8B-Instruct"
+# Local path:  "/path/to/model"
+lm_name: "Qwen/Qwen2.5-0.5B-Instruct"
+
+# =============================================================================
+# Inference Configuration
+# =============================================================================
+# Runtime settings for model loading and inference.
+# =============================================================================
+inference_config:
+  device: "auto"           # "auto", "cpu", "cuda", "cuda:0", "mps"
+  torch_dtype: "auto"      # "float32", "float16", "bfloat16", "auto"
+
+  # Entropy computation (optional, for analysis purposes)
+  # Remove this section if entropy analysis is not needed.
+  entropy_config:
+    topk_v: inf            # Top-k for entropy (inf = all tokens)
+    topk_adaptive: false   # Adaptive top-k selection
+    temperature: 0.0       # Temperature for entropy calculation
+
+# =============================================================================
+# Generation Configuration
+# =============================================================================
+# Parameters passed to model.generate() or equivalent API calls.
+# =============================================================================
+generation_config:
+  max_new_tokens: 512      # Maximum tokens to generate
+  temperature: 0.7         # Sampling temperature (higher = more random)
+  top_p: 0.9               # Nucleus sampling threshold
+  do_sample: true          # Enable sampling (false = greedy decoding)
+
+# =============================================================================
+# Prompt Configuration
+# =============================================================================
+# References to prompt templates. Format: "module.path:VARIABLE_NAME"
+# =============================================================================
+sys_message: "your.module:SYS_PROMPT"
+user_message: "your.module:USER_PROMPT"
+
+# =============================================================================
+# Latent Reasoning Configuration (Optional - add when needed)
+# =============================================================================
+# Enable for latent chain-of-thought reasoning methods.
+# Uncomment and configure below only if your model/method supports it.
+# =============================================================================
+# latent_config:
+#   latent_steps: 0          # Number of latent steps (> 0 to enable)
+#   tail_truncate_n: 0       # Keep N tokens from end
+#   head_truncate_n: 0       # Keep N tokens from beginning
+#   truncate_mode: "target"  # Truncation strategy
+#   add_think: false         # Add special think tokens

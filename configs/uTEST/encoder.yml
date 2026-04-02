@@ -1,55 +1,38 @@
 # =============================================================================
-# Encoder Unit Test Configuration
+# Unit Test: Encoder Configuration
 # =============================================================================
-# Used by: examples/uTEST/test_encoder.py
-# Tests: Encoder only (no decoder, no quantizer)
+# Purpose:
+#   Configuration template for testing encoder models.
+#   Used for unit testing encoder-specific functionality.
+# =============================================================================
 
 # =============================================================================
-# Data Configuration
+# Model Configuration
 # =============================================================================
-data:
-  data_name: math500
-  data_path: ./EXPERIMENT/data
-  split: test
+lm_type: "huggingface"
+
+encoder:
+  lm_type: "huggingface"
+  lm_name: "Qwen/Qwen2.5-0.5B"
+
+  inference_config:
+    device: "auto"
+    torch_dtype: "auto"
+
+  # Encoder-specific settings
+  pretrained: true
+  freeze: false
+  max_length: 2048
 
 # =============================================================================
-# Environment Configuration
+# Latent Token Configuration
 # =============================================================================
-environment:
-  seed: 42
-  device: auto
+latent_token_len: 32
+use_im_start_end: true
 
 # =============================================================================
-# Model Architecture
+# Test Settings
 # =============================================================================
-model:
-  # --- HuggingFace Encoder ---
-  encoder:
-    model_name: bert-base-uncased
-    pretrained: true
-    freeze: false
-    # No projection, use BERT hidden_dim directly (768)
-    output_dim: null
-    # Sequence length L
-    max_length: 512
-
-  # --- HuggingFace Decoder ---
-  decoder: null
-
-  # --- Multi-Scale Quantizer ---
-  quantizer: null
-
-  # --- Latent dimension ---
-  latent_dim: null
-
-# =============================================================================
-# Training Configuration
-# =============================================================================
-train:
-  # Test only, batch_size used for inference
-  batch_size: 2
-
-# =============================================================================
-# Logging Configuration
-# =============================================================================
-logging: null
+test:
+  batch_size: 1
+  input_text: "This is a test input for encoder."
