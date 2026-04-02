@@ -1,0 +1,117 @@
+# =============================================================================
+# C3 Context Cascade Compression - DeepSpeed Configuration
+# =============================================================================
+# Purpose:
+#   Configuration for training C3 model with DeepSpeed ZeRO-2.
+#   Enables multi-GPU training with optimizer state sharding.
+#
+# Paper: "Context Cascade Compression: Exploring the Upper Limits of Text Compression"
+#         (arXiv:2511.15244)
+#
+# Usage:
+#   torchrun --nproc_per_node=2 examples/PreExp/c3_original_ds.py \
+#       -c configs/PreExp/c3_original_ds.yml \
+#       --deepspeed configs/PreExp/zero2.json
+#
+# DeepSpeed Benefits:
+#   - ZeRO-2: Shards optimizer states across GPUs (saves ~50% memory per GPU)
+#   - ZeRO-3: Also shards model parameters (even more memory savings)
+#   - Gradient checkpointing built-in
+#   - Mixed precision training (BF16)
+# =============================================================================
+
+# =============================================================================
+# BLOCK 1: Data Configuration
+# =============================================================================
+data:
+  data_name: "math"
+  data_path: "EXPERIMENT/data/math"
+  split: "train"
+  subset: ""
+
+# =============================================================================
+# BLOCK 2: Environment Configuration
+# =============================================================================
+# NOTE: DeepSpeed handles device assignment automatically
+# Only seed and dataloader settings are needed here
+# =============================================================================
+environment:
+  seed: 42
+  dataloader_num_workers: 8
+
+# =============================================================================
+# BLOCK 3: Model Configuration
+# =============================================================================
+# Official C3: encoder Qwen2.5-1.5B, decoder Qwen2.5-3B
+# With DeepSpeed ZeRO-2, can use official model sizes on 2x A100
+# =============================================================================
+model:
+  lm_type: &lm_type "huggingface"
+  
+  encoder:
+    lm_type: *lm_type
+    model_name: "Qwen/Qwen2.5-0.5B"
+    inference_config:
+      torch_dtype: "auto"
+    pretrained: &pretrained true
+    freeze: &freeze false
+    latent_token_len: &latent_token_len 32
+    max_length: &max_length 2048
+    use_im_start_end: true
+
+  decoder:
+    lm_type: *lm_type
+    model_name: "Qwen/Qwen2.5-1.5B"
+    inference_config:
+      torch_dtype: "auto"
+    pretrained: *pretrained
+    freeze: *freeze
+    latent_token_len: *latent_token_len
+
+  quantizer: null
+
+# =============================================================================
+# BLOCK 4: Training Configuration (DeepSpeed)
+# =============================================================================
+# NOTE: The following settings are handled by zero2.json:
+#   - bf16 (mixed precision)
+#   - gradient_accumulation_steps
+#   - gradient_clipping
+#   - train_micro_batch_size_per_gpu
+# Only specify learning rate, epochs, and optimizer settings here
+# =============================================================================
+training:
+  num_epochs: 5
+
+  gradient:
+    checkpointing: true
+
+  trainable: true
+  use_value_head: false
+
+  learning_rate: 1.0e-5
+  weight_decay: 0.0
+  warmup_ratio: 0.01
+  lr_scheduler_type: "cosine"
+  resume: true
+
+  loss:
+    type: "dual_tokenizer_reconstruction"
+    ignore_index: -100
+    label_smoothing: 0.0
+    latent_token_len: *latent_token_len
+
+# =============================================================================
+# BLOCK 5: Log Configuration
+# =============================================================================
+log:
+  save_folder: "EXPERIMENT/PreExp/c3_original_ds"
+  log_level: "INFO"
+  checkpoint_step_interval: 5000
+  log_step_interval: 10
+
+# =============================================================================
+# BLOCK 6: Evaluation Configuration
+# =============================================================================
+evaluation:
+  enabled: false
