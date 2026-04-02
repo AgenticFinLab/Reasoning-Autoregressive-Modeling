@@ -8,15 +8,15 @@
 # Model Schema:
 #   lm_type: "huggingface"            # "huggingface", "api", "vllm", "none"
 #   lm_name: "model-id"              # Model identifier or local path
-#   inference_config: {...}           # Runtime settings (device, dtype)
+#   inference_config: {...}           # Runtime settings (dtype, entropy)
 #   generation_config: {...}          # Generation parameters
 #   sys_message: "module:VAR"        # System prompt reference
 #   user_message: "module:VAR"       # User prompt reference
 #   latent_config: {...}             # Latent reasoning (optional, add when needed)
 #
 # Separation of Concerns:
-#   - model.yml:  Inference settings (model identity, generation, prompts)
-#   - learn.yml:  Training settings (trainable, lora, lr, epochs)
+#   - model.yml:     Inference settings (model identity, generation, prompts)
+#   - training.yml:  Training settings (trainable, lora, lr, epochs)
 # =============================================================================
 
 # =============================================================================
@@ -35,9 +35,9 @@ lm_name: "Qwen/Qwen2.5-0.5B-Instruct"
 # Inference Configuration
 # =============================================================================
 # Runtime settings for model loading and inference.
+# Note: Device is configured in main.yml environment.device_map.
 # =============================================================================
 inference_config:
-  device: "auto"           # "auto", "cpu", "cuda", "cuda:0", "mps"
   torch_dtype: "auto"      # "float32", "float16", "bfloat16", "auto"
 
   # Entropy computation (optional, for analysis purposes)

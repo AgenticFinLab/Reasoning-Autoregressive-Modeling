@@ -583,23 +583,22 @@ def train_hierarchical(config: dict):
     # =================================================================
     # Extract config
     # =================================================================
-    enc_cfg = config["model"]["encoder"]
-    dec_cfg = config["model"]["decoder"]
-    quant_cfg = config["model"]["quantizer"]
-    latent_dim = config["model"]["latent_dim"]
+    enc_cfg = config["encoder"]
+    dec_cfg = config["decoder"]
+    quant_cfg = config["quantizer"]
+    latent_dim = config.get("latent_dim", 256)
     data_cfg = config["data"]
-    train_cfg = config["training"]
     env_cfg = config["environment"]
     log_cfg = config["log"]
 
-    batch_size = train_cfg["batch_size"]
-    learning_rate = train_cfg["learning_rate"]
-    weight_decay = train_cfg["weight_decay"]
-    num_epochs = train_cfg["num_epochs"]
-    warmup_steps = train_cfg["warmup_steps"]
-    gradient_clip = train_cfg["gradient_clip"]
-    vq_loss_weight = train_cfg["vq_loss_weight"]
-    resume = train_cfg["resume"]
+    batch_size = config["batch_size"]
+    learning_rate = config["learning_rate"]
+    weight_decay = config.get("weight_decay", 0.0)
+    num_epochs = config["num_epochs"]
+    warmup_steps = config.get("warmup_steps", 100)
+    gradient_clip = config["gradient"]["max_grad_norm"]
+    vq_loss_weight = config.get("vq_loss_weight", 1.0)
+    resume = config.get("resume", True)
 
     log_interval = log_cfg["log_step_interval"]
     checkpoint_interval = log_cfg["checkpoint_step_interval"]

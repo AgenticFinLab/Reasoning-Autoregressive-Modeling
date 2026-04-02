@@ -4,15 +4,6 @@
 # Purpose:
 #   Configuration for basic encoder-decoder model experiments.
 #   Template for standard encoder-decoder architectures without quantization.
-#
-# Structure:
-#   1. data        - Dataset configuration
-#   2. environment - Runtime environment settings
-#   3. encoder     - Encoder model definition
-#   4. decoder     - Decoder model definition
-#   5. training    - Training settings
-#   6. log         - Logging and checkpointing
-#   7. evaluation  - Evaluation settings
 # =============================================================================
 
 # =============================================================================
@@ -41,7 +32,7 @@ environment:
   tf32: true
 
 # =============================================================================
-# BLOCK 3: Model Configuration - Encoder
+# BLOCK 3: Model Configuration
 # =============================================================================
 lm_type: "huggingface"
 
@@ -54,9 +45,6 @@ encoder:
   pretrained: true
   freeze: false
 
-# =============================================================================
-# BLOCK 4: Model Configuration - Decoder
-# =============================================================================
 decoder:
   lm_type: "huggingface"
   lm_name: "YourDecoderModel"
@@ -67,7 +55,7 @@ decoder:
   freeze: false
 
 # =============================================================================
-# BLOCK 5: Training Configuration
+# BLOCK 4: Training Configuration
 # =============================================================================
 batch_size: 1
 num_epochs: 1
@@ -84,12 +72,11 @@ learning_rate: 1.0e-5
 weight_decay: 0.0
 warmup_ratio: 0.01
 lr_scheduler_type: "cosine"
-
 bf16: true
 resume: true
 
 # =============================================================================
-# BLOCK 6: Log Configuration
+# BLOCK 5: Log Configuration
 # =============================================================================
 log:
   save_folder: "EXPERIMENT/PreExp/ed_original"
@@ -99,10 +86,7 @@ log:
   save_total_limit: 1
 
 # =============================================================================
-# BLOCK 7: Evaluation Configuration
+# BLOCK 6: Evaluation Configuration
 # =============================================================================
 evaluation:
   enabled: false
-  eval_step_interval: null
-  datasets: null
-  metrics: null

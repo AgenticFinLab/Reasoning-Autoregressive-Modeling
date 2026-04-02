@@ -231,7 +231,8 @@ log:
 # BLOCK 6: Evaluation Configuration
 # =============================================================================
 # Settings for periodic evaluation during training.
-# Evaluation runs on held-out test sets to measure generalization.
+# Models are already defined above - evaluation uses the same models.
+# Data uses the same path as training, just different split.
 # =============================================================================
 evaluation:
   # Enable/disable periodic evaluation
@@ -240,20 +241,12 @@ evaluation:
   # Evaluation interval (in training steps)
   eval_step_interval: 100
 
-  # Evaluation datasets configuration
-  # Each dataset entry specifies:
-  #   - name: Display name for logging
-  #   - path: Local cache path
-  #   - split: Dataset split (typically "test" or "validation")
-  #   - num_samples: Number of samples to evaluate (null for full set)
-  datasets:
-    - name: "YourDataset_test"
-      path: "EXPERIMENT/data/YourDataset"
-      split: "test"
-      num_samples: 100
+  # Dataset split for evaluation (uses same data_path as training)
+  split: "test"
+
+  # Number of samples to evaluate (null for full set)
+  num_samples: null
 
   # Metrics to compute during evaluation
-  # Available metrics depend on dataset and task type
-  # Examples: "accuracy", "f1", "bleu", "format_correctness"
   metrics:
     - "accuracy"

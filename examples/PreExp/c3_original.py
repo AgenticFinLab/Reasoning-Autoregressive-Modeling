@@ -187,23 +187,22 @@ def train_c3(config: dict):
     # =================================================================
     # Extract config
     # =================================================================
-    enc_cfg = config["model"]["encoder"]
-    dec_cfg = config["model"]["decoder"]
+    enc_cfg = config["encoder"]
+    dec_cfg = config["decoder"]
     data_cfg = config["data"]
-    train_cfg = config["training"]
     env_cfg = config["environment"]
     log_cfg = config["log"]
 
     # Training hyperparameters
-    batch_size = train_cfg["batch_size"]
-    learning_rate = train_cfg["learning_rate"]
-    weight_decay = train_cfg["weight_decay"]
-    num_epochs = train_cfg["num_epochs"]
-    warmup_ratio = train_cfg["warmup_ratio"]
-    gradient_clip = train_cfg["gradient_clip"]
-    gradient_accumulation_steps = train_cfg["gradient_accumulation_steps"]
-    bf16 = train_cfg["bf16"]
-    resume = train_cfg["resume"]
+    batch_size = config["batch_size"]
+    learning_rate = config["learning_rate"]
+    weight_decay = config.get("weight_decay", 0.0)
+    num_epochs = config["num_epochs"]
+    warmup_ratio = config.get("warmup_ratio", 0.01)
+    gradient_clip = config["gradient"]["max_grad_norm"]
+    gradient_accumulation_steps = config["gradient"]["accumulation_steps"]
+    bf16 = config.get("bf16", True)
+    resume = config.get("resume", True)
 
     # Model device config (from environment.device_map)
     model_devices_cfg = config["environment"]["device_map"]
@@ -316,7 +315,7 @@ def train_c3(config: dict):
     # =================================================================
     logger.info("[4] Setting up loss function...")
     # Read loss config
-    loss_cfg = train_cfg["loss"]
+    loss_cfg = config["loss"]
     ignore_index = loss_cfg["ignore_index"]
     loss_fn = C3ReconstructionLoss(
         tokenizer=tokenizer,

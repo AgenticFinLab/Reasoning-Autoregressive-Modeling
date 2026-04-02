@@ -3,38 +3,86 @@
 # =============================================================================
 # Purpose:
 #   Configuration template for testing decoder models.
-#   Used for unit testing decoder-specific functionality.
 # =============================================================================
 
 # =============================================================================
-# Model Configuration
+# BLOCK 1: Data Configuration
+# =============================================================================
+data:
+  data_name: "math"
+  data_path: "EXPERIMENT/data/math"
+  split: "test"
+  subset: ""
+
+# =============================================================================
+# BLOCK 2: Environment Configuration
+# =============================================================================
+environment:
+  dotenv_path: ".env"
+  seed: 42
+  device_map:
+    encoder:
+      device: "auto"
+      priority: 2
+    decoder:
+      device: "auto"
+      priority: 1
+
+# =============================================================================
+# BLOCK 3: Model Configuration
 # =============================================================================
 lm_type: "huggingface"
+
+encoder:
+  lm_type: "huggingface"
+  lm_name: "Qwen/Qwen2.5-0.5B"
+  inference_config:
+    device: "auto"
+    torch_dtype: "auto"
+  pretrained: true
+  freeze: false
+  max_length: 128
 
 decoder:
   lm_type: "huggingface"
   lm_name: "Qwen/Qwen2.5-0.5B"
-
   inference_config:
     device: "auto"
     torch_dtype: "auto"
-
-  # Decoder-specific settings
   pretrained: true
   freeze: false
 
-# =============================================================================
-# Generation Configuration
-# =============================================================================
 generation_config:
-  max_new_tokens: 128
+  max_new_tokens: 64
   temperature: 0.7
   top_p: 0.9
   do_sample: true
 
 # =============================================================================
-# Test Settings
+# BLOCK 4: Training Configuration
 # =============================================================================
-test:
-  batch_size: 1
-  latent_token_len: 32
+batch_size: 2
+num_epochs: 1
+
+gradient:
+  max_grad_norm: 1.0
+  accumulation_steps: 1
+
+trainable: true
+use_value_head: false
+learning_rate: 1.0e-5
+
+# =============================================================================
+# BLOCK 5: Log Configuration
+# =============================================================================
+log:
+  save_folder: "EXPERIMENT/uTEST/decoder"
+  log_level: "INFO"
+  checkpoint_step_interval: 100
+  log_step_interval: 10
+
+# =============================================================================
+# BLOCK 6: Evaluation Configuration
+# =============================================================================
+evaluation:
+  enabled: false

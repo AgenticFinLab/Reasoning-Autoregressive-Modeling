@@ -82,12 +82,12 @@ def test_quantizer(config: dict):
         5. Decode indices
         6. Reconstruction consistency
     """
-    enc_cfg = config["model"]["encoder"]
-    quant_cfg = config["model"]["quantizer"]
+    enc_cfg = config["encoder"]
+    quant_cfg = config["quantizer"]
     data_cfg = config["data"]
-    train_cfg = config["training"]
 
-    B = train_cfg["batch_size"]
+    # Training settings
+    B = config["batch_size"]
     L = enc_cfg["max_length"]
     D = quant_cfg["codebook_dim"]
     scales = quant_cfg["scale_lengths"]

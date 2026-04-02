@@ -34,12 +34,12 @@ def test_decoder(config: dict):
     Pipeline:
         texts -> Encoder -> [B, L, D] -> Decoder -> [B, L, vocab_size]
     """
-    enc_cfg = config["model"]["encoder"]
-    dec_cfg = config["model"]["decoder"]
+    enc_cfg = config["encoder"]
+    dec_cfg = config["decoder"]
     data_cfg = config["data"]
-    train_cfg = config["training"]
 
-    B = train_cfg["batch_size"]
+    # Training settings
+    B = config["batch_size"]
     L = enc_cfg["max_length"]
 
     # Load data from lmbase

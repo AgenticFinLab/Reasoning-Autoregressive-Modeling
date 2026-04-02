@@ -11,6 +11,20 @@
 #   - Reinforcement Learning (PPO, GRPO, etc.)
 #   - Other custom training methods
 #
+# =============================================================================
+# !!! ARCHITECTURAL CONSTRAINT - READ CAREFULLY !!!
+# =============================================================================
+# DO NOT add additional top-level blocks to this configuration.
+# The template provides exactly 6 blocks - no more, no less:
+#   data, environment, model, training, log, evaluation
+#
+# If you need additional configuration:
+#   - Add fields INSIDE existing blocks (e.g., add custom fields under 'data')
+#   - Extend included files (e.g., add fields in model.yml, training.yml)
+#
+# This constraint ensures config parsing consistency and framework compatibility.
+# =============================================================================
+#
 # Structure:
 #   1. data        - Dataset configuration (name, path, split, subset)
 #   2. environment - Runtime environment (seed, device)
@@ -23,6 +37,16 @@
 #   Copy this template and modify for your specific experiment.
 #   - Model settings:    model.yml
 #   - Training settings: training.yml
+#
+# YAML Anchors & Aliases (for value reuse):
+#   Use &anchor to define a reusable value, *alias to reference it.
+#   Example:
+#     common_params: &common
+#       batch_size: 1
+#       learning_rate: 1e-5
+#     training:
+#       <<: *common
+#       num_epochs: 3
 # =============================================================================
 
 # =============================================================================
@@ -106,7 +130,7 @@ environment:
 # Model definition and inference settings are in model.yml for modularity.
 #   - lm_name:            Model identifier (e.g., "Qwen/Qwen2.5-0.5B-Instruct")
 #   - lm_type:            Model type ("huggingface", "api", "vllm", "none")
-#   - inference_config:   Device, dtype, entropy settings
+#   - inference_config:   Dtype, entropy settings (device in environment.device_map)
 #   - generation_config:  Temperature, max_tokens, top_p, etc.
 #   - sys_message/user_message: Prompt references
 #

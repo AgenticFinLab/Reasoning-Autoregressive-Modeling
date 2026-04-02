@@ -4,16 +4,6 @@
 # Purpose:
 #   Configuration for encoder-quantizer-decoder model with multi-scale
 #   quantization structure (similar to VAR-style multi-scale tokens).
-#
-# Structure:
-#   1. data        - Dataset configuration
-#   2. environment - Runtime environment settings
-#   3. encoder     - Encoder model definition
-#   4. quantizer   - Quantizer configuration (multi-scale)
-#   5. decoder     - Decoder model definition
-#   6. training    - Training settings
-#   7. log         - Logging and checkpointing
-#   8. evaluation  - Evaluation settings
 # =============================================================================
 
 # =============================================================================
@@ -45,7 +35,7 @@ environment:
   tf32: true
 
 # =============================================================================
-# BLOCK 3: Model Configuration - Encoder
+# BLOCK 3: Model Configuration
 # =============================================================================
 lm_type: "huggingface"
 
@@ -58,19 +48,12 @@ encoder:
   pretrained: true
   freeze: false
 
-# =============================================================================
-# BLOCK 4: Model Configuration - Quantizer
-# =============================================================================
-# Multi-scale quantizer configuration (VAR-style).
-# =============================================================================
 quantizer:
   type: "multi_scale"
   num_scales: 4
   codebook_size: 8192
   latent_dim: 256
   commitment_cost: 0.25
-
-  # Multi-scale specific settings
   scales:
     - scale: 1
       tokens_per_scale: 1
@@ -81,9 +64,6 @@ quantizer:
     - scale: 4
       tokens_per_scale: 64
 
-# =============================================================================
-# BLOCK 5: Model Configuration - Decoder
-# =============================================================================
 decoder:
   lm_type: "huggingface"
   lm_name: "YourDecoderModel"
@@ -94,7 +74,7 @@ decoder:
   freeze: false
 
 # =============================================================================
-# BLOCK 6: Training Configuration
+# BLOCK 4: Training Configuration
 # =============================================================================
 batch_size: 1
 num_epochs: 1
@@ -111,12 +91,11 @@ learning_rate: 1.0e-5
 weight_decay: 0.0
 warmup_ratio: 0.01
 lr_scheduler_type: "cosine"
-
 bf16: true
 resume: true
 
 # =============================================================================
-# BLOCK 7: Log Configuration
+# BLOCK 5: Log Configuration
 # =============================================================================
 log:
   save_folder: "EXPERIMENT/PreExp/eqd_scales"
@@ -126,10 +105,7 @@ log:
   save_total_limit: 1
 
 # =============================================================================
-# BLOCK 8: Evaluation Configuration
+# BLOCK 6: Evaluation Configuration
 # =============================================================================
 evaluation:
   enabled: false
-  eval_step_interval: null
-  datasets: null
-  metrics: null

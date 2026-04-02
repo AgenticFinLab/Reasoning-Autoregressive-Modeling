@@ -15,58 +15,23 @@
 #       -> Extract [img_pos+1 : img_pos+N+1] -> latent_tokens [B, N, D]
 #       -> mm_projector -> projected_latent [B, N, D_decoder]
 #       -> Decoder LLM -> logits [B, L, V]
-#
-# Modes:
-#   - Single GPU: Set device_map all to same device
-#   - Pipeline: Auto GPU assignment by priority
-#
-# Structure:
-#   1. data        - Dataset configuration (name, path, split, subset)
-#   2. environment - Runtime environment (seed, device, dataloader, precision)
-#   3. encoder     - Encoder model definition and inference settings
-#   4. decoder     - Decoder model definition and inference settings
-#   5. quantizer   - Quantizer configuration (null for C3)
-#   6. training    - Model training settings
-#   7. log         - Logging, checkpointing, and output configuration
-#   8. evaluation  - Evaluation datasets and metrics
-#   9. reference   - Official C3 values for reference
 # =============================================================================
 
 # =============================================================================
 # BLOCK 1: Data Configuration
 # =============================================================================
-# Dataset settings for training.
-# =============================================================================
 data:
-  # Dataset identifier - must match registry key in dataset module
   data_name: "math"
-
-  # Local path for storing dataset cache and demo samples
   data_path: "EXPERIMENT/data/math"
-
-  # Dataset split to use for training
   split: "train"
-
-  # Subset configuration (optional)
-  # Leave empty for datasets without subset requirements.
   subset: ""
 
 # =============================================================================
 # BLOCK 2: Environment Configuration
 # =============================================================================
-# Runtime environment settings including random seed, device mapping,
-# dataloader, and precision settings.
-# =============================================================================
 environment:
-  # Path to environment variables file (API keys, etc.)
   dotenv_path: ".env"
-
-  # Random seed for reproducibility
   seed: 42
-
-  # Device mapping for model components
-  # Lower priority number = higher priority = gets GPU with more free memory
-  # device: auto - Intelligent GPU selection based on available memory
   device_map:
     encoder:
       device: "auto"
@@ -75,207 +40,77 @@ environment:
       device: "auto"
       priority: 1
 
-  # DataLoader settings
-  dataloader_num_workers: 8
+# =============================================================================
+# BLOCK 3: Model Configuration
+# =============================================================================
+# C3 uses encoder-decoder architecture with latent token compression.
+# Official: encoder Qwen2.5-1.5B, decoder Qwen2.5-3B
+# =============================================================================
+model:
+  lm_type: &lm_type "huggingface"
+  
+  encoder:
+    lm_type: *lm_type
+    lm_name: "Qwen/Qwen2.5-0.5B"
+    inference_config:
+      torch_dtype: "auto"
+    pretrained: &pretrained true
+    freeze: &freeze false
+    latent_token_len: &latent_token_len 32
+    max_length: 2048
+    use_im_start_end: true
 
-  # TF32 acceleration for A100/H100
-  tf32: true
+  decoder:
+    lm_type: *lm_type
+    lm_name: "Qwen/Qwen2.5-1.5B"
+    inference_config:
+      torch_dtype: "auto"
+    pretrained: *pretrained
+    freeze: *freeze
+    latent_token_len: *latent_token_len
+
+  quantizer: null
 
 # =============================================================================
-# BLOCK 3: Model Configuration - Encoder
+# BLOCK 4: Training Configuration
 # =============================================================================
-# C3 Encoder (llm1 in official code) - compresses text into latent tokens.
-# Official model: Qwen/Qwen2.5-1.5B (hidden_dim=1536)
-# =============================================================================
+training:
+  batch_size: 2
+  num_epochs: 15
 
-# Model type - determines how the model is loaded and called
-# Options: "huggingface", "api", "vllm", "none"
-lm_type: "huggingface"
+  gradient:
+    max_grad_norm: 1.0
+    accumulation_steps: 16
+    checkpointing: true
 
-encoder:
-  # --- Model Identity ---
-  lm_type: "huggingface"
-  lm_name: "Qwen/Qwen2.5-0.5B"
+  trainable: true
+  use_value_head: false
 
-  # --- Inference Configuration ---
-  inference_config:
-    device: "auto"
-    torch_dtype: "auto"
+  learning_rate: 1.0e-5
+  weight_decay: 0.0
+  warmup_ratio: 0.01
+  lr_scheduler_type: "cosine"
+  bf16: true
+  resume: true
 
-  # --- Encoder-Specific Settings ---
-  pretrained: true
-  freeze: false
-
-  # C3 latent token configuration
-  # Official release: 32 latent tokens
-  latent_token_len: 32
-  max_length: 2048
-  use_im_start_end: true
+  loss:
+    type: "dual_tokenizer_reconstruction"
+    ignore_index: -100
+    label_smoothing: 0.0
+    latent_token_len: *latent_token_len
 
 # =============================================================================
-# BLOCK 4: Model Configuration - Decoder
-# =============================================================================
-# C3 Decoder (main LLM) - reconstructs text from latent tokens.
-# Official model: Qwen/Qwen2.5-3B (hidden_dim=2048)
-# =============================================================================
-
-decoder:
-  # --- Model Identity ---
-  lm_type: "huggingface"
-  lm_name: "Qwen/Qwen2.5-1.5B"
-
-  # --- Inference Configuration ---
-  inference_config:
-    device: "auto"
-    torch_dtype: "auto"
-
-  # --- Decoder-Specific Settings ---
-  pretrained: true
-  freeze: false
-
-  # Must match encoder's latent_token_len
-  latent_token_len: 32
-
-# =============================================================================
-# BLOCK 5: Model Configuration - Quantizer
-# =============================================================================
-# C3 does NOT use quantizer, uses learned Q embeddings instead.
-# Set to null for C3 experiments.
-# =============================================================================
-quantizer: null
-
-# =============================================================================
-# BLOCK 6: Model Configuration - Latent Dimension
-# =============================================================================
-# C3 uses encoder's hidden_dim directly, projected via mm_projector.
-# Set to null for C3 experiments.
-# =============================================================================
-latent_dim: null
-
-# =============================================================================
-# BLOCK 7: Training Configuration
-# =============================================================================
-# Training hyperparameters and settings for C3 model.
-# =============================================================================
-
-# Number of samples processed before gradient update
-batch_size: 2
-
-# Number of passes over the entire dataset
-num_epochs: 15
-
-# --- Gradient Settings ---
-gradient:
-  # Maximum gradient norm for clipping (prevents exploding gradients)
-  max_grad_norm: 1.0
-
-  # Number of steps to accumulate gradients before optimizer step
-  accumulation_steps: 16
-
-  # Enable gradient checkpointing for memory efficiency
-  checkpointing: true
-
-# --- Model Trainability ---
-trainable: true
-use_value_head: false
-
-# --- Optimizer Settings ---
-learning_rate: 1.0e-5
-weight_decay: 0.0
-warmup_ratio: 0.01
-lr_scheduler_type: "cosine"
-
-# --- Precision ---
-bf16: true
-
-# --- Resume Training ---
-resume: true
-
-# --- Loss Configuration ---
-# Source: C3 model Lines 224-234: CrossEntropyLoss with shift
-loss:
-  type: "dual_tokenizer_reconstruction"
-  ignore_index: -100
-  label_smoothing: 0.0
-  latent_token_len: 32
-
-# =============================================================================
-# BLOCK 8: Log Configuration
-# =============================================================================
-# Logging, checkpointing, and output settings.
+# BLOCK 5: Log Configuration
 # =============================================================================
 log:
-  # Output directory for experiment results
   save_folder: "EXPERIMENT/PreExp/c3_original"
-
-  # Logging verbosity level
-  # Options: "DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"
   log_level: "INFO"
-
-  # =========================================================================
-  # Step Intervals (all values are TRAINING STEPS)
-  # =========================================================================
-  # Checkpoint save interval (in training steps)
   checkpoint_step_interval: 5000
-
-  # Metrics logging interval (in training steps)
   log_step_interval: 10
 
-  # Maximum checkpoints to keep
-  save_total_limit: 1
-
-  # --- History Buffer Configuration ---
-  # Memory-efficient training history storage
-  history:
-    entry_limit: 2
-    block_size: 500
-
-  # --- Wandb Configuration ---
-  use_wandb: false
-  wandb_project: null
-
 # =============================================================================
-# BLOCK 9: Evaluation Configuration
+# BLOCK 6: Evaluation Configuration
 # =============================================================================
-# Settings for periodic evaluation during training.
 # C3 official: no evaluation during training.
-# =============================================================================
 evaluation:
   enabled: false
-  eval_step_interval: null
-  datasets: null
-  metrics: null
-
-# =============================================================================
-# BLOCK 10: Reference Configuration (Official C3 Values)
-# =============================================================================
-# These values are from the official implementation for reference.
-# =============================================================================
-c3_reference:
-  # --- Models (from HuggingFace release) ---
-  encoder_model: "Qwen/Qwen2.5-1.5B"
-  encoder_hidden_dim: 1536
-
-  decoder_model: "Qwen/Qwen2.5-3B"
-  decoder_hidden_dim: 2048
-
-  # --- mm_projector ---
-  mm_projector_in: 1536
-  mm_projector_out: 2048
-
-  # --- Special Tokens ---
-  special_tokens:
-    im_start: "<img>"
-    im_end: "</img>"
-    im_patch: "<imgpad>"
-
-  # --- Compression Ratios (from paper) ---
-  compression_ratios:
-    - ratio: "20x"
-      accuracy: "98%"
-      latent_tokens: 64
-      text_length: 1280
-    - ratio: "40x"
-      accuracy: "93%"
-      latent_tokens: 32
-      text_length: 1280

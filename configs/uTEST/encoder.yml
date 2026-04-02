@@ -3,36 +3,68 @@
 # =============================================================================
 # Purpose:
 #   Configuration template for testing encoder models.
-#   Used for unit testing encoder-specific functionality.
 # =============================================================================
 
 # =============================================================================
-# Model Configuration
+# BLOCK 1: Data Configuration
+# =============================================================================
+data:
+  data_name: "math"
+  data_path: "EXPERIMENT/data/math"
+  split: "test"
+  subset: ""
+
+# =============================================================================
+# BLOCK 2: Environment Configuration
+# =============================================================================
+environment:
+  dotenv_path: ".env"
+  seed: 42
+  device_map:
+    encoder:
+      device: "auto"
+      priority: 1
+
+# =============================================================================
+# BLOCK 3: Model Configuration
 # =============================================================================
 lm_type: "huggingface"
 
 encoder:
   lm_type: "huggingface"
   lm_name: "Qwen/Qwen2.5-0.5B"
-
   inference_config:
     device: "auto"
     torch_dtype: "auto"
-
-  # Encoder-specific settings
   pretrained: true
   freeze: false
-  max_length: 2048
+  max_length: 128
 
 # =============================================================================
-# Latent Token Configuration
+# BLOCK 4: Training Configuration
 # =============================================================================
-latent_token_len: 32
-use_im_start_end: true
+batch_size: 2
+num_epochs: 1
+
+gradient:
+  max_grad_norm: 1.0
+  accumulation_steps: 1
+
+trainable: true
+use_value_head: false
+learning_rate: 1.0e-5
 
 # =============================================================================
-# Test Settings
+# BLOCK 5: Log Configuration
 # =============================================================================
-test:
-  batch_size: 1
-  input_text: "This is a test input for encoder."
+log:
+  save_folder: "EXPERIMENT/uTEST/encoder"
+  log_level: "INFO"
+  checkpoint_step_interval: 100
+  log_step_interval: 10
+
+# =============================================================================
+# BLOCK 6: Evaluation Configuration
+# =============================================================================
+evaluation:
+  enabled: false
