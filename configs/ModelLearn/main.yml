@@ -22,6 +22,12 @@
 #   - Add fields INSIDE existing blocks (e.g., add custom fields under 'data')
 #   - Extend included files (e.g., add fields in model.yml, training.yml)
 #
+# STRICT PROHIBITION: Do NOT add fields that duplicate existing functionality.
+# If absolutely necessary, you MUST document:
+#   1. Detailed justification for why existing fields are insufficient
+#   2. Specific locations where the new field will be used
+#   3. Expected behavior and outcomes
+#
 # This constraint ensures config parsing consistency and framework compatibility.
 # =============================================================================
 #

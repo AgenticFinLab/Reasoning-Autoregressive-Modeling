@@ -93,6 +93,26 @@ Comparison:
         [1, 4, 16, 64, 256] = 341 codes
         Linguistic hierarchy: subword → word → phrase → clause → sentence
 
+================================================================================
+Output Structure:
+================================================================================
+    EXPERIMENT/PreExp/eqd_hierarchical/
+    ├── checkpoints/
+    │   ├── checkpoint-epoch{N}-step{S}.pt   # Interval checkpoint
+    │   └── checkpoint_final.pt              # Final model checkpoint
+    └── logs/
+        ├── training.log                    # Training log file
+        └── train_config.json               # Training config snapshot
+
+Output File Formats:
+    Checkpoint (*.pt):
+        - encoder_state_dict: Dict[str, torch.Tensor]
+        - decoder_state_dict: Dict[str, torch.Tensor]
+        - quantizer_state_dict: Dict[str, torch.Tensor]
+        - optimizer_state_dict: Dict
+        - epoch: int
+        - global_step: int
+
 Usage:
     python examples/PreExp/eqd_hierarchical.py -c configs/PreExp/eqd_hierarchical.yml
 """
@@ -198,7 +218,8 @@ class HierarchicalTextQuantizer(nn.Module):
         self,
         codebook_size: int = 4096,
         codebook_dim: int = 256,
-        scale_lengths: tuple = (1, 4, 16, 64, 256),  # Hierarchical text scales
+        # Hierarchical text scales
+        scale_lengths: tuple = (1, 4, 16, 64, 256),
         beta: float = 0.25,
         quant_resi: float = 0.5,
     ):
@@ -219,8 +240,10 @@ class HierarchicalTextQuantizer(nn.Module):
             total_codes: 1 + 4 + 16 + 64 + 256 = 341
         """
         super().__init__()
-        self.codebook_size = codebook_size  # K
-        self.codebook_dim = codebook_dim  # D
+        # K: number of codebook vectors
+        self.codebook_size = codebook_size
+        # D: dimension of each codebook vector
+        self.codebook_dim = codebook_dim
         self.scale_lengths = scale_lengths
         self.beta = beta
 
@@ -231,8 +254,8 @@ class HierarchicalTextQuantizer(nn.Module):
         nn.init.normal_(self.embedding.weight, mean=0, std=0.02)
 
         # Phi transformations for each scale (partially shared)
-        # num_phi: number of unique phi layers (share across scales)
-        num_phi = min(4, len(scale_lengths))  # Share some phi layers
+        # Share some phi layers across scales
+        num_phi = min(4, len(scale_lengths))
         self.phi_layers = nn.ModuleList(
             [HierarchicalPhi(codebook_dim, quant_resi) for _ in range(num_phi)]
         )
@@ -293,16 +316,19 @@ class HierarchicalTextQuantizer(nn.Module):
                 indices_per_scale: [[B,1], [B,4], [B,16], [B,64], [B,256]]
                 vq_loss: scalar
         """
-        B, L, D = z.shape  # Batch, Length, Dimension (e.g., [4, 256, 256])
+        # Batch, Length, Dimension (e.g., [4, 256, 256])
+        B, L, D = z.shape
         device = z.device
 
         # Initialize
         # f_rest: residual features to be quantized, starts as z [B, L, D]
-        f_rest = z.clone()  # [B, L, D]
+        f_rest = z.clone()
         # f_hat: accumulator for quantized features [B, L, D]
-        f_hat = torch.zeros_like(z)  # [B, L, D]
-        indices_per_scale = []  # Store indices for each scale
-        total_vq_loss = 0.0  # Accumulate VQ loss across scales
+        f_hat = torch.zeros_like(z)
+        # Store indices for each scale
+        indices_per_scale = []
+        # Accumulate VQ loss across scales
+        total_vq_loss = 0.0
 
         # Process each scale in hierarchy
         for scale_idx, scale_len in enumerate(self.scale_lengths):
@@ -310,7 +336,7 @@ class HierarchicalTextQuantizer(nn.Module):
             # f_rest [B, L, D] → rest_down [B, scale_len, D]
             if scale_len == L:
                 # No downsampling needed for full-resolution scale
-                rest_down = f_rest  # [B, L, D]
+                rest_down = f_rest
             else:
                 # Adaptive average pooling to downsample
                 # f_rest [B, L, D] → transpose → [B, D, L]
@@ -324,9 +350,7 @@ class HierarchicalTextQuantizer(nn.Module):
             # Compute distances between rest_down and all codebook vectors
             # rest_down [B, scale_len, D] → reshape → [B*scale_len, D]
             # distances [B*scale_len, K] where K = codebook_size
-            distances = torch.cdist(
-                rest_down.reshape(-1, D), self.embedding.weight
-            )  # [B*scale_len, K]
+            distances = torch.cdist(rest_down.reshape(-1, D), self.embedding.weight)
 
             # Get indices of nearest codebook entries
             # distances [B*scale_len, K] → argmin → [B*scale_len] → reshape → [B, scale_len]
@@ -335,18 +359,18 @@ class HierarchicalTextQuantizer(nn.Module):
 
             # Lookup codebook vectors using indices
             # indices [B, scale_len] → embedding → q [B, scale_len, D]
-            q = self.embedding(indices)  # [B, scale_len, D]
+            q = self.embedding(indices)
 
             # Apply phi transformation (learned residual transformation)
             # Select phi layer for this scale (with sharing)
             phi_idx = self.scale_to_phi[scale_idx]
             # q [B, scale_len, D] → phi_layers → h [B, scale_len, D]
-            h = self.phi_layers[phi_idx](q)  # [B, scale_len, D]
+            h = self.phi_layers[phi_idx](q)
 
             # Upsample to full sequence length
             if scale_len == L:
                 # No upsampling needed for full-resolution scale
-                h_up = h  # [B, L, D]
+                h_up = h
             else:
                 # Linear interpolation upsampling
                 # h [B, scale_len, D] → transpose → [B, D, scale_len]
@@ -366,11 +390,13 @@ class HierarchicalTextQuantizer(nn.Module):
 
             # Compute VQ loss for this scale
             # Commitment loss: encoder output should be close to codebook vector
+            commitment_loss = F.mse_loss(rest_down, q.detach())
             # Codebook loss: codebook vector should be close to encoder output
-            commitment_loss = F.mse_loss(rest_down, q.detach())  # scalar
-            codebook_loss = F.mse_loss(rest_down.detach(), q)  # scalar
-            scale_vq_loss = codebook_loss + self.beta * commitment_loss  # scalar
-            total_vq_loss = total_vq_loss + scale_vq_loss  # Accumulate
+            codebook_loss = F.mse_loss(rest_down.detach(), q)
+            # Total VQ loss for this scale
+            scale_vq_loss = codebook_loss + self.beta * commitment_loss
+            # Accumulate across scales
+            total_vq_loss = total_vq_loss + scale_vq_loss
 
         # Straight-through estimator for gradient flow
         # Allows gradients to pass through quantization
@@ -411,17 +437,18 @@ class HierarchicalTextQuantizer(nn.Module):
 
             Output: f_hat [B, L, D] = sum of all h_up across scales
         """
-        B = indices_per_scale[0].shape[0]  # Batch size
-        D = self.codebook_dim  # Codebook dimension (e.g., 256)
+        # Batch size
+        B = indices_per_scale[0].shape[0]
+        # Codebook dimension (e.g., 256)
+        D = self.codebook_dim
         device = indices_per_scale[0].device
 
         # Initialize accumulator: [B, L, D]
         f_hat = torch.zeros(B, target_length, D, device=device)
 
         for scale_idx, indices in enumerate(indices_per_scale):
-            scale_len = indices.shape[
-                1
-            ]  # Current scale length (e.g., 1, 4, 16, 64, 256)
+            # Current scale length (e.g., 1, 4, 16, 64, 256)
+            scale_len = indices.shape[1]
 
             # Lookup codebook vectors
             # indices [B, scale_len] → embedding → q [B, scale_len, D]
@@ -514,7 +541,8 @@ class DualTokenizerVQAELoss(nn.Module):
                 ↓
             total_loss = recon_loss + vq_weight * vq_loss → scalar
         """
-        B, L, V = logits.shape  # Batch, Length, Vocab_size
+        # Batch, Length, Vocab_size
+        B, L, V = logits.shape
 
         # Tokenize target texts with decoder tokenizer
         # texts List[str] → tokens dict
@@ -583,22 +611,25 @@ def train_hierarchical(config: dict):
     # =================================================================
     # Extract config
     # =================================================================
-    enc_cfg = config["encoder"]
-    dec_cfg = config["decoder"]
-    quant_cfg = config["quantizer"]
-    latent_dim = config.get("latent_dim", 256)
+    model_cfg = config["model"]
+    train_cfg = config["training"]
     data_cfg = config["data"]
     env_cfg = config["environment"]
     log_cfg = config["log"]
 
-    batch_size = config["batch_size"]
-    learning_rate = config["learning_rate"]
-    weight_decay = config.get("weight_decay", 0.0)
-    num_epochs = config["num_epochs"]
-    warmup_steps = config.get("warmup_steps", 100)
-    gradient_clip = config["gradient"]["max_grad_norm"]
-    vq_loss_weight = config.get("vq_loss_weight", 1.0)
-    resume = config.get("resume", True)
+    enc_cfg = model_cfg["encoder"]
+    dec_cfg = model_cfg["decoder"]
+    quant_cfg = model_cfg["quantizer"]
+    latent_dim = model_cfg["latent_dim"]
+
+    batch_size = train_cfg["batch_size"]
+    learning_rate = train_cfg["learning_rate"]
+    weight_decay = train_cfg["weight_decay"]
+    num_epochs = train_cfg["num_epochs"]
+    warmup_steps = train_cfg["warmup_steps"]
+    gradient_clip = train_cfg["gradient"]["max_grad_norm"]
+    vq_loss_weight = train_cfg["vq_loss_weight"]
+    resume = train_cfg["resume"]
 
     log_interval = log_cfg["log_step_interval"]
     checkpoint_interval = log_cfg["checkpoint_step_interval"]

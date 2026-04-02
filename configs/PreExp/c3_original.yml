@@ -32,6 +32,7 @@ data:
 environment:
   dotenv_path: ".env"
   seed: 42
+  dataloader_num_workers: 4
   device_map:
     encoder:
       device: "auto"
@@ -51,7 +52,7 @@ model:
   
   encoder:
     lm_type: *lm_type
-    lm_name: "Qwen/Qwen2.5-0.5B"
+    model_name: "Qwen/Qwen2.5-0.5B"
     inference_config:
       torch_dtype: "auto"
     pretrained: &pretrained true
@@ -62,7 +63,7 @@ model:
 
   decoder:
     lm_type: *lm_type
-    lm_name: "Qwen/Qwen2.5-1.5B"
+    model_name: "Qwen/Qwen2.5-1.5B"
     inference_config:
       torch_dtype: "auto"
     pretrained: *pretrained

@@ -206,12 +206,12 @@ def validate_loss_config(
     warning_messages = []
 
     # Extract loss config
-    train_cfg = config.get("train", {})
-    loss_cfg = train_cfg.get("loss", {})
-    loss_type = loss_cfg.get("type", "reconstruction")
+    train_cfg = config["training"]
+    loss_cfg = train_cfg["loss"]
+    loss_type = loss_cfg["type"]
 
-    model_cfg = config.get("model", {})
-    has_quantizer = model_cfg.get("quantizer") is not None
+    model_cfg = config["model"]
+    has_quantizer = model_cfg["quantizer"] is not None
 
     # Check tokenizer compatibility if both provided
     if enc_tokenizer is not None and dec_tokenizer is not None:
@@ -340,9 +340,9 @@ def build_loss_from_config(
         warning_messages = validate_loss_config(config, enc_tokenizer, dec_tokenizer)
 
     # Extract loss config
-    train_cfg = config.get("train", {})
-    loss_cfg = train_cfg.get("loss", {})
-    loss_type = loss_cfg.get("type", "reconstruction")
+    train_cfg = config["training"]
+    loss_cfg = train_cfg["loss"]
+    loss_type = loss_cfg["type"]
 
     # Build loss
     loss_fn = get_loss(

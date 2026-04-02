@@ -31,39 +31,40 @@ environment:
 # =============================================================================
 # BLOCK 3: Model Configuration
 # =============================================================================
-lm_type: "huggingface"
+model:
+  lm_type: &lm_type "huggingface"
 
-encoder:
-  lm_type: "huggingface"
-  lm_name: "Qwen/Qwen2.5-0.5B"
-  inference_config:
-    device: "auto"
-    torch_dtype: "auto"
-  pretrained: true
-  freeze: false
-  max_length: 32
+  encoder:
+    lm_type: *lm_type
+    model_name: "Qwen/Qwen2.5-0.5B"
+    inference_config:
+      torch_dtype: "auto"
+    pretrained: true
+    freeze: false
+    max_length: 32
 
-quantizer:
-  type: "multi_scale"
-  codebook_size: 1024
-  codebook_dim: 256
-  scale_lengths: [1, 2, 4, 8, 16, 32]
-  commitment_cost: 0.25
-  num_shared: 4
+  quantizer:
+    type: "multi_scale"
+    codebook_size: 1024
+    codebook_dim: 256
+    scale_lengths: [1, 2, 4, 8, 16, 32]
+    commitment_cost: 0.25
+    num_shared: 4
 
 # =============================================================================
 # BLOCK 4: Training Configuration
 # =============================================================================
-batch_size: 2
-num_epochs: 1
+training:
+  batch_size: 2
+  num_epochs: 1
 
-gradient:
-  max_grad_norm: 1.0
-  accumulation_steps: 1
+  gradient:
+    max_grad_norm: 1.0
+    accumulation_steps: 1
 
-trainable: true
-use_value_head: false
-learning_rate: 1.0e-5
+  trainable: true
+  use_value_head: false
+  learning_rate: 1.0e-5
 
 # =============================================================================
 # BLOCK 5: Log Configuration

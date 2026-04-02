@@ -376,10 +376,7 @@ class C3Encoder(nn.Module):
         pretrained = config["pretrained"]
         freeze = config["freeze"]
         # Use official naming: latent_token_len (C3 config key)
-        # Backward compatibility: also accept num_latent_tokens
-        latent_token_len = config.get(
-            "latent_token_len", config.get("num_latent_tokens", 32)
-        )
+        latent_token_len = config["latent_token_len"]
         max_length = config["max_length"]
 
         self.model_name = model_name
@@ -740,8 +737,7 @@ def build_c3_encoder(config: Dict[str, Any]) -> C3Encoder:
 
     # Logging
     freeze_str = "frozen" if config["freeze"] else "trainable"
-    # Backward compatibility: also accept num_latent_tokens
-    latent_len = config.get("latent_token_len", config.get("num_latent_tokens", 32))
+    latent_len = config["latent_token_len"]
     compression_ratio = config["max_length"] / latent_len
     logger.info(
         "[C3Encoder] %s (%s) - text(%d) -> latent(%d) = %.1fx compression, hidden(%d)",

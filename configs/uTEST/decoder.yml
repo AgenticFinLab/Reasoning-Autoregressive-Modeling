@@ -31,46 +31,48 @@ environment:
 # =============================================================================
 # BLOCK 3: Model Configuration
 # =============================================================================
-lm_type: "huggingface"
+model:
+  lm_type: &lm_type "huggingface"
 
-encoder:
-  lm_type: "huggingface"
-  lm_name: "Qwen/Qwen2.5-0.5B"
-  inference_config:
-    device: "auto"
-    torch_dtype: "auto"
-  pretrained: true
-  freeze: false
-  max_length: 128
+  encoder:
+    lm_type: *lm_type
+    model_name: "Qwen/Qwen2.5-0.5B"
+    inference_config:
+      torch_dtype: "auto"
+    pretrained: true
+    freeze: false
+    max_length: 128
 
-decoder:
-  lm_type: "huggingface"
-  lm_name: "Qwen/Qwen2.5-0.5B"
-  inference_config:
-    device: "auto"
-    torch_dtype: "auto"
-  pretrained: true
-  freeze: false
+  decoder:
+    lm_type: *lm_type
+    model_name: "Qwen/Qwen2.5-0.5B"
+    inference_config:
+      torch_dtype: "auto"
+    pretrained: true
+    freeze: false
 
-generation_config:
-  max_new_tokens: 64
-  temperature: 0.7
-  top_p: 0.9
-  do_sample: true
+  generation_config:
+    max_new_tokens: 64
+    temperature: 0.7
+    top_p: 0.9
+    do_sample: true
+
+  quantizer: null
 
 # =============================================================================
 # BLOCK 4: Training Configuration
 # =============================================================================
-batch_size: 2
-num_epochs: 1
+training:
+  batch_size: 2
+  num_epochs: 1
 
-gradient:
-  max_grad_norm: 1.0
-  accumulation_steps: 1
+  gradient:
+    max_grad_norm: 1.0
+    accumulation_steps: 1
 
-trainable: true
-use_value_head: false
-learning_rate: 1.0e-5
+  trainable: true
+  use_value_head: false
+  learning_rate: 1.0e-5
 
 # =============================================================================
 # BLOCK 5: Log Configuration

@@ -45,17 +45,18 @@ def create_training_config(
         >>> print(config.batch_size)
         2
     """
-    train_cfg = config_dict["train"]
+    train_cfg = config_dict["training"]
     model_cfg = config_dict["model"]
-    model_devices = config_dict.get("model_devices", {})
+    env_cfg = config_dict["environment"]
+    model_devices = env_cfg["device_map"]
 
-    enc_cfg = model_cfg.get("encoder", {})
-    latent_token_len = enc_cfg.get("latent_token_len", 32)
-    max_length = enc_cfg.get("max_length", 2048)
+    enc_cfg = model_cfg["encoder"]
+    latent_token_len = enc_cfg["latent_token_len"]
+    max_length = enc_cfg["max_length"]
     compression_ratio = max_length / latent_token_len
 
-    encoder_device = model_devices.get("encoder", {}).get("device", "cuda:0")
-    decoder_device = model_devices.get("decoder", {}).get("device", "cuda:0")
+    encoder_device = model_devices["encoder"]["device"]
+    decoder_device = model_devices["decoder"]["device"]
     use_pipeline = encoder_device != decoder_device
 
     return TrainingConfig(
@@ -65,17 +66,17 @@ def create_training_config(
         weight_decay=train_cfg["weight_decay"],
         num_epochs=train_cfg["num_epochs"],
         warmup_ratio=train_cfg["warmup_ratio"],
-        gradient_accumulation_steps=train_cfg["gradient_accumulation_steps"],
-        gradient_clip=train_cfg["gradient_clip"],
+        gradient_accumulation_steps=train_cfg["gradient"]["accumulation_steps"],
+        gradient_clip=train_cfg["gradient"]["max_grad_norm"],
         bf16=train_cfg["bf16"],
         latent_token_len=latent_token_len,
         max_length=max_length,
         compression_ratio=compression_ratio,
-        encoder_config=EncoderConfig(**enc_cfg) if enc_cfg else None,
-        decoder_config=DecoderConfig(**model_cfg.get("decoder", {})),
+        encoder_config=EncoderConfig(**enc_cfg),
+        decoder_config=DecoderConfig(**model_cfg["decoder"]),
         quantizer_config=(
             QuantizerConfig(**model_cfg["quantizer"])
-            if model_cfg.get("quantizer")
+            if model_cfg["quantizer"] is not None
             else None
         ),
         use_pipeline=use_pipeline,
@@ -107,13 +108,13 @@ def create_reconstruction_samples(
         "Original input text..."
     """
     samples = []
-    comparisons = decode_result.get("comparisons", [])
+    comparisons = decode_result["comparisons"]
     for comp in comparisons:
         samples.append(
             ReconstructionSample(
-                index=comp.get("index", 0),
-                original=comp.get("original", ""),
-                reconstructed=comp.get("reconstructed", ""),
+                index=comp["index"],
+                original=comp["original"],
+                reconstructed=comp["reconstructed"],
             )
         )
     return samples

@@ -40,6 +40,39 @@ if image.shape[0] in [1, 3]:  # CHW format
 - Use Google-style docstrings
 - Document tensor shapes in docstrings, not inline
 
+### 1.4 Detailed Annotation for Size, Principle, Logic, and Flow
+- **Annotations involving size/dimensions MUST be detailed and accurate**
+- Mark all dimension changes, length transformations, and shape operations explicitly
+- Explain the underlying principle/logic behind complex operations
+- Document the flow of data through processing pipelines
+
+**Correct:**
+```python
+# Reshape hidden states for cross-attention
+# Input shape: (batch_size, seq_len, hidden_dim) -> (32, 128, 768)
+# Output shape: (batch_size, num_heads, seq_len, head_dim) -> (32, 12, 128, 64)
+# Principle: Split hidden_dim into num_heads * head_dim for multi-head attention
+# Flow: Linear projection -> reshape -> transpose
+hidden_states = hidden_states.view(batch_size, seq_len, self.num_heads, self.head_dim)
+hidden_states = hidden_states.transpose(1, 2)
+
+# Apply 1D convolution with kernel_size=3, stride=1, padding=1
+# Input length: 128 -> Output length: 128 (preserved due to padding)
+# Principle: Same padding maintains sequence length for residual connection
+# Logic: (L - kernel_size + 2*padding) / stride + 1 = (128 - 3 + 2*1) / 1 + 1 = 128
+conv_output = self.conv1d(x)
+```
+
+**Incorrect:**
+```python
+# Reshape for attention
+hidden_states = hidden_states.view(batch_size, seq_len, self.num_heads, self.head_dim)
+hidden_states = hidden_states.transpose(1, 2)
+
+# Apply convolution
+conv_output = self.conv1d(x)
+```
+
 **Correct:**
 ```python
 def encode_image(self, image: torch.Tensor) -> torch.Tensor:
@@ -88,7 +121,31 @@ if value is None:
 | **Centralized Config**    | Use `configs/` directory for all configurations |
 | **Environment Variables** | Use `.env` for sensitive tokens                 |
 
-### 2.3 Base Library Usage
+### 2.3 No Default Settings
+
+**Core Principle**: NO default values anywhere in code. Every parameter must be explicitly defined in configuration files.
+
+**Why**: Default values (e.g., buffer length, hidden dimension, learning rate) hidden in code make experiments hard to reproduce and compare. All parameters should be explicit in config files for clarity and auditability.
+
+**WRONG:**
+```python
+# DO NOT: Default buffer length hidden in code
+class HistoryBuffer:
+    def __init__(self, max_length: int = 100):  # Why 100?
+        # ...
+
+# DO NOT: Hardcoded defaults
+optimizer = Adam(model.parameters(), lr=0.001)
+```
+
+**CORRECT:**
+```python
+# All values from config
+buffer = HistoryBuffer(max_length=config["buffer_length"])
+optimizer = Adam(model.parameters(), lr=config["learning_rate"])
+```
+
+### 2.4 Base Library Usage
 - When a base library exists, use its storage, inference, and environment management interfaces uniformly
 - Don't reinvent functionality provided by base libraries
 
@@ -210,3 +267,246 @@ Before submitting code, verify:
 - Implementation must match paper methodology
 - Document any deviations explicitly
 - Keep original paper descriptions accurate
+
+## 10. No Redundant Code
+
+**Core Principle**: Write minimal, direct code. Every line must serve a clear purpose. Avoid unnecessary abstraction, wrappers, and complexity.
+
+### 10.1 No Unnecessary Wrappers
+
+**WRONG - Unnecessary wrapper class:**
+```python
+# DO NOT: Create wrapper classes that add no value
+class ModelManager:
+    """Wrapper around HuggingFace model."""
+    def __init__(self, model_name):
+        self.model_name = model_name
+        self._model = None
+    
+    def load(self):
+        self._model = AutoModel.from_pretrained(self.model_name)
+    
+    def get_model(self):
+        return self._model
+    
+    def forward(self, *args, **kwargs):
+        return self._model(*args, **kwargs)
+
+# Usage requires extra steps
+manager = ModelManager("bert-base-uncased")
+manager.load()
+output = manager.forward(input_ids)
+```
+
+**CORRECT - Direct usage:**
+```python
+# Use the library directly
+from transformers import AutoModel
+
+model = AutoModel.from_pretrained("bert-base-uncased")
+output = model(input_ids)
+```
+
+### 10.2 No Redundant Abstraction Layers
+
+**WRONG - Excessive abstraction:**
+```python
+# DO NOT: Multiple layers of abstraction
+class DataProcessor:
+    def process(self, data):
+        return self._process_internal(data)
+    
+    def _process_internal(self, data):
+        return self._apply_transform(data)
+    
+    def _apply_transform(self, data):
+        return self._finalize(data)
+    
+    def _finalize(self, data):
+        return data.strip().lower()
+
+processor = DataProcessor()
+result = processor.process(text)
+```
+
+**CORRECT - Simple and direct:**
+```python
+# Direct function call
+result = text.strip().lower()
+
+# Or a simple function if reused
+def normalize_text(text: str) -> str:
+    return text.strip().lower()
+
+result = normalize_text(text)
+```
+
+### 10.3 No Empty Pass-Through Methods
+
+**WRONG - Pass-through methods:**
+```python
+# DO NOT: Methods that just call another method
+class ExperimentRunner:
+    def __init__(self, model):
+        self.model = model
+    
+    def run(self, data):
+        return self._run_experiment(data)
+    
+    def _run_experiment(self, data):
+        return self._execute(data)
+    
+    def _execute(self, data):
+        return self.model(data)
+
+runner = ExperimentRunner(model)
+result = runner.run(data)  # 3 layers to just call model(data)
+```
+
+**CORRECT - Direct call:**
+```python
+# Just call the model directly
+result = model(data)
+
+# Or if orchestration is needed, make it meaningful
+class ExperimentRunner:
+    def __init__(self, model, evaluator, logger):
+        self.model = model
+        self.evaluator = evaluator
+        self.logger = logger
+    
+    def run(self, data):
+        # Each step adds value
+        outputs = self.model(data)
+        metrics = self.evaluator(outputs)
+        self.logger.log(metrics)
+        return metrics
+```
+
+### 10.4 No Redundant Data Structures
+
+**WRONG - Redundant container:**
+```python
+# DO NOT: Create dataclass just to hold what dict already provides
+@dataclass
+class ModelOutput:
+    logits: torch.Tensor
+    hidden_states: torch.Tensor
+    
+    def get_logits(self):
+        return self.logits
+    
+    def get_hidden_states(self):
+        return self.hidden_states
+
+output = ModelOutput(logits=logits, hidden_states=hidden)
+logits = output.get_logits()  # Unnecessary getter
+```
+
+**CORRECT - Use existing structures:**
+```python
+# Return tuple or dict directly
+return {"logits": logits, "hidden_states": hidden}
+
+# Or use NamedTuple if type hints needed
+ModelOutput = namedtuple("ModelOutput", ["logits", "hidden_states"])
+output = ModelOutput(logits, hidden)
+logits = output.logits
+```
+
+### 10.5 No Premature Generalization
+
+**WRONG - Over-engineering for future needs:**
+```python
+# DO NOT: Build extensible system for single use case
+class BaseProcessor(ABC):
+    @abstractmethod
+    def process(self, data): pass
+
+class TextProcessor(BaseProcessor):
+    def process(self, data): return data.strip()
+
+class ProcessorFactory:
+    @staticmethod
+    def create(processor_type: str) -> BaseProcessor:
+        if processor_type == "text":
+            return TextProcessor()
+        raise ValueError(f"Unknown type: {processor_type}")
+
+# Only ever used as:
+processor = ProcessorFactory.create("text")
+result = processor.process(text)
+```
+
+**CORRECT - Write what you need:**
+```python
+# Simple function for current needs
+result = text.strip()
+
+# Add abstraction ONLY when you have multiple implementations
+```
+
+### 10.6 No Redundant Conditions
+
+**WRONG - Redundant checks:**
+```python
+# DO NOT: Check conditions that are already guaranteed
+def process_items(items: List[str]) -> List[str]:
+    if items is None:  # Type hint says List, None not allowed
+        return []
+    
+    result = []
+    for item in items:
+        if item is not None:  # List[str] means no None items
+            result.append(item.strip())
+    return result
+```
+
+**CORRECT - Trust your contracts:**
+```python
+def process_items(items: List[str]) -> List[str]:
+    # Trust type hints - let errors surface if contract violated
+    return [item.strip() for item in items]
+```
+
+### 10.7 No Redundant Variable Assignments
+
+**WRONG - Unnecessary intermediate variables:**
+```python
+# DO NOT: Variables that serve no purpose
+def compute_loss(logits, labels):
+    predictions = logits  # Why rename?
+    targets = labels      # Why rename?
+    loss_value = F.cross_entropy(predictions, targets)
+    final_loss = loss_value  # Why another variable?
+    return final_loss
+```
+
+**CORRECT - Direct computation:**
+```python
+def compute_loss(logits, labels):
+    return F.cross_entropy(logits, labels)
+```
+
+### 10.8 Checklist: Is This Code Redundant?
+
+Before writing any code, ask:
+
+- [ ] **Does this wrapper add functionality?** If it only delegates, remove it.
+- [ ] **Can I use the library directly?** If yes, do it.
+- [ ] **Is this abstraction layer necessary?** Only abstract when you have 2+ implementations.
+- [ ] **Does this variable serve a purpose?** If only renamed, use original name.
+- [ ] **Is this class doing real work?** If only holding data, use dict/tuple/namedtuple.
+- [ ] **Am I solving a real problem or imagined future problem?** Write for current needs.
+- [ ] **Can I delete this method and call directly?** If yes, delete it.
+
+### 10.9 Summary: Complexity Budget
+
+| Code Element      | Allowed                                  | Not Allowed                    |
+|-------------------|------------------------------------------|--------------------------------|
+| Wrapper class     | Only if adds real functionality          | Pass-through delegation        |
+| Abstraction layer | Only with 2+ implementations             | Single-implementation abstract |
+| Getter/Setter     | Only if validation needed                | Simple attribute access        |
+| Factory pattern   | Only for runtime selection               | Static type selection          |
+| Config class      | Only if complex validation               | Simple dict access             |
+| Manager class     | Only if orchestrates multiple components | Single component management    |

@@ -107,6 +107,26 @@ Comparison with VAR Multi-Scale:
         All positions: [B, L, D] → indices [B, L]
         Total: L codes (e.g., 512)
 
+================================================================================
+Output Structure:
+================================================================================
+    EXPERIMENT/PreExp/eqd_token_level/
+    ├── checkpoints/
+    │   ├── checkpoint-epoch{N}-step{S}.pt   # Interval checkpoint
+    │   └── checkpoint_final.pt              # Final model checkpoint
+    └── logs/
+        ├── training.log                    # Training log file
+        └── train_config.json               # Training config snapshot
+
+Output File Formats:
+    Checkpoint (*.pt):
+        - encoder_state_dict: Dict[str, torch.Tensor]
+        - decoder_state_dict: Dict[str, torch.Tensor]
+        - quantizer_state_dict: Dict[str, torch.Tensor]
+        - optimizer_state_dict: Dict
+        - epoch: int
+        - global_step: int
+
 Usage:
     python examples/PreExp/eqd_token_level.py -c configs/PreExp/eqd_token_level.yml
 """
@@ -168,8 +188,10 @@ class TokenLevelQuantizer(nn.Module):
         using_znorm: bool = False,
     ):
         super().__init__()
-        self.codebook_size = codebook_size  # K
-        self.codebook_dim = codebook_dim  # D
+        # K: number of codebook vectors
+        self.codebook_size = codebook_size
+        # D: dimension of each codebook vector
+        self.codebook_dim = codebook_dim
         self.beta = beta
         self.using_znorm = using_znorm
 
@@ -224,11 +246,13 @@ class TokenLevelQuantizer(nn.Module):
                 ↓
             Output: q [B, L, D], indices [B, L], vq_loss scalar
         """
-        B, L, D = z.shape  # Batch, Length, Dimension (e.g., [4, 512, 256])
+        # Batch, Length, Dimension (e.g., [4, 512, 256])
+        B, L, D = z.shape
 
         # Flatten for batch processing: [B, L, D] → [B*L, D]
         # Each token position becomes an independent sample
-        z_flat = z.reshape(B * L, D)  # [B*L, D] (e.g., [2048, 256])
+        # (e.g., [2048, 256])
+        z_flat = z.reshape(B * L, D)
 
         # Find nearest codebook entry for each token position
         # z_flat: [B*L, D], embedding.weight: [K, D]
@@ -238,47 +262,48 @@ class TokenLevelQuantizer(nn.Module):
             z_flat = F.normalize(z_flat, dim=1)
             # embedding.weight [K, D] → normalize → [K, D]
             embed_norm = F.normalize(self.embedding.weight, dim=1)
-            # Compute pairwise distances: [B*L, D] vs [K, D] → [B*L, K]
-            distances = torch.cdist(z_flat, embed_norm)  # [B*L, K]
+            # Compute pairwise distances
+            distances = torch.cdist(z_flat, embed_norm)
         else:
             # Standard L2 distance computation (more efficient)
             # ||z - e||² = ||z||² + ||e||² - 2 * z·e
-            # z_sq: squared norm of z for each token [B*L, 1]
-            z_sq = (z_flat**2).sum(dim=1, keepdim=True)  # [B*L, 1]
-            # e_sq: squared norm of each codebook entry [K]
-            e_sq = (self.embedding.weight**2).sum(dim=1)  # [K]
-            # z_e: dot product between z and each codebook entry [B*L, K]
-            z_e = z_flat @ self.embedding.weight.t()  # [B*L, K]
-            # distances: full L2 distance matrix [B*L, K]
-            distances = z_sq + e_sq.unsqueeze(0) - 2 * z_e  # [B*L, K]
+            # z_sq: squared norm of z for each token
+            z_sq = (z_flat**2).sum(dim=1, keepdim=True)
+            # e_sq: squared norm of each codebook entry
+            e_sq = (self.embedding.weight**2).sum(dim=1)
+            # z_e: dot product between z and each codebook entry
+            z_e = z_flat @ self.embedding.weight.t()
+            # distances: full L2 distance matrix
+            distances = z_sq + e_sq.unsqueeze(0) - 2 * z_e
 
         # Get index of nearest codebook entry for each token
-        # distances [B*L, K] → argmin over K → indices_flat [B*L]
-        indices_flat = distances.argmin(dim=1)  # [B*L]
+        # distances → argmin over K → indices_flat
+        indices_flat = distances.argmin(dim=1)
         # Reshape to original batch format: [B*L] → [B, L]
-        indices = indices_flat.reshape(B, L)  # [B, L]
+        indices = indices_flat.reshape(B, L)
 
         # Lookup quantized vectors from codebook
-        # indices_flat [B*L] → embedding → q_flat [B*L, D]
-        q_flat = self.embedding(indices_flat)  # [B*L, D]
+        # indices_flat → embedding → q_flat
+        q_flat = self.embedding(indices_flat)
         # Reshape to original format: [B*L, D] → [B, L, D]
-        q = q_flat.reshape(B, L, D)  # [B, L, D]
+        q = q_flat.reshape(B, L, D)
 
         # Compute VQ Loss
         # Commitment loss: encourages encoder output to stay close to codebook
         # ||z - sg[q]||² where sg = stop gradient (gradient flows to encoder only)
-        commitment_loss = F.mse_loss(z, q.detach())  # scalar
+        commitment_loss = F.mse_loss(z, q.detach())
         # Codebook loss: encourages codebook entries to move toward encoder outputs
         # ||sg[z] - q||² where sg = stop gradient (gradient flows to codebook only)
-        codebook_loss = F.mse_loss(z.detach(), q)  # scalar
+        codebook_loss = F.mse_loss(z.detach(), q)
         # Total VQ loss with commitment weight
-        vq_loss = codebook_loss + self.beta * commitment_loss  # scalar
+        vq_loss = codebook_loss + self.beta * commitment_loss
 
         # Straight-through estimator for gradient flow
         # In forward pass: returns q (quantized values)
         # In backward pass: gradient flows through z (original encoder output)
         # This allows gradients to propagate back through the quantization
-        q = z + (q - z).detach()  # [B, L, D]
+        # [B, L, D]
+        q = z + (q - z).detach()
 
         return q, indices, vq_loss
 
@@ -348,7 +373,8 @@ class DualTokenizerVQAELoss(nn.Module):
                 ↓
             Output: total_loss scalar, loss_dict
         """
-        B, L, V = logits.shape  # Batch, Length, Vocab_size (e.g., [4, 512, 50257])
+        # Batch, Length, Vocab_size (e.g., [4, 512, 50257])
+        B, L, V = logits.shape
 
         # Tokenize target texts with decoder tokenizer
         # texts List[str] → tokens dict with input_ids and attention_mask
@@ -359,22 +385,22 @@ class DualTokenizerVQAELoss(nn.Module):
             truncation=True,
             return_tensors="pt",
         )
-        # target_ids [B, L]: token IDs for target text
-        target_ids = tokens["input_ids"].to(logits.device)  # [B, L]
-        # attention_mask [B, L]: 1 for real tokens, 0 for padding
-        attention_mask = tokens["attention_mask"].to(logits.device)  # [B, L]
+        # target_ids: token IDs for target text [B, L]
+        target_ids = tokens["input_ids"].to(logits.device)
+        # attention_mask: 1 for real tokens, 0 for padding [B, L]
+        attention_mask = tokens["attention_mask"].to(logits.device)
 
         # Shift for autoregressive prediction (teacher forcing)
         # In autoregressive models, position t predicts token at position t+1
         # pred_logits: use logits from positions 0 to L-2 to predict 1 to L-1
         # [B, L, V] → [B, L-1, V]
-        pred_logits = logits[:, :-1, :]  # [B, L-1, V]
+        pred_logits = logits[:, :-1, :]
         # targets: target tokens from positions 1 to L-1
         # [B, L] → [B, L-1]
-        targets = target_ids[:, 1:]  # [B, L-1]
+        targets = target_ids[:, 1:]
         # mask: corresponding attention masks for target positions
         # [B, L] → [B, L-1]
-        mask = attention_mask[:, 1:]  # [B, L-1]
+        mask = attention_mask[:, 1:]
 
         # Set padding positions to ignore_index so they don't contribute to loss
         # targets [B, L-1]: replace padding positions with ignore_index
@@ -383,13 +409,13 @@ class DualTokenizerVQAELoss(nn.Module):
         # Compute cross-entropy reconstruction loss
         # Flatten for cross_entropy: [(B*(L-1)), V] vs [(B*(L-1))]
         recon_loss = F.cross_entropy(
-            pred_logits.reshape(-1, V),  # [(B*(L-1)), V]
-            targets.reshape(-1),  # [(B*(L-1))]
+            pred_logits.reshape(-1, V),
+            targets.reshape(-1),
             ignore_index=self.ignore_index,
-        )  # scalar
+        )
 
         # Total loss: reconstruction + weighted VQ loss
-        total_loss = recon_loss + self.vq_weight * vq_loss  # scalar
+        total_loss = recon_loss + self.vq_weight * vq_loss
 
         return total_loss, {
             "recon_loss": recon_loss.item(),
@@ -417,22 +443,25 @@ def train_token_level(config: dict):
     # =================================================================
     # Extract config
     # =================================================================
-    enc_cfg = config["encoder"]
-    dec_cfg = config["decoder"]
-    quant_cfg = config["quantizer"]
-    latent_dim = config.get("latent_dim", 256)
+    model_cfg = config["model"]
+    train_cfg = config["training"]
     data_cfg = config["data"]
     env_cfg = config["environment"]
     log_cfg = config["log"]
 
-    batch_size = config["batch_size"]
-    learning_rate = config["learning_rate"]
-    weight_decay = config.get("weight_decay", 0.0)
-    num_epochs = config["num_epochs"]
-    warmup_steps = config.get("warmup_steps", 100)
-    gradient_clip = config["gradient"]["max_grad_norm"]
-    vq_loss_weight = config.get("vq_loss_weight", 1.0)
-    resume = config.get("resume", True)
+    enc_cfg = model_cfg["encoder"]
+    dec_cfg = model_cfg["decoder"]
+    quant_cfg = model_cfg["quantizer"]
+    latent_dim = model_cfg["latent_dim"]
+
+    batch_size = train_cfg["batch_size"]
+    learning_rate = train_cfg["learning_rate"]
+    weight_decay = train_cfg["weight_decay"]
+    num_epochs = train_cfg["num_epochs"]
+    warmup_steps = train_cfg["warmup_steps"]
+    gradient_clip = train_cfg["gradient"]["max_grad_norm"]
+    vq_loss_weight = train_cfg["vq_loss_weight"]
+    resume = train_cfg["resume"]
 
     log_interval = log_cfg["log_step_interval"]
     checkpoint_interval = log_cfg["checkpoint_step_interval"]

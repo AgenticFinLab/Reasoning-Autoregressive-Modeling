@@ -9,9 +9,48 @@ GPU Assignment (Automatic):
     - Multiple GPUs: Distribute by priority (decoder gets GPU with most free memory)
 
     Config example (configs/PreExp/c3_original.yml):
-        model_devices:
-          encoder: {device: auto, priority: 2}  # second best GPU
-          decoder: {device: auto, priority: 1}  # best GPU (most free memory)
+        environment:
+          device_map:
+            encoder: {device: auto, priority: 2}
+            decoder: {device: auto, priority: 1}
+
+Output Structure:
+    EXPERIMENT/PreExp/c3_original/
+    ├── checkpoints/
+    │   ├── checkpoint-epoch{N}-start.pt        # Epoch-start checkpoint
+    │   ├── checkpoint-epoch{N}-step{S}-global{G}.pt  # Interval checkpoint
+    │   └── checkpoint_final.pt                 # Final model checkpoint
+    └── logs/
+        ├── training.log                        # Training log file
+        ├── train_config.json                   # Training config snapshot
+        ├── training_history.json               # Training history (loss, lr, etc.)
+        └── samples/
+            ├── block_0.json                    # Reconstruction samples (block-based)
+            ├── block_1.json
+            └── ...
+
+Output File Formats:
+    Checkpoint (*.pt):
+        - encoder_state_dict: Dict[str, torch.Tensor]
+        - decoder_state_dict: Dict[str, torch.Tensor]
+        - encoder_optimizer_state_dict: Dict
+        - decoder_optimizer_state_dict: Dict
+        - encoder_scheduler_state_dict: Dict
+        - decoder_scheduler_state_dict: Dict
+        - epoch: int
+        - global_step: int
+        - metadata: CheckpointMetadata
+
+    training_history.json:
+        - config: TrainingConfig snapshot
+        - steps: List[TrainingStep]
+          - epoch, step_in_epoch, global_step
+          - total_loss, recon_loss, avg_loss
+          - lr_encoder, lr_decoder
+
+    samples/block_*.json:
+        - List[ReconstructionSample]
+          - index, original, reconstructed
 
 Architecture:
     ┌─────────────────────────────────────────────────────────────────────┐
@@ -42,7 +81,6 @@ Dimensions:
 import argparse
 from pathlib import Path
 
-from lmbase.dataset import registry
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -52,27 +90,28 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 from transformers import AutoTokenizer
 
-from ram.models.encoder import build_c3_encoder
-from ram.models.decoder import build_c3_decoder
-from ram.utils import (
-    load_config,
-    setup_environment,
-    collate_fn_text,
-    find_latest_checkpoint,
-    assign_model_devices,
-    decode_logits_to_text,
-)
-from ram.utils.tools import save_checkpoint, resume_from_checkpoint
+from lmbase.dataset import registry
 from ram import (
-    TrainingConfig,
-    TrainingStep,
-    TrainingHistory,
-    TrainingLogger,
     CheckpointData,
     CheckpointMetadata,
     ReconstructionSampleStore,
+    TrainingConfig,
+    TrainingHistory,
+    TrainingLogger,
+    TrainingStep,
     create_reconstruction_samples,
 )
+from ram.models.decoder import build_c3_decoder
+from ram.models.encoder import build_c3_encoder
+from ram.utils import (
+    assign_model_devices,
+    collate_fn_text,
+    decode_logits_to_text,
+    find_latest_checkpoint,
+    load_config,
+    setup_environment,
+)
+from ram.utils.tools import resume_from_checkpoint, save_checkpoint
 
 
 class C3ReconstructionLoss(nn.Module):
@@ -187,25 +226,28 @@ def train_c3(config: dict):
     # =================================================================
     # Extract config
     # =================================================================
-    enc_cfg = config["encoder"]
-    dec_cfg = config["decoder"]
+    model_cfg = config["model"]
+    train_cfg = config["training"]
     data_cfg = config["data"]
     env_cfg = config["environment"]
     log_cfg = config["log"]
 
+    enc_cfg = model_cfg["encoder"]
+    dec_cfg = model_cfg["decoder"]
+
     # Training hyperparameters
-    batch_size = config["batch_size"]
-    learning_rate = config["learning_rate"]
-    weight_decay = config.get("weight_decay", 0.0)
-    num_epochs = config["num_epochs"]
-    warmup_ratio = config.get("warmup_ratio", 0.01)
-    gradient_clip = config["gradient"]["max_grad_norm"]
-    gradient_accumulation_steps = config["gradient"]["accumulation_steps"]
-    bf16 = config.get("bf16", True)
-    resume = config.get("resume", True)
+    batch_size = train_cfg["batch_size"]
+    learning_rate = train_cfg["learning_rate"]
+    weight_decay = train_cfg["weight_decay"]
+    num_epochs = train_cfg["num_epochs"]
+    warmup_ratio = train_cfg["warmup_ratio"]
+    gradient_clip = train_cfg["gradient"]["max_grad_norm"]
+    gradient_accumulation_steps = train_cfg["gradient"]["accumulation_steps"]
+    bf16 = train_cfg["bf16"]
+    resume = train_cfg["resume"]
 
     # Model device config (from environment.device_map)
-    model_devices_cfg = config["environment"]["device_map"]
+    model_devices_cfg = env_cfg["device_map"]
 
     # Logging intervals
     log_interval = log_cfg["log_step_interval"]
@@ -234,8 +276,7 @@ def train_c3(config: dict):
     # Dimensions
     # =================================================================
     # Use official naming: latent_token_len (C3 config key)
-    # Backward compatibility: also accept num_latent_tokens
-    N = enc_cfg.get("latent_token_len", enc_cfg.get("num_latent_tokens", 32))
+    N = enc_cfg["latent_token_len"]
     M = enc_cfg["max_length"]
 
     # Setup environment (seed only, device assignment is done by assign_model_devices)
@@ -315,7 +356,7 @@ def train_c3(config: dict):
     # =================================================================
     logger.info("[4] Setting up loss function...")
     # Read loss config
-    loss_cfg = config["loss"]
+    loss_cfg = train_cfg["loss"]
     ignore_index = loss_cfg["ignore_index"]
     loss_fn = C3ReconstructionLoss(
         tokenizer=tokenizer,

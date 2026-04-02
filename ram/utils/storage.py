@@ -100,7 +100,7 @@ class TrainingHistory:
         if self.path.exists():
             data = load_json(self.path)
             self.steps = []
-            for s in data.get("steps", []):
+            for s in data["steps"]:
                 samples = [
                     ReconstructionSample(**rs)
                     for rs in s.pop("reconstruction_samples", [])

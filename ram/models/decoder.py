@@ -353,10 +353,7 @@ class C3Decoder(nn.Module):
         pretrained = config["pretrained"]
         freeze = config["freeze"]
         # Use official naming: latent_token_len (C3 config key)
-        # Backward compatibility: also accept num_latent_tokens
-        latent_token_len = config.get(
-            "latent_token_len", config.get("num_latent_tokens", 32)
-        )
+        latent_token_len = config["latent_token_len"]
 
         self.model_name = model_name
         self.encoder_hidden_dim = encoder_hidden_dim

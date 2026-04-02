@@ -70,6 +70,26 @@ Why This Might NOT Work for Text
     3. Coarse-to-fine may not match text structure
 
 ================================================================================
+Output Structure:
+================================================================================
+    EXPERIMENT/PreExp/eqd_scales/
+    ├── checkpoints/
+    │   ├── checkpoint-epoch{N}-step{S}.pt   # Interval checkpoint
+    │   └── checkpoint_final.pt              # Final model checkpoint
+    └── logs/
+        ├── training.log                    # Training log file
+        └── train_config.json               # Training config snapshot
+
+Output File Formats:
+    Checkpoint (*.pt):
+        - encoder_state_dict: Dict[str, torch.Tensor]
+        - decoder_state_dict: Dict[str, torch.Tensor]
+        - quantizer_state_dict: Dict[str, torch.Tensor]
+        - optimizer_state_dict: Dict
+        - epoch: int
+        - global_step: int
+
+================================================================================
 Usage
 ================================================================================
     python examples/PreExp/eqd_scales.py -c configs/PreExp/eqd_scales.yml
@@ -126,23 +146,26 @@ def train_scales(config: dict):
     # =================================================================
     # Extract config
     # =================================================================
-    enc_cfg = config["encoder"]
-    dec_cfg = config["decoder"]
-    quant_cfg = config["quantizer"]
-    latent_dim = config.get("latent_dim", 256)
+    model_cfg = config["model"]
+    train_cfg = config["training"]
     data_cfg = config["data"]
     env_cfg = config["environment"]
     log_cfg = config["log"]
 
+    enc_cfg = model_cfg["encoder"]
+    dec_cfg = model_cfg["decoder"]
+    quant_cfg = model_cfg["quantizer"]
+    latent_dim = model_cfg["latent_dim"]
+
     # Training hyperparameters
-    batch_size = config["batch_size"]
-    learning_rate = config["learning_rate"]
-    weight_decay = config.get("weight_decay", 0.0)
-    num_epochs = config["num_epochs"]
-    warmup_steps = config.get("warmup_steps", 100)
-    gradient_clip = config["gradient"]["max_grad_norm"]
-    vq_loss_weight = config.get("vq_loss_weight", 1.0)
-    resume = config.get("resume", True)
+    batch_size = train_cfg["batch_size"]
+    learning_rate = train_cfg["learning_rate"]
+    weight_decay = train_cfg["weight_decay"]
+    num_epochs = train_cfg["num_epochs"]
+    warmup_steps = train_cfg["warmup_steps"]
+    gradient_clip = train_cfg["gradient"]["max_grad_norm"]
+    vq_loss_weight = train_cfg["vq_loss_weight"]
+    resume = train_cfg["resume"]
 
     # Logging intervals
     log_interval = log_cfg["log_step_interval"]

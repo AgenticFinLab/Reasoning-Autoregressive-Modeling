@@ -1,7 +1,7 @@
 """Encoder-Decoder Training: Simple Text Reconstruction.
 
 Usage:
-    python examples/uTEST/test_ed_train.py -c configs/uTEST/ed_train.yml
+    python examples/PreExp/ed_original.py -c configs/PreExp/ed_original.yml
 
 Task:
     Train encoder-decoder to reconstruct input text.
@@ -12,6 +12,23 @@ Config (example: B=4, L=64, D=768, V=50257):
     - L: max sequence length
     - D: hidden dimension (BERT=768, GPT2=768)
     - V: vocabulary size (GPT2=50257)
+
+Output Structure:
+    EXPERIMENT/PreExp/ed_original/
+    ├── checkpoints/
+    │   ├── checkpoint-epoch{N}-step{S}.pt   # Interval checkpoint
+    │   └── checkpoint_final.pt              # Final model checkpoint
+    └── logs/
+        ├── training.log                    # Training log file
+        └── train_config.json               # Training config snapshot
+
+Output File Formats:
+    Checkpoint (*.pt):
+        - encoder_state_dict: Dict[str, torch.Tensor]
+        - decoder_state_dict: Dict[str, torch.Tensor]
+        - optimizer_state_dict: Dict
+        - epoch: int
+        - global_step: int
 
 Pipeline:
     ┌─────────────────────┐
@@ -70,27 +87,26 @@ from pathlib import Path
 
 import torch
 import torch.nn as nn
+from lmbase.dataset import registry
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import LinearLR
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-
-from lmbase.dataset import registry
 from transformers import AutoTokenizer
 
-from ram.models.encoder import build_encoder
-from ram.models.decoder import build_decoder
-from ram.utils import (
-    load_config,
-    setup_environment,
-    collate_fn_text,
-    decode_logits_to_text,
-    find_latest_checkpoint,
-    resume_from_checkpoint,
-)
 from ram.losses import (
     build_loss_from_config,
     validate_loss_config,
+)
+from ram.models.decoder import build_decoder
+from ram.models.encoder import build_encoder
+from ram.utils import (
+    collate_fn_text,
+    decode_logits_to_text,
+    find_latest_checkpoint,
+    load_config,
+    resume_from_checkpoint,
+    setup_environment,
 )
 
 
@@ -111,20 +127,23 @@ def train_ed(config: dict):
     # =================================================================
     # Extract config
     # =================================================================
-    enc_cfg = config["encoder"]
-    dec_cfg = config["decoder"]
+    model_cfg = config["model"]
+    train_cfg = config["training"]
     data_cfg = config["data"]
     env_cfg = config["environment"]
     log_cfg = config["log"]
 
+    enc_cfg = model_cfg["encoder"]
+    dec_cfg = model_cfg["decoder"]
+
     # Training hyperparameters
-    batch_size = config["batch_size"]
-    learning_rate = config["learning_rate"]
-    weight_decay = config.get("weight_decay", 0.0)
-    num_epochs = config["num_epochs"]
-    warmup_steps = config.get("warmup_steps", 100)
-    gradient_clip = config["gradient"]["max_grad_norm"]
-    resume = config.get("resume", True)
+    batch_size = train_cfg["batch_size"]
+    learning_rate = train_cfg["learning_rate"]
+    weight_decay = train_cfg["weight_decay"]
+    num_epochs = train_cfg["num_epochs"]
+    warmup_steps = train_cfg["warmup_steps"]
+    gradient_clip = train_cfg["gradient"]["max_grad_norm"]
+    resume = train_cfg["resume"]
 
     # Logging intervals
     # Print & save samples/history

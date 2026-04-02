@@ -31,60 +31,60 @@ environment:
     decoder:
       device: "auto"
       priority: 1
-  dataloader_num_workers: 8
-  tf32: true
 
 # =============================================================================
 # BLOCK 3: Model Configuration
 # =============================================================================
-lm_type: "huggingface"
-
-encoder:
-  lm_type: "huggingface"
-  lm_name: "YourEncoderModel"
-  inference_config:
-    device: "auto"
-    torch_dtype: "auto"
-  pretrained: true
-  freeze: false
-
-quantizer:
-  type: "token_level"
-  codebook_size: 8192
+model:
+  lm_type: &lm_type "huggingface"
   latent_dim: 256
-  commitment_cost: 0.25
-  num_codebooks: 1
-  share_codebook: true
 
-decoder:
-  lm_type: "huggingface"
-  lm_name: "YourDecoderModel"
-  inference_config:
-    device: "auto"
-    torch_dtype: "auto"
-  pretrained: true
-  freeze: false
+  encoder:
+    lm_type: *lm_type
+    model_name: "YourEncoderModel"
+    inference_config:
+      torch_dtype: "auto"
+    pretrained: &pretrained true
+    freeze: &freeze false
+
+  quantizer:
+    type: "token_level"
+    codebook_size: 8192
+    latent_dim: 256
+    commitment_cost: 0.25
+    num_codebooks: 1
+    share_codebook: true
+
+  decoder:
+    lm_type: *lm_type
+    model_name: "YourDecoderModel"
+    inference_config:
+      torch_dtype: "auto"
+    pretrained: *pretrained
+    freeze: *freeze
 
 # =============================================================================
 # BLOCK 4: Training Configuration
 # =============================================================================
-batch_size: 1
-num_epochs: 1
+training:
+  batch_size: 1
+  num_epochs: 1
 
-gradient:
-  max_grad_norm: 1.0
-  accumulation_steps: 1
-  checkpointing: true
+  gradient:
+    max_grad_norm: 1.0
+    accumulation_steps: 1
+    checkpointing: true
 
-trainable: true
-use_value_head: false
+  trainable: true
+  use_value_head: false
 
-learning_rate: 1.0e-5
-weight_decay: 0.0
-warmup_ratio: 0.01
-lr_scheduler_type: "cosine"
-bf16: true
-resume: true
+  learning_rate: 1.0e-5
+  weight_decay: 0.0
+  warmup_steps: 100
+  vq_loss_weight: 1.0
+  lr_scheduler_type: "cosine"
+  bf16: true
+  resume: true
 
 # =============================================================================
 # BLOCK 5: Log Configuration
@@ -94,7 +94,6 @@ log:
   log_level: "INFO"
   checkpoint_step_interval: 100
   log_step_interval: 10
-  save_total_limit: 1
 
 # =============================================================================
 # BLOCK 6: Evaluation Configuration
