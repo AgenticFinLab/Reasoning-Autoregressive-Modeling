@@ -243,7 +243,6 @@ def train_c3(config: dict):
     warmup_ratio = train_cfg["warmup_ratio"]
     gradient_clip = train_cfg["gradient"]["max_grad_norm"]
     gradient_accumulation_steps = train_cfg["gradient"]["accumulation_steps"]
-    use_gradient_checkpointing = train_cfg["gradient"]["checkpointing"]
     bf16 = train_cfg["bf16"]
     resume = train_cfg["resume"]
 
@@ -340,15 +339,6 @@ def train_c3(config: dict):
     logger.info(f"    hidden_dim: {D_dec}")
     logger.info(f"    vocab_size: {V}")
     logger.info(f"    mm_projector: {D_enc} -> {D_dec}")
-
-    # =================================================================
-    # Enable gradient checkpointing (saves activation memory)
-    # =================================================================
-    if use_gradient_checkpointing:
-        encoder.model.gradient_checkpointing_enable()
-        decoder.model.gradient_checkpointing_enable()
-        logger.info("")
-        logger.info("    Gradient checkpointing: ENABLED (saves ~50% activation memory)")
     logger.info("")
 
     # =================================================================
