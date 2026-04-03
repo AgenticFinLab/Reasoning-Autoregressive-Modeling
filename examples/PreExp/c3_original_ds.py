@@ -69,7 +69,6 @@ from transformers import AutoTokenizer
 
 from lmbase.dataset import registry
 from ram import (
-    CheckpointMetadata,
     ReconstructionSampleStore,
     TrainingConfig,
     TrainingHistory,
@@ -328,6 +327,9 @@ def train_c3_ds(config: dict, ds_config: dict):
     if is_main_process:
         logger.info("[5] Loading dataset...")
 
+    # Get batch size from DeepSpeed config (zero2.json)
+    per_device_batch_size = ds_config["train_micro_batch_size_per_gpu"]
+
     dataset = registry.get(data_cfg, split=data_cfg["split"])
 
     # Use DistributedSampler for multi-GPU
@@ -360,25 +362,19 @@ def train_c3_ds(config: dict, ds_config: dict):
     if is_main_process:
         logger.info("[7] Initializing DeepSpeed...")
 
-    # Get batch size from DeepSpeed config (zero2.json)
-    per_device_batch_size = ds_config["train_micro_batch_size_per_gpu"]
-
-    # Combine encoder and decoder parameters
-    model_parameters = list(encoder.parameters()) + list(decoder.parameters())
-
     # DeepSpeed config with model parameters
     ds_config_with_model = ds_config.copy()
     ds_config_with_model["train_micro_batch_size_per_gpu"] = per_device_batch_size
 
     # Initialize encoder with DeepSpeed
-    model_engine_encoder, encoder_optimizer, _, _ = deepspeed.initialize(
+    model_engine_encoder, _, _, _ = deepspeed.initialize(
         model=encoder,
         model_parameters=encoder.parameters(),
         config=ds_config_with_model,
     )
 
     # Initialize decoder with DeepSpeed
-    model_engine_decoder, decoder_optimizer, _, _ = deepspeed.initialize(
+    model_engine_decoder, _, _, _ = deepspeed.initialize(
         model=decoder,
         model_parameters=decoder.parameters(),
         config=ds_config_with_model,
@@ -399,9 +395,6 @@ def train_c3_ds(config: dict, ds_config: dict):
 
     # Setup training history (only on main process)
     # =================================================================
-    total_steps = len(dataloader) * num_epochs
-    warmup_steps = int(total_steps * warmup_ratio)
-
     # Initialize to None for non-main processes
     history = None
     samples_store = None
@@ -449,7 +442,7 @@ def train_c3_ds(config: dict, ds_config: dict):
                 checkpoint_dir=str(checkpoint_dir),
                 tag=ckpt_path,
             )
-            _, _, _, dec_client_state = model_engine_decoder.load_checkpoint(
+            _, _, _, _ = model_engine_decoder.load_checkpoint(
                 checkpoint_dir=str(checkpoint_dir),
                 tag=ckpt_path,
             )
@@ -484,7 +477,7 @@ def train_c3_ds(config: dict, ds_config: dict):
         else:
             pbar = dataloader
 
-        for batch_idx, batch_texts in enumerate(pbar):
+        for _, batch_texts in enumerate(pbar):
             # Tokenize
             tokens = tokenizer(
                 batch_texts,
@@ -654,7 +647,7 @@ if __name__ == "__main__":
 
     # Load configs
     config = load_config(args.config)
-    with open(args.deepspeed, "r") as f:
+    with open(args.deepspeed, "r", encoding="utf-8") as f:
         ds_config = json.load(f)
 
     train_c3_ds(config, ds_config)
