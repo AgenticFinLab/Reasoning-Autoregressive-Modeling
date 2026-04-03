@@ -1,15 +1,7 @@
 """C3 Context Cascade Compression - DeepSpeed Training.
 
 Usage:
-    # Single node, 4 GPUs
     torchrun --nproc_per_node=4 examples/PreExp/c3_original_ds.py \
-        -c configs/PreExp/c3_original_ds.yml \
-        --deepspeed configs/PreExp/zero2.json
-
-    # Multi-node (e.g., 2 nodes, 8 GPUs each)
-    torchrun --nnodes=2 --nproc_per_node=8 \
-        --node_rank=0 --master_addr="10.0.0.1" --master_port=29500 \
-        examples/PreExp/c3_original_ds.py \
         -c configs/PreExp/c3_original_ds.yml \
         --deepspeed configs/PreExp/zero2.json
 
@@ -23,13 +15,12 @@ Output Structure:
     EXPERIMENT/PreExp/c3_original_ds/
     ├── checkpoints/
     │   ├── global_step_{N}/           # DeepSpeed checkpoint format
-    │   │   ├── mp_rank_00_model_states.pt
-    │   │   └── zero_pp_rank_0_mp_rank_00_optim_states.pt
     │   └── latest -> global_step_{N}
     └── logs/
         ├── training.log
         ├── train_config.json
-        └── training_history.json
+        ├── training_history.json
+        └── terminal_output.json       # Auto-captured terminal output
 
 Architecture:
     ┌─────────────────────────────────────────────────────────────────────┐
@@ -732,28 +723,22 @@ if __name__ == "__main__":
         default=0,
         help="Local rank for distributed training (set by torchrun)",
     )
-    parser.add_argument(
-        "--capture_output",
-        type=str,
-        default="",
-        help="Path to save terminal output as JSON (e.g., EXPERIMENT/logs/capture.json)",
-    )
     args = parser.parse_args()
 
-    # Initialize output capture if requested (before DeepSpeed init)
-    tee_logger = None
-    if args.capture_output:
-        # We'll get the actual rank after DeepSpeed init, use 0 for now
-        tee_logger = TeeLogger(args.capture_output, rank=0)
-        tee_logger.start()
-
-    # Load configs
+    # Load configs to determine capture path
     config = load_config(args.config)
     with open(args.deepspeed, "r", encoding="utf-8") as f:
         ds_config = json.load(f)
 
+    # Auto-capture terminal output to config's log folder
+    log_folder = Path(config["log"]["save_folder"])
+    capture_path = log_folder / "logs" / "terminal_output.json"
+
+    # Start capturing output (before DeepSpeed init)
+    tee_logger = TeeLogger(capture_path, rank=0)
+    tee_logger.start()
+
     try:
         train_c3_ds(config, ds_config, tee_logger)
     finally:
-        if tee_logger:
-            tee_logger.stop()
+        tee_logger.stop()
