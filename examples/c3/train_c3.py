@@ -1,22 +1,22 @@
-"""C3 Context Cascade Compression - Basic Training (Single/Multi-GPU).
+"""C3 Context Cascade Compression - Basic Training (Multi-GPU Pipeline Parallel).
 
 Usage:
-    # Single GPU
     python examples/c3/train_c3.py -c configs/c3/config.yaml
 
-    # Multi-GPU (pipeline parallel)
-    python examples/c3/train_c3.py -c configs/c3/config.yaml
+GPU Assignment (Automatic Pipeline Parallel):
+    The system automatically assigns encoder and decoder to different GPUs based on
+    available memory. This is pipeline parallelism - encoder and decoder run on
+    separate GPUs with latent tensor transfer between them.
 
-GPU Assignment (Automatic):
-    The system automatically assigns models to GPUs based on available memory:
-    - Single GPU: All models on the same GPU
-    - Multiple GPUs: Distribute by priority (decoder gets GPU with most free memory)
-
-    Config example (configs/c3/config.yaml):
+    Config (configs/c3/config.yaml):
         environment:
           device_map:
-            encoder: {device: auto, priority: 2}
-            decoder: {device: auto, priority: 1}
+            encoder: {device: auto, priority: 2}  # Lower priority = assigned second
+            decoder: {device: auto, priority: 1}  # Higher priority = assigned first (more memory)
+
+    Assignment Logic:
+        - Single GPU available: Both models on same GPU (not recommended, OOM risk)
+        - Multiple GPUs: Encoder and decoder on different GPUs (default behavior)
 
 Output Structure:
     EXPERIMENT/c3/
@@ -81,97 +81,8 @@ from ram.utils import (
 )
 from ram.utils.tools import resume_from_checkpoint, save_checkpoint
 
-# Import unified C3 model
-from model import build_c3_model
-
-
-class C3ReconstructionLoss(nn.Module):
-    """C3 Reconstruction Loss with Teacher Forcing.
-
-    Training Flow (matching official C3):
-        1. context_ids (text to compress) -> Encoder -> latent_tokens
-        2. latent_tokens + input_ids (teacher forcing) -> Decoder -> logits
-        3. logits vs labels -> cross-entropy loss
-
-    Official Reference:
-        third-part/C3-Context-Cascade-Compression-main/C3-master/C3/model/C3.py
-        Lines 182-246: forward function with labels
-        Lines 224-234: loss computation
-    """
-
-    def __init__(
-        self,
-        tokenizer,
-        max_length: int,
-        ignore_index: int = -100,
-    ):
-        super().__init__()
-        self.tokenizer = tokenizer
-        self.max_length = max_length
-        self.ignore_index = ignore_index
-
-    def forward(self, logits, labels, latent_token_len):
-        """Compute reconstruction loss with teacher forcing.
-
-        Args:
-            logits: [B, L_total, V] decoder output
-                L_total = N (latent) + L (text tokens)
-            labels: [B, L] target token IDs (shifted for next-token prediction)
-            latent_token_len: int, number of latent tokens N (official naming)
-
-        Returns:
-            loss: scalar
-            loss_dict: dict with loss info
-
-        Dimensions:
-            logits: [B, N+L, V] where N = latent_token_len, L = text length
-            labels: [B, L] target token IDs
-
-        Loss Computation (official Lines 224-234):
-            # Shift logits and labels for autoregressive prediction
-            shift_logits = logits[..., :-1, :].contiguous()
-            shift_labels = labels[..., 1:].contiguous()
-            loss = CrossEntropyLoss(shift_logits, shift_labels)
-        """
-        # Shape: [B, N+L, V] where N = latent_token_len, L = text length
-        _, _, V = logits.shape
-        N = latent_token_len
-
-        # Shift for autoregressive prediction
-        # logits: [B, N+L, V] -> shift_logits: [B, N+L-1, V]
-        # labels: [B, L] -> shift_labels: [B, L-1]
-        # shift_logits shape: [B, L-1, V]
-        # shift_labels shape: [B, L-1]
-        shift_logits = logits[:, N:-1, :].contiguous()
-        shift_labels = labels[:, 1:].contiguous()
-
-        # Mask padding positions
-        shift_labels = shift_labels.masked_fill(
-            shift_labels == self.ignore_index, self.ignore_index
-        )
-
-        # Compute cross-entropy loss (reconstruction loss)
-        recon_loss = F.cross_entropy(
-            shift_logits.reshape(-1, V),
-            shift_labels.reshape(-1),
-            ignore_index=self.ignore_index,
-        )
-
-        # Currently only one loss component, but structure supports multiple:
-        # - recon_loss: reconstruction loss (cross-entropy)
-        # - reg_loss: regularization (if added in future)
-        # - total_loss: sum of all components
-        # Sum of all loss components
-        recon_loss_val = recon_loss.item()
-        total_loss = recon_loss
-
-        # Return total loss and loss dictionary for logging
-        # recon_loss: Reconstruction loss (cross-entropy)
-        # total_loss: Total = sum of all components
-        return total_loss, {
-            "recon_loss": recon_loss_val,
-            "total_loss": recon_loss_val,
-        }
+# Import loss from ram.losses
+from ram.losses import DualTokenizerReconstructionLoss
 
 
 def train_c3(config: dict):
@@ -179,14 +90,13 @@ def train_c3(config: dict):
     Train C3 for text compression and reconstruction.
 
     Supports:
-        - Single GPU mode: encoder and decoder on same GPU
-        - Pipeline parallel mode: encoder on GPU 0, decoder on GPU 1
+        - Multi-GPU pipeline parallel: encoder on GPU 0, decoder on GPU 1
 
     Training Flow (matching official C3):
-        Step 1: Tokenize texts -> input_ids [B, L], labels [B, L]
+        Step 1: Tokenize texts -> input_ids [B, L]
         Step 2: texts -> C3Encoder -> latent_tokens [B, N, D_enc]
         Step 3: latent_tokens + input_ids (teacher forcing) -> C3Decoder -> logits [B, N+L, V]
-        Step 4: logits vs labels -> cross-entropy loss
+        Step 4: logits + texts -> DualTokenizerReconstructionLoss -> loss
         Step 5: loss.backward() -> optimizer.step() -> update weights
 
     Official Reference:
@@ -329,12 +239,21 @@ def train_c3(config: dict):
     # Read loss config
     loss_cfg = train_cfg["loss"]
     ignore_index = loss_cfg["ignore_index"]
-    loss_fn = C3ReconstructionLoss(
-        tokenizer=tokenizer,
-        max_length=M,
+    label_smoothing = loss_cfg.get("label_smoothing", 0.0)
+
+    # Use DualTokenizerReconstructionLoss from ram.losses
+    # This handles the C3 case with latent_token_len parameter
+    loss_fn = DualTokenizerReconstructionLoss(
+        dec_tokenizer=tokenizer,
+        dec_vocab_size=V,
         ignore_index=ignore_index,
+        max_length=M,
+        label_smoothing=label_smoothing,
+        latent_token_len=N,
     )
-    logger.info(f"    Loss: C3ReconstructionLoss, ignore_index={ignore_index}")
+    logger.info(f"    Loss: DualTokenizerReconstructionLoss")
+    logger.info(f"    ignore_index={ignore_index}, label_smoothing={label_smoothing}")
+    logger.info(f"    latent_token_len={N}")
     logger.info("")
 
     # =================================================================
@@ -487,9 +406,8 @@ def train_c3(config: dict):
         for batch_idx, batch_texts in enumerate(pbar):
             # =========================================================
             # Step 1: Tokenize texts for teacher forcing
-            # context_ids: for encoder (text to compress)
             # input_ids: for decoder (teacher forcing input)
-            # labels: for loss computation (target)
+            # Note: DualTokenizerReconstructionLoss handles target tokenization internally
             # =========================================================
             tokens = tokenizer(
                 batch_texts,
@@ -501,12 +419,6 @@ def train_c3(config: dict):
             # Token outputs: [B, L]
             input_ids = tokens["input_ids"]
             attention_mask = tokens["attention_mask"]
-
-            # Labels: shift input_ids for next-token prediction
-            # labels[i] = input_ids[i, 1:] (predict next token)
-            labels = input_ids.clone()
-            # Mask padding tokens in labels
-            labels[attention_mask == 0] = ignore_index
 
             # =========================================================
             # Step 2: Encode on encoder device
@@ -534,11 +446,18 @@ def train_c3(config: dict):
             # =========================================================
             # Step 5: Compute loss
             # =========================================================
-            labels_dev = labels.to(decoder_device)
+            # DualTokenizerReconstructionLoss expects original texts
+            # It will tokenize them with decoder's tokenizer internally
             with torch.amp.autocast(
                 device_type="cuda", dtype=torch.float32, enabled=False
             ):
-                loss, loss_dict = loss_fn(logits, labels_dev, N)
+                loss, dec_target_ids = loss_fn(logits, batch_texts)
+
+            # Create loss dict for logging
+            loss_dict = {
+                "recon_loss": loss.item(),
+                "total_loss": loss.item(),
+            }
 
             # Scale loss for gradient accumulation
             loss = loss / gradient_accumulation_steps

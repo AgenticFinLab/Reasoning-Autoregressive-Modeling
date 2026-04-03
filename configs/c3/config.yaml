@@ -29,15 +29,16 @@ data:
 environment:
   seed: 42
   dataloader_num_workers: 8
-  # Device map for basic training (train_c3.py)
+  # Device map for pipeline parallel training (train_c3.py)
+  # Automatically assigns encoder and decoder to different GPUs
   # For DeepSpeed training (train_c3_ds.py), this is ignored
   device_map:
     encoder:
       device: auto
-      priority: 2
+      priority: 2  # Lower priority = assigned to GPU with less free memory
     decoder:
       device: auto
-      priority: 1
+      priority: 1  # Higher priority = assigned to GPU with more free memory
 
 # =============================================================================
 # BLOCK 3: Model Configuration

@@ -26,6 +26,7 @@ from typing import Dict, Any, List, Optional, Tuple
 
 from ram.models.encoder import build_c3_encoder
 from ram.models.decoder import build_c3_decoder
+from ram.losses import DualTokenizerReconstructionLoss
 
 
 class C3Model(nn.Module):
@@ -99,6 +100,16 @@ class C3Model(nn.Module):
         # Get tokenizer from decoder (for loss computation)
         self.tokenizer = self.decoder.tokenizer
 
+        # Create loss function
+        self.loss_fn = DualTokenizerReconstructionLoss(
+            dec_tokenizer=self.tokenizer,
+            dec_vocab_size=self.vocab_size,
+            ignore_index=-100,
+            max_length=self.max_length,
+            label_smoothing=0.0,
+            latent_token_len=self.latent_token_len,
+        )
+
     def forward(
         self,
         context_texts: List[str],
@@ -160,40 +171,16 @@ class C3Model(nn.Module):
     ) -> torch.Tensor:
         """Compute cross-entropy loss for reconstruction.
 
+        Uses DualTokenizerReconstructionLoss which handles latent token skipping.
+
         Args:
-            logits: [B, L, V] decoder output
+            logits: [B, N+L, V] decoder output (includes latent tokens)
             target_texts: List of target texts
 
         Returns:
             loss: Scalar cross-entropy loss
         """
-        # Tokenize target texts
-        tokens = self.tokenizer(
-            target_texts,
-            max_length=self.max_length,
-            padding="max_length",
-            truncation=True,
-            return_tensors="pt",
-        )
-
-        input_ids = tokens["input_ids"].to(logits.device)
-        attention_mask = tokens["attention_mask"].to(logits.device)
-
-        # Shift for next-token prediction
-        shift_logits = logits[..., :-1, :].contiguous()
-        shift_labels = input_ids[..., 1:].contiguous()
-
-        # Mask padding positions
-        shift_attention_mask = attention_mask[..., 1:].contiguous()
-        shift_labels = shift_labels.masked_fill(shift_attention_mask == 0, -100)
-
-        # Compute cross-entropy loss
-        loss_fct = nn.CrossEntropyLoss()
-        loss = loss_fct(
-            shift_logits.view(-1, self.vocab_size),
-            shift_labels.view(-1),
-        )
-
+        loss, _ = self.loss_fn(logits, target_texts)
         return loss
 
     def generate(
