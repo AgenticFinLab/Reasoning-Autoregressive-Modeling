@@ -1,8 +1,8 @@
 """C3 Context Cascade Compression - DeepSpeed Training.
 
 Usage:
-    # Single node, 2 GPUs
-    torchrun --nproc_per_node=2 examples/PreExp/c3_original_ds.py \
+    # Single node, 4 GPUs
+    torchrun --nproc_per_node=4 examples/PreExp/c3_original_ds.py \
         -c configs/PreExp/c3_original_ds.yml \
         --deepspeed configs/PreExp/zero2.json
 
@@ -56,7 +56,10 @@ Dimensions:
 import argparse
 import json
 import os
+import sys
+from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 import deepspeed
 import torch
@@ -84,6 +87,83 @@ from ram.utils import (
     load_config,
     setup_environment,
 )
+
+
+class TeeLogger:
+    """Captures stdout/stderr and writes to both terminal and JSON file.
+
+    Usage:
+        tee = TeeLogger("output.json")
+        tee.start()
+        print("Hello")  # Goes to both terminal and JSON
+        tee.stop()
+    """
+
+    def __init__(self, json_path: str | Path, rank: int = 0):
+        self.json_path = Path(json_path)
+        self.rank = rank
+        self.original_stdout = None
+        self.original_stderr = None
+        self.buffer = []
+        self._started = False
+
+    def start(self):
+        """Start capturing output."""
+        if self._started:
+            return
+        self.original_stdout = sys.stdout
+        self.original_stderr = sys.stderr
+        sys.stdout = self
+        sys.stderr = self
+        self._started = True
+
+    def stop(self):
+        """Stop capturing and save to JSON."""
+        if not self._started:
+            return
+        sys.stdout = self.original_stdout
+        sys.stderr = self.original_stderr
+        self._save_to_json()
+        self._started = False
+
+    def write(self, message: str):
+        """Write to both terminal and buffer."""
+        if self.original_stdout:
+            self.original_stdout.write(message)
+            self.original_stdout.flush()
+        # Only capture on rank 0 to avoid duplication
+        if self.rank == 0 and message.strip():
+            self.buffer.append(
+                {
+                    "timestamp": datetime.now().isoformat(),
+                    "message": message,
+                }
+            )
+
+    def flush(self):
+        """Flush the stream."""
+        if self.original_stdout:
+            self.original_stdout.flush()
+
+    def _save_to_json(self):
+        """Save buffered output to JSON file."""
+        if self.rank != 0 or not self.buffer:
+            return
+        self.json_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(self.json_path, "w", encoding="utf-8") as f:
+            json.dump(
+                {
+                    "metadata": {
+                        "created_at": datetime.now().isoformat(),
+                        "rank": self.rank,
+                        "total_lines": len(self.buffer),
+                    },
+                    "logs": self.buffer,
+                },
+                f,
+                indent=2,
+                ensure_ascii=False,
+            )
 
 
 class C3ReconstructionLoss(nn.Module):
@@ -167,7 +247,7 @@ def print_rank0(msg, logger=None):
             print(msg)
 
 
-def train_c3_ds(config: dict, ds_config: dict):
+def train_c3_ds(config: dict, ds_config: dict, tee_logger: TeeLogger | None = None):
     """Train C3 with DeepSpeed for multi-GPU training.
 
     DeepSpeed handles:
@@ -176,6 +256,11 @@ def train_c3_ds(config: dict, ds_config: dict):
         - Gradient accumulation
         - Optimizer state sharding (ZeRO)
         - Checkpoint management
+
+    Args:
+        config: Training configuration dict
+        ds_config: DeepSpeed configuration dict
+        tee_logger: Optional TeeLogger to update with correct rank
     """
     # =================================================================
     # Initialize DeepSpeed distributed
@@ -191,6 +276,10 @@ def train_c3_ds(config: dict, ds_config: dict):
     rank = torch.distributed.get_rank()
     world_size = torch.distributed.get_world_size()
     is_main_process = rank == 0
+
+    # Update tee_logger with correct rank (only rank 0 captures)
+    if tee_logger is not None:
+        tee_logger.rank = rank
 
     # =================================================================
     # Extract config
@@ -643,11 +732,28 @@ if __name__ == "__main__":
         default=0,
         help="Local rank for distributed training (set by torchrun)",
     )
+    parser.add_argument(
+        "--capture_output",
+        type=str,
+        default="",
+        help="Path to save terminal output as JSON (e.g., EXPERIMENT/logs/capture.json)",
+    )
     args = parser.parse_args()
+
+    # Initialize output capture if requested (before DeepSpeed init)
+    tee_logger = None
+    if args.capture_output:
+        # We'll get the actual rank after DeepSpeed init, use 0 for now
+        tee_logger = TeeLogger(args.capture_output, rank=0)
+        tee_logger.start()
 
     # Load configs
     config = load_config(args.config)
     with open(args.deepspeed, "r", encoding="utf-8") as f:
         ds_config = json.load(f)
 
-    train_c3_ds(config, ds_config)
+    try:
+        train_c3_ds(config, ds_config, tee_logger)
+    finally:
+        if tee_logger:
+            tee_logger.stop()
