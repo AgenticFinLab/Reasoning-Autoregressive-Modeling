@@ -1,23 +1,17 @@
 # =============================================================================
-# C3 Context Cascade Compression - DeepSpeed Configuration
+# C3 Context Cascade Compression - Training Configuration
 # =============================================================================
-# Purpose:
-#   Configuration for training C3 model with DeepSpeed ZeRO-2.
-#   Enables multi-GPU training with optimizer state sharding.
-#
 # Paper: "Context Cascade Compression: Exploring the Upper Limits of Text Compression"
 #         (arXiv:2511.15244)
 #
 # Usage:
-#   torchrun --nproc_per_node=2 examples/PreExp/c3_original_ds.py \
-#       -c configs/PreExp/c3_original_ds.yml \
-#       --deepspeed configs/PreExp/zero2.json
+#   # Basic training (single/multi-GPU with pipeline parallel)
+#   python examples/c3/train_c3.py -c configs/c3/config.yaml
 #
-# DeepSpeed Benefits:
-#   - ZeRO-2: Shards optimizer states across GPUs (saves ~50% memory per GPU)
-#   - ZeRO-3: Also shards model parameters (even more memory savings)
-#   - Gradient checkpointing built-in
-#   - Mixed precision training (BF16)
+#   # DeepSpeed training (multi-GPU with ZeRO-2)
+#   torchrun --nproc_per_node=4 examples/c3/train_c3_ds.py \
+#       --config configs/c3/config.yaml \
+#       --deepspeed configs/c3/zero2.json
 # =============================================================================
 
 # =============================================================================
@@ -32,22 +26,25 @@ data:
 # =============================================================================
 # BLOCK 2: Environment Configuration
 # =============================================================================
-# NOTE: DeepSpeed handles device assignment automatically
-# Only seed and dataloader settings are needed here
-# =============================================================================
 environment:
   seed: 42
   dataloader_num_workers: 8
+  # Device map for basic training (train_c3.py)
+  # For DeepSpeed training (train_c3_ds.py), this is ignored
+  device_map:
+    encoder:
+      device: auto
+      priority: 2
+    decoder:
+      device: auto
+      priority: 1
 
 # =============================================================================
 # BLOCK 3: Model Configuration
 # =============================================================================
-# Official C3: encoder Qwen2.5-1.5B, decoder Qwen2.5-3B
-# With DeepSpeed ZeRO-2, can use official model sizes on 2x A100
-# =============================================================================
 model:
   lm_type: &lm_type "huggingface"
-  
+
   encoder:
     lm_type: *lm_type
     model_name: "Qwen/Qwen2.5-0.5B"
@@ -71,19 +68,23 @@ model:
   quantizer: null
 
 # =============================================================================
-# BLOCK 4: Training Configuration (DeepSpeed)
+# BLOCK 4: Training Configuration
 # =============================================================================
-# NOTE: The following settings are handled by zero2.json:
+# NOTE: For DeepSpeed training (train_c3_ds.py), the following are in zero2.json:
 #   - bf16 (mixed precision)
 #   - gradient_accumulation_steps
 #   - gradient_clipping
 #   - train_micro_batch_size_per_gpu
-# Only specify learning rate, epochs, and optimizer settings here
 # =============================================================================
 training:
   num_epochs: 5
 
+  # Basic training settings (train_c3.py)
+  batch_size: 8
+  bf16: true
   gradient:
+    accumulation_steps: 16
+    max_grad_norm: 1.0
     checkpointing: true
 
   trainable: true
@@ -105,7 +106,7 @@ training:
 # BLOCK 5: Log Configuration
 # =============================================================================
 log:
-  save_folder: "EXPERIMENT/PreExp/c3_original_ds"
+  save_folder: "EXPERIMENT/c3"
   log_level: "INFO"
   checkpoint_step_interval: 5000
   log_step_interval: 10
