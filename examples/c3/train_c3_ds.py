@@ -231,10 +231,18 @@ def train_c3(config: dict, ds_config: dict, tee_logger: TeeLogger | None = None)
     )
 
     if is_main_process:
+        effective_batch_size = (
+            per_device_batch_size
+            * ds_config["gradient_accumulation_steps"]
+            * world_size
+        )
         logger.info(f"    Dataset: {data_cfg['data_name']}, {len(dataset)} samples")
         logger.info(f"    World size: {world_size}")
         logger.info(f"    Per-device batch size: {per_device_batch_size}")
-        logger.info(f"    Effective batch size: {per_device_batch_size * world_size}")
+        logger.info(
+            f"    Gradient accumulation steps: {ds_config['gradient_accumulation_steps']}"
+        )
+        logger.info(f"    Effective batch size: {effective_batch_size}")
         logger.info("")
 
     # Initialize DeepSpeed
@@ -260,9 +268,15 @@ def train_c3(config: dict, ds_config: dict, tee_logger: TeeLogger | None = None)
     samples_store = None
 
     if is_main_process:
+        # Calculate effective batch size: per_gpu × grad_acc × world_size
+        effective_batch_size = (
+            per_device_batch_size
+            * ds_config["gradient_accumulation_steps"]
+            * world_size
+        )
         training_config = TrainingConfig(
             experiment_name="c3",
-            batch_size=per_device_batch_size * world_size,
+            batch_size=effective_batch_size,
             learning_rate=learning_rate,
             weight_decay=weight_decay,
             num_epochs=num_epochs,

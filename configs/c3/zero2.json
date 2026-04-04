@@ -33,10 +33,11 @@
         "params": {
             "warmup_min_lr": 0,
             "warmup_max_lr": 1e-5,
-            "warmup_num_steps": "auto",
-            "total_num_steps": "auto"
+            "warmup_num_steps": 100,
+            "total_num_steps": 1000
         }
     },
     "gradient_clipping": 1.0,
+    "steps_per_print": 10,
     "wall_clock_breakdown": false
 }
