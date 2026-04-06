@@ -54,15 +54,23 @@ from ram.utils import (
 
 
 class TeeLogger:
-    """Captures stdout/stderr and writes to both terminal and JSON file."""
+    """Captures stdout/stderr and writes to both terminal and JSON file.
 
-    def __init__(self, json_path: str | Path, rank: int = 0):
+    Features:
+        - Real-time terminal output (no buffering delay)
+        - Periodic JSON save (every N lines) to prevent data loss on crash
+        - Final save on stop() for complete capture
+    """
+
+    def __init__(self, json_path: str | Path, rank: int = 0, save_interval: int = 100):
         self.json_path = Path(json_path)
         self.rank = rank
+        self.save_interval = save_interval
         self.original_stdout = None
         self.original_stderr = None
         self.buffer = []
         self._started = False
+        self._lines_since_save = 0
 
     def start(self):
         """Start capturing output."""
@@ -80,7 +88,7 @@ class TeeLogger:
             return
         sys.stdout = self.original_stdout
         sys.stderr = self.original_stderr
-        self._save_to_json()
+        self._save_to_json(final=True)
         self._started = False
 
     def write(self, message: str):
@@ -95,14 +103,23 @@ class TeeLogger:
                     "message": message,
                 }
             )
+            self._lines_since_save += 1
+            # Periodic save to prevent data loss on crash
+            if self._lines_since_save >= self.save_interval:
+                self._save_to_json(final=False)
+                self._lines_since_save = 0
 
     def flush(self):
         """Flush the stream."""
         if self.original_stdout:
             self.original_stdout.flush()
 
-    def _save_to_json(self):
-        """Save buffered output to JSON file."""
+    def _save_to_json(self, final: bool = False):
+        """Save buffered output to JSON file.
+
+        Args:
+            final: If True, this is the final save (training complete)
+        """
         if self.rank != 0 or not self.buffer:
             return
         self.json_path.parent.mkdir(parents=True, exist_ok=True)
@@ -113,6 +130,7 @@ class TeeLogger:
                         "created_at": datetime.now().isoformat(),
                         "rank": self.rank,
                         "total_lines": len(self.buffer),
+                        "final": final,
                     },
                     "logs": self.buffer,
                 },
@@ -300,22 +318,43 @@ def train_c3(config: dict, ds_config: dict, tee_logger: TeeLogger | None = None)
 
     if resume:
         latest_ckpt_dir = checkpoint_dir / "latest"
+        ckpt_to_load = None
+
+        # Find latest checkpoint
         if latest_ckpt_dir.exists() and latest_ckpt_dir.is_symlink():
-            ckpt_path = os.readlink(latest_ckpt_dir)
+            ckpt_to_load = os.readlink(latest_ckpt_dir)
+        else:
+            # Fallback: find latest global_step checkpoint
+            ckpt_dirs = sorted(checkpoint_dir.glob("global_step_*"))
+            if ckpt_dirs:
+                ckpt_to_load = ckpt_dirs[-1].name
+
+        if ckpt_to_load:
             if is_main_process:
-                logger.info(f"[3.5] Resuming from: {ckpt_path}")
+                logger.info(f"[3.5] Resuming from: {ckpt_to_load}")
 
             _, _, _, client_state = model_engine.load_checkpoint(
                 checkpoint_dir=str(checkpoint_dir),
-                tag=ckpt_path,
+                tag=ckpt_to_load,
             )
 
             if client_state is not None:
                 start_epoch = client_state.get("epoch", 0)
                 global_step = client_state.get("global_step", 0)
 
+                # Restore training history if available
+                if is_main_process and history is not None:
+                    history_data = client_state.get("training_history", [])
+                    if history_data:
+                        history._history = history_data
+                        logger.info(f"    Restored {len(history_data)} history entries")
+
             if is_main_process:
                 logger.info(f"    Resumed from epoch {start_epoch}, step {global_step}")
+                logger.info("")
+        else:
+            if is_main_process:
+                logger.info("[3.5] No checkpoint found, starting from scratch")
                 logger.info("")
 
     # Training loop
@@ -389,6 +428,9 @@ def train_c3(config: dict, ds_config: dict, tee_logger: TeeLogger | None = None)
                     "epoch": epoch,
                     "global_step": global_step,
                     "step_in_epoch": num_batches,
+                    "training_history": (
+                        history._history if (is_main_process and history) else []
+                    ),
                 }
                 model_engine.save_checkpoint(
                     save_dir=str(checkpoint_dir),
@@ -408,6 +450,9 @@ def train_c3(config: dict, ds_config: dict, tee_logger: TeeLogger | None = None)
                 "epoch": epoch,
                 "global_step": global_step,
                 "step_in_epoch": num_batches,
+                "training_history": (
+                    history._history if (is_main_process and history) else []
+                ),
             }
             model_engine.save_checkpoint(
                 save_dir=str(checkpoint_dir),
@@ -422,6 +467,9 @@ def train_c3(config: dict, ds_config: dict, tee_logger: TeeLogger | None = None)
         client_state = {
             "epoch": num_epochs,
             "global_step": global_step,
+            "training_history": (
+                history._history if (is_main_process and history) else []
+            ),
         }
         model_engine.save_checkpoint(
             save_dir=str(checkpoint_dir),
