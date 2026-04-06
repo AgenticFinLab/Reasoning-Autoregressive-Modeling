@@ -41,6 +41,7 @@ from tqdm import tqdm
 from lmbase.dataset import registry
 from model import C3Model
 from ram import (
+    ReconstructionSample,
     TrainingConfig,
     TrainingHistory,
     TrainingLogger,
@@ -344,9 +345,19 @@ def train_c3(config: dict, ds_config: dict, tee_logger: TeeLogger | None = None)
 
                 # Restore training history if available
                 if is_main_process and history is not None:
-                    history_data = client_state.get("training_history", [])
+                    history_data = client_state["training_history"]
                     if history_data:
-                        history._history = history_data
+                        # Reconstruct TrainingStep objects from dicts
+                        # Same pattern as TrainingHistory.load()
+                        history.steps = []
+                        for s in history_data:
+                            samples = [
+                                ReconstructionSample(**rs)
+                                for rs in s.pop("reconstruction_samples", [])
+                            ]
+                            step = TrainingStep(**s)
+                            step.reconstruction_samples = samples
+                            history.steps.append(step)
                         logger.info(f"    Restored {len(history_data)} history entries")
 
             if is_main_process:
@@ -429,7 +440,9 @@ def train_c3(config: dict, ds_config: dict, tee_logger: TeeLogger | None = None)
                     "global_step": global_step,
                     "step_in_epoch": num_batches,
                     "training_history": (
-                        history._history if (is_main_process and history) else []
+                        [s.to_dict() for s in history.steps]
+                        if (is_main_process and history)
+                        else []
                     ),
                 }
                 model_engine.save_checkpoint(
@@ -451,7 +464,9 @@ def train_c3(config: dict, ds_config: dict, tee_logger: TeeLogger | None = None)
                 "global_step": global_step,
                 "step_in_epoch": num_batches,
                 "training_history": (
-                    history._history if (is_main_process and history) else []
+                    [s.to_dict() for s in history.steps]
+                    if (is_main_process and history)
+                    else []
                 ),
             }
             model_engine.save_checkpoint(
@@ -468,7 +483,9 @@ def train_c3(config: dict, ds_config: dict, tee_logger: TeeLogger | None = None)
             "epoch": num_epochs,
             "global_step": global_step,
             "training_history": (
-                history._history if (is_main_process and history) else []
+                [s.to_dict() for s in history.steps]
+                if (is_main_process and history)
+                else []
             ),
         }
         model_engine.save_checkpoint(
