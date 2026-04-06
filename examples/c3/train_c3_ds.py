@@ -459,29 +459,11 @@ def train_c3(config: dict, ds_config: dict, tee_logger: TeeLogger | None = None)
             assert history is not None
             logger.log_epoch(epoch + 1, avg_epoch_loss, num_epochs)
 
-            client_state = {
-                "epoch": epoch,
-                "global_step": global_step,
-                "step_in_epoch": num_batches,
-                "training_history": (
-                    [s.to_dict() for s in history.steps]
-                    if (is_main_process and history)
-                    else []
-                ),
-            }
-            model_engine.save_checkpoint(
-                save_dir=str(checkpoint_dir),
-                tag=f"epoch_{epoch+1}",
-                client_state=client_state,
-            )
-
-    # Training complete
-    if is_main_process:
-        logger.log_header("Training completed!")
-
+        # Save checkpoint at epoch end (all ranks must participate for DeepSpeed)
         client_state = {
-            "epoch": num_epochs,
+            "epoch": epoch,
             "global_step": global_step,
+            "step_in_epoch": num_batches,
             "training_history": (
                 [s.to_dict() for s in history.steps]
                 if (is_main_process and history)
@@ -490,11 +472,34 @@ def train_c3(config: dict, ds_config: dict, tee_logger: TeeLogger | None = None)
         }
         model_engine.save_checkpoint(
             save_dir=str(checkpoint_dir),
-            tag="final",
+            tag=f"epoch_{epoch+1}",
             client_state=client_state,
         )
-        logger.info(f"Final checkpoint saved: {checkpoint_dir / 'final'}")
+        if is_main_process:
+            logger.info(f"    [Checkpoint saved: epoch_{epoch+1}]")
 
+    # Training complete
+    if is_main_process:
+        logger.log_header("Training completed!")
+
+    # Save final checkpoint (all ranks must participate for DeepSpeed)
+    client_state = {
+        "epoch": num_epochs,
+        "global_step": global_step,
+        "training_history": (
+            [s.to_dict() for s in history.steps]
+            if (is_main_process and history)
+            else []
+        ),
+    }
+    model_engine.save_checkpoint(
+        save_dir=str(checkpoint_dir),
+        tag="final",
+        client_state=client_state,
+    )
+
+    if is_main_process:
+        logger.info(f"Final checkpoint saved: {checkpoint_dir / 'final'}")
         history.flush()
         logger.info(f"Training history saved: {history_path}")
         logger.log_header("ALL DONE")
