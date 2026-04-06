@@ -1,8 +1,8 @@
 # =============================================================================
-# Encoder-Decoder Original Configuration
+# ED (Encoder-Decoder) - Training Configuration
 # =============================================================================
 # Purpose:
-#   Configuration for basic encoder-decoder model experiments.
+#   Configuration for basic encoder-decoder model training.
 #   Template for standard encoder-decoder architectures without quantization.
 # =============================================================================
 
@@ -10,8 +10,8 @@
 # BLOCK 1: Data Configuration
 # =============================================================================
 data:
-  data_name: "YourDataset"
-  data_path: "EXPERIMENT/data/YourDataset"
+  data_name: "math"
+  data_path: "EXPERIMENT/data/math"
   split: "train"
   subset: ""
 
@@ -19,15 +19,16 @@ data:
 # BLOCK 2: Environment Configuration
 # =============================================================================
 environment:
-  dotenv_path: ".env"
   seed: 42
-  dataloader_num_workers: 4
+  dataloader_num_workers: 8
+  # Device map for pipeline parallel training (train_ed.py)
+  # For DeepSpeed training (train_ed_ds.py), this is ignored
   device_map:
     encoder:
-      device: "auto"
+      device: auto
       priority: 2
     decoder:
-      device: "auto"
+      device: auto
       priority: 1
 
 # =============================================================================
@@ -38,32 +39,42 @@ model:
 
   encoder:
     lm_type: *lm_type
-    model_name: "YourEncoderModel"
+    model_name: "bert-base-uncased"
     inference_config:
       torch_dtype: "auto"
     pretrained: &pretrained true
     freeze: &freeze false
+    max_length: &max_length 512
 
   decoder:
     lm_type: *lm_type
-    model_name: "YourDecoderModel"
+    model_name: "gpt2"
     inference_config:
       torch_dtype: "auto"
     pretrained: *pretrained
     freeze: *freeze
+    max_length: *max_length
 
   quantizer: null
 
 # =============================================================================
 # BLOCK 4: Training Configuration
 # =============================================================================
+# NOTE: For DeepSpeed training (train_ed_ds.py), the following are in zero2.json:
+#   - bf16 (mixed precision)
+#   - gradient_accumulation_steps
+#   - gradient_clipping
+#   - train_micro_batch_size_per_gpu
+# =============================================================================
 training:
-  batch_size: 1
-  num_epochs: 1
+  num_epochs: 5
 
+  # Basic training settings (train_ed.py)
+  batch_size: 8
+  bf16: true
   gradient:
+    accumulation_steps: 16
     max_grad_norm: 1.0
-    accumulation_steps: 1
     checkpointing: true
 
   trainable: true
@@ -73,16 +84,15 @@ training:
   weight_decay: 0.0
   warmup_steps: 100
   lr_scheduler_type: "cosine"
-  bf16: true
   resume: true
 
 # =============================================================================
 # BLOCK 5: Log Configuration
 # =============================================================================
 log:
-  save_folder: "EXPERIMENT/PreExp/ed_original"
+  save_folder: "EXPERIMENT/ed"
   log_level: "INFO"
-  checkpoint_step_interval: 100
+  checkpoint_step_interval: 5000
   log_step_interval: 10
 
 # =============================================================================

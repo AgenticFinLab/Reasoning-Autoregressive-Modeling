@@ -1,0 +1,193 @@
+"""ED (Encoder-Decoder) Unified Model.
+
+This module provides a unified Encoder-Decoder model for text reconstruction.
+Combines encoder and decoder into a single nn.Module for DeepSpeed training.
+
+Architecture:
+    EDModel (unified)
+    ├── encoder (from ram.models.encoder)
+    │   └── BERT or similar encoder
+    └── decoder (from ram.models.decoder)
+        └── GPT2 or similar decoder
+
+Benefits:
+    1. Single model for DeepSpeed training (one optimizer)
+    2. Clean interface
+    3. Simplified checkpoint management
+"""
+
+import torch
+import torch.nn as nn
+from typing import Dict, Any, List, Optional, Tuple
+
+from ram.models.encoder import build_encoder
+from ram.models.decoder import build_decoder
+from ram.losses import build_loss_from_config
+
+
+class EDModel(nn.Module):
+    """Unified Encoder-Decoder Model.
+
+    This class wraps the modular encoder and decoder into a single unified model.
+
+    Forward Flow:
+        1. Input texts -> Encoder -> hidden [B, L, D_enc]
+        2. hidden -> Decoder -> logits [B, L, V]
+        3. (Optional) Compute loss with labels
+
+    Example:
+        >>> config = {
+        ...     "encoder": {...},
+        ...     "decoder": {...},
+        ... }
+        >>> model = EDModel(config)
+        >>>
+        >>> # Training forward
+        >>> logits, loss = model(
+        ...     texts=["input text..."],
+        ...     compute_loss=True
+        ... )
+
+    Args:
+        config: Dict with 'encoder' and 'decoder' configurations
+
+    Attributes:
+        encoder: Encoder instance (e.g., BERT)
+        decoder: Decoder instance (e.g., GPT2)
+        hidden_dim: Encoder hidden dimension
+        vocab_size: Decoder vocabulary size
+    """
+
+    def __init__(self, config: Dict[str, Any]):
+        super().__init__()
+
+        enc_cfg = config["encoder"]
+        dec_cfg = config["decoder"]
+
+        # Build encoder
+        self.encoder = build_encoder(enc_cfg)
+        encoder_hidden_dim = self.encoder.output_dim
+
+        # Build decoder with encoder's output dim as input
+        self.decoder = build_decoder(
+            dec_cfg,
+            input_dim=encoder_hidden_dim,
+        )
+
+        # Store attributes
+        self.hidden_dim = encoder_hidden_dim
+        self.vocab_size = self.decoder.vocab_size
+        self.encoder_model_name = enc_cfg.get("model_name", "unknown")
+        self.decoder_model_name = dec_cfg.get("model_name", "unknown")
+
+        # Store tokenizer references
+        self.enc_tokenizer = self.encoder.tokenizer
+        self.dec_tokenizer = self.decoder.tokenizer
+
+    def forward(
+        self, texts: List[str], compute_loss: bool = False, **loss_kwargs
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        """Forward pass through encoder-decoder.
+
+        Args:
+            texts: List of input texts
+            compute_loss: Whether to compute loss
+            **loss_kwargs: Additional arguments for loss computation
+
+        Returns:
+            logits: [B, L, V] token logits
+            loss: Scalar loss value (if compute_loss=True)
+        """
+        # Encode: texts -> hidden [B, L, D]
+        hidden = self.encoder(texts)
+
+        # Decode: hidden -> logits [B, L, V]
+        logits = self.decoder(hidden)
+
+        # Compute loss if requested
+        loss = None
+        if compute_loss:
+            loss = self.compute_loss(logits, texts, **loss_kwargs)
+
+        return logits, loss
+
+    def compute_loss(
+        self, logits: torch.Tensor, target_texts: List[str], **kwargs
+    ) -> torch.Tensor:
+        """Compute reconstruction loss.
+
+        Args:
+            logits: [B, L, V] token logits from decoder
+            target_texts: List of target texts
+            **kwargs: Additional loss arguments
+
+        Returns:
+            loss: Scalar loss value
+        """
+        # Tokenize targets with decoder's tokenizer
+        target_ids = self.dec_tokenizer(
+            target_texts,
+            return_tensors="pt",
+            padding=True,
+            truncation=True,
+            max_length=logits.size(1),
+        )["input_ids"].to(logits.device)
+
+        # Shift for next-token prediction
+        shift_logits = logits[..., :-1, :].contiguous()
+        shift_labels = target_ids[..., 1:].contiguous()
+
+        # Compute cross-entropy loss
+        loss_fct = nn.CrossEntropyLoss(
+            ignore_index=self.dec_tokenizer.pad_token_id or -100
+        )
+        loss = loss_fct(
+            shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1)
+        )
+
+        return loss
+
+    def generate(
+        self, texts: List[str], max_length: int = 128, **generate_kwargs
+    ) -> List[str]:
+        """Generate text from input.
+
+        Args:
+            texts: List of input texts
+            max_length: Maximum generation length
+            **generate_kwargs: Additional generation arguments
+
+        Returns:
+            List of generated texts
+        """
+        self.eval()
+        with torch.no_grad():
+            # Encode
+            hidden = self.encoder(texts)
+
+            # Decode (greedy generation)
+            logits = self.decoder(hidden)
+
+            # Get predictions
+            pred_ids = torch.argmax(logits, dim=-1)
+
+            # Decode to texts
+            generated_texts = self.dec_tokenizer.batch_decode(
+                pred_ids, skip_special_tokens=True
+            )
+
+        return generated_texts
+
+    def gradient_checkpointing_enable(self):
+        """Enable gradient checkpointing for memory efficiency."""
+        if hasattr(self.encoder, "gradient_checkpointing_enable"):
+            self.encoder.gradient_checkpointing_enable()
+        if hasattr(self.decoder, "gradient_checkpointing_enable"):
+            self.decoder.gradient_checkpointing_enable()
+
+    def gradient_checkpointing_disable(self):
+        """Disable gradient checkpointing."""
+        if hasattr(self.encoder, "gradient_checkpointing_disable"):
+            self.encoder.gradient_checkpointing_disable()
+        if hasattr(self.decoder, "gradient_checkpointing_disable"):
+            self.decoder.gradient_checkpointing_disable()

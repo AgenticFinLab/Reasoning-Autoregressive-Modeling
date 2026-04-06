@@ -1,17 +1,17 @@
 # =============================================================================
-# Encoder-Quantizer-Decoder Hierarchical Configuration
+# ED (Encoder-Decoder) - Training Configuration
 # =============================================================================
 # Purpose:
-#   Configuration for encoder-quantizer-decoder model with hierarchical
-#   quantization structure.
+#   Configuration for basic encoder-decoder model training.
+#   Template for standard encoder-decoder architectures without quantization.
 # =============================================================================
 
 # =============================================================================
 # BLOCK 1: Data Configuration
 # =============================================================================
 data:
-  data_name: "YourDataset"
-  data_path: "EXPERIMENT/data/YourDataset"
+  data_name: "math"
+  data_path: "EXPERIMENT/data/math"
   split: "train"
   subset: ""
 
@@ -19,17 +19,16 @@ data:
 # BLOCK 2: Environment Configuration
 # =============================================================================
 environment:
-  dotenv_path: ".env"
   seed: 42
+  dataloader_num_workers: 8
+  # Device map for pipeline parallel training (train_ed.py)
+  # For DeepSpeed training (train_ed_ds.py), this is ignored
   device_map:
     encoder:
-      device: "auto"
-      priority: 3
-    quantizer:
-      device: "auto"
+      device: auto
       priority: 2
     decoder:
-      device: "auto"
+      device: auto
       priority: 1
 
 # =============================================================================
@@ -37,44 +36,50 @@ environment:
 # =============================================================================
 model:
   lm_type: &lm_type "huggingface"
-  latent_dim: 256
 
   encoder:
     lm_type: *lm_type
-    model_name: "YourEncoderModel"
+    model_name: "bert-base-uncased"
     inference_config:
       torch_dtype: "auto"
     pretrained: &pretrained true
     freeze: &freeze false
-
-  quantizer:
-    type: "hierarchical"
-    num_levels: 4
-    codebook_size: 8192
-    latent_dim: 256
-    commitment_cost: 0.25
-    hierarchy:
-      share_codebook: false
-      level_dims: [64, 128, 256, 512]
+    max_length: &max_length 512
 
   decoder:
     lm_type: *lm_type
-    model_name: "YourDecoderModel"
+    model_name: "gpt2"
     inference_config:
       torch_dtype: "auto"
     pretrained: *pretrained
     freeze: *freeze
+    max_length: *max_length
+
+  quantizer:
+    codebook_size: 4096
+    codebook_dim: 256
+    scale_lengths: [1, 4, 16, 64, 256]
+    beta: 0.25
+    quant_resi: 0.5
 
 # =============================================================================
 # BLOCK 4: Training Configuration
 # =============================================================================
+# NOTE: For DeepSpeed training (train_ed_ds.py), the following are in zero2.json:
+#   - bf16 (mixed precision)
+#   - gradient_accumulation_steps
+#   - gradient_clipping
+#   - train_micro_batch_size_per_gpu
+# =============================================================================
 training:
-  batch_size: 1
-  num_epochs: 1
+  num_epochs: 5
 
+  # Basic training settings (train_ed.py)
+  batch_size: 8
+  bf16: true
   gradient:
+    accumulation_steps: 16
     max_grad_norm: 1.0
-    accumulation_steps: 1
     checkpointing: true
 
   trainable: true
@@ -83,18 +88,16 @@ training:
   learning_rate: 1.0e-5
   weight_decay: 0.0
   warmup_steps: 100
-  vq_loss_weight: 1.0
   lr_scheduler_type: "cosine"
-  bf16: true
   resume: true
 
 # =============================================================================
 # BLOCK 5: Log Configuration
 # =============================================================================
 log:
-  save_folder: "EXPERIMENT/PreExp/eqd_hierarchical"
+  save_folder: "EXPERIMENT/eqd_hierarchical"
   log_level: "INFO"
-  checkpoint_step_interval: 100
+  checkpoint_step_interval: 5000
   log_step_interval: 10
 
 # =============================================================================

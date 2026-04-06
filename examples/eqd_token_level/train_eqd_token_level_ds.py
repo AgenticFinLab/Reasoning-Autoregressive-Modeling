@@ -1,9 +1,9 @@
-"""C3 Context Cascade Compression - DeepSpeed Training.
+"""EQD Token Level - DeepSpeed Training.
 
 Usage:
-    torchrun --nproc_per_node=4 examples/c3/train_c3_ds.py \
-        --config configs/c3/config.yaml \
-        --deepspeed configs/c3/zero2.json
+    torchrun --nproc_per_node=4 examples/ed/train_ed_ds.py \
+        --config configs/ed/config.yaml \
+        --deepspeed configs/ed/zero2.json
 
 DeepSpeed Features:
     - ZeRO-2: Shards optimizer states across GPUs
@@ -12,7 +12,7 @@ DeepSpeed Features:
     - Gradient checkpointing via config
 
 Output Structure:
-    EXPERIMENT/c3/
+    EXPERIMENT/ed/
     ├── checkpoints/
     │   ├── global_step_{N}/           # DeepSpeed checkpoint format
     │   └── latest -> global_step_{N}
@@ -39,7 +39,7 @@ from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
 
 from lmbase.dataset import registry
-from model import C3Model
+from model import EQDTokenLevelModel
 from ram import (
     TrainingConfig,
     TrainingHistory,
@@ -122,8 +122,8 @@ class TeeLogger:
             )
 
 
-def train_c3(config: dict, ds_config: dict, tee_logger: TeeLogger | None = None):
-    """Train C3 with DeepSpeed for multi-GPU training."""
+def train_eqd_token_level(config: dict, ds_config: dict, tee_logger: TeeLogger | None = None):
+    """Train ED with DeepSpeed for multi-GPU training."""
     # Initialize DeepSpeed distributed
     deepspeed.init_distributed()
 
@@ -149,7 +149,7 @@ def train_c3(config: dict, ds_config: dict, tee_logger: TeeLogger | None = None)
     num_epochs = train_cfg["num_epochs"]
     learning_rate = train_cfg["learning_rate"]
     weight_decay = train_cfg["weight_decay"]
-    warmup_ratio = train_cfg["warmup_ratio"]
+    warmup_steps = train_cfg.get("warmup_steps", 100)
     use_checkpointing = train_cfg["gradient"]["checkpointing"]
     resume = train_cfg["resume"]
 
@@ -168,45 +168,36 @@ def train_c3(config: dict, ds_config: dict, tee_logger: TeeLogger | None = None)
     # Setup logging
     if is_main_process:
         logger = TrainingLogger(
-            name="c3_train",
+            name="eqd_token_level_train",
             log_file=log_dir / "training.log",
         )
-        logger.log_header("C3 Context Cascade Compression - DeepSpeed Training")
+        logger.log_header("EQD Token Level - DeepSpeed Training")
     else:
         logger = None
 
-    N = model_cfg["encoder"]["latent_token_len"]
-    M = model_cfg["encoder"]["max_length"]
-
     setup_environment({"seed": env_cfg["seed"], "device": "cpu"})
 
-    # Build unified C3 model
+    # Build unified ED model
     if is_main_process:
-        logger.info("[1] Building C3 unified model...")
+        logger.info("[1] Building ED unified model...")
 
-    c3_model = C3Model(model_cfg)
-    c3_model = c3_model.to(device)
+    eqd_model = EQDTokenLevelModel(model_cfg)
+    ed_model = ed_model.to(device)
 
     if use_checkpointing:
-        c3_model.gradient_checkpointing_enable()
+        ed_model.gradient_checkpointing_enable()
         if is_main_process:
             logger.info("    Gradient checkpointing: ENABLED")
 
-    D_enc = c3_model.encoder_hidden_dim
-    D_dec = c3_model.decoder_hidden_dim
-    V = c3_model.vocab_size
+    D_enc = ed_model.hidden_dim
+    V = ed_model.vocab_size
 
     if is_main_process:
-        logger.info(f"    Encoder: {c3_model.encoder.model_name}")
+        logger.info(f"    Encoder: {ed_model.encoder_model_name}")
         logger.info(f"    Encoder hidden_dim: {D_enc}")
-        logger.info(f"    Decoder: {c3_model.decoder.model_name}")
-        logger.info(f"    Decoder hidden_dim: {D_dec}")
-        logger.info(f"    Vocab size: {V}")
-        logger.info(f"    Latent tokens: {N}")
-        logger.info(f"    mm_projector: {D_enc} -> {D_dec}")
+        logger.info(f"    Decoder: {ed_model.decoder_model_name}")
+        logger.info(f"    Decoder vocab_size: {V}")
         logger.info("")
-
-    tokenizer = c3_model.tokenizer
 
     if is_main_process:
         logger.info("[2] Loading dataset...")
@@ -239,9 +230,7 @@ def train_c3(config: dict, ds_config: dict, tee_logger: TeeLogger | None = None)
         logger.info(f"    Dataset: {data_cfg['data_name']}, {len(dataset)} samples")
         logger.info(f"    World size: {world_size}")
         logger.info(f"    Per-device batch size: {per_device_batch_size}")
-        logger.info(
-            f"    Gradient accumulation steps: {ds_config['gradient_accumulation_steps']}"
-        )
+        logger.info(f"    Gradient accumulation steps: {ds_config['gradient_accumulation_steps']}")
         logger.info(f"    Effective batch size: {effective_batch_size}")
         logger.info("")
 
@@ -250,8 +239,8 @@ def train_c3(config: dict, ds_config: dict, tee_logger: TeeLogger | None = None)
         logger.info("[3] Initializing DeepSpeed...")
 
     model_engine, _, _, _ = deepspeed.initialize(
-        model=c3_model,
-        model_parameters=c3_model.parameters(),
+        model=ed_model,
+        model_parameters=ed_model.parameters(),
         config=ds_config,
     )
 
@@ -265,28 +254,18 @@ def train_c3(config: dict, ds_config: dict, tee_logger: TeeLogger | None = None)
     global_step = 0
 
     history = None
-    samples_store = None
 
     if is_main_process:
-        # Calculate effective batch size: per_gpu × grad_acc × world_size
-        effective_batch_size = (
-            per_device_batch_size
-            * ds_config["gradient_accumulation_steps"]
-            * world_size
-        )
         training_config = TrainingConfig(
-            experiment_name="c3",
-            batch_size=effective_batch_size,
+            experiment_name="ed",
+            batch_size=per_device_batch_size * ds_config["gradient_accumulation_steps"] * world_size,
             learning_rate=learning_rate,
             weight_decay=weight_decay,
             num_epochs=num_epochs,
-            warmup_ratio=warmup_ratio,
+            warmup_steps=warmup_steps,
             gradient_accumulation_steps=ds_config["gradient_accumulation_steps"],
             gradient_clip=ds_config["gradient_clipping"],
             bf16=ds_config["bf16"]["enabled"],
-            latent_token_len=N,
-            max_length=M,
-            compression_ratio=M / N,
         )
 
         config_path = log_dir / "train_config.json"
@@ -295,7 +274,6 @@ def train_c3(config: dict, ds_config: dict, tee_logger: TeeLogger | None = None)
 
         history_path = log_dir / "training_history.json"
         history = TrainingHistory(training_config, history_path)
-        logger.info(f"    Samples store: {log_dir / 'samples'}")
         logger.info("")
 
     if resume:
@@ -338,8 +316,7 @@ def train_c3(config: dict, ds_config: dict, tee_logger: TeeLogger | None = None)
         for _, batch_texts in enumerate(pbar):
             # Forward pass
             logits, loss = model_engine(
-                context_texts=batch_texts,
-                target_texts=batch_texts,
+                texts=batch_texts,
                 compute_loss=True,
             )
 
@@ -437,19 +414,19 @@ def train_c3(config: dict, ds_config: dict, tee_logger: TeeLogger | None = None)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="C3 Context Cascade Compression - DeepSpeed Training"
+        description="EQD Token Level - DeepSpeed Training"
     )
     parser.add_argument(
         "--config",
         type=str,
         required=True,
-        help="Path to config file (e.g., examples/c3/config.yaml)",
+        help="Path to config file (e.g., configs/ed/config.yaml)",
     )
     parser.add_argument(
         "--deepspeed",
         type=str,
         required=True,
-        help="Path to DeepSpeed config file (e.g., examples/c3/zero2.json)",
+        help="Path to DeepSpeed config file (e.g., configs/ed/zero2.json)",
     )
     parser.add_argument(
         "--local_rank",
@@ -471,6 +448,6 @@ if __name__ == "__main__":
     tee_logger.start()
 
     try:
-        train_c3(config, ds_config, tee_logger)
+        train_ed(config, ds_config, tee_logger)
     finally:
         tee_logger.stop()

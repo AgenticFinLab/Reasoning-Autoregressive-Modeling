@@ -25,7 +25,12 @@ import torch.nn as nn
 from typing import Dict, Any, List, Optional, Tuple
 
 from ram.models.encoder import build_c3_encoder
-from ram.models.decoder import build_c3_decoder
+from ram.models.decoder import (
+    build_c3_decoder,
+    C3_IM_START_TOKEN,
+    C3_IM_END_TOKEN,
+    C3_IM_PATCH_TOKEN,
+)
 from ram.losses import DualTokenizerReconstructionLoss
 
 
@@ -137,24 +142,48 @@ class C3Model(nn.Module):
         # latent_tokens: [B, N, D_enc]
         latent_tokens = self.encoder(inputs=context_texts)
 
-        # Determine decoder input
+        # Determine decoder input and tokenize
         if target_texts is not None:
             # Training mode: use target texts as prompt
-            decoder_input = target_texts
+            decoder_input_texts = target_texts
         elif prompt_texts is not None:
             # Inference mode: use provided prompts
-            decoder_input = prompt_texts
+            decoder_input_texts = prompt_texts
         else:
             raise ValueError(
                 "Either target_texts (for training) or prompt_texts (for inference) "
                 "must be provided."
             )
 
+        # Wrap prompts with special tokens for C3
+        # Format: <img> <imgpad>*N </img> prompt
+        wrapped_prompts = []
+        for text in decoder_input_texts:
+            wrapped = (
+                C3_IM_START_TOKEN
+                + C3_IM_PATCH_TOKEN * self.latent_token_len
+                + C3_IM_END_TOKEN
+                + "\n"
+                + text
+            )
+            wrapped_prompts.append(wrapped)
+
+        # Tokenize wrapped prompts
+        prompt_ids = self.tokenizer(
+            wrapped_prompts,
+            return_tensors="pt",
+            padding=True,
+            truncation=True,
+            max_length=self.max_length
+            + self.latent_token_len
+            + 3,  # Account for special tokens
+        )["input_ids"].to(latent_tokens.device)
+
         # Decode latent tokens to logits
         # logits: [B, L, V]
         logits = self.decoder(
             latent_tokens=latent_tokens,
-            prompt_texts=decoder_input,
+            prompt_ids=prompt_ids,
         )
 
         # Compute loss if requested
@@ -235,33 +264,3 @@ class C3Model(nn.Module):
             self.encoder.llm.gradient_checkpointing_disable()
         if hasattr(self.decoder, "llm"):
             self.decoder.llm.gradient_checkpointing_disable()
-
-
-def build_c3_model(config: Dict[str, Any]) -> C3Model:
-    """Build C3 unified model from config.
-
-    Args:
-        config: Dict with 'encoder' and 'decoder' configurations
-
-    Returns:
-        C3Model instance
-
-    Example:
-        >>> config = {
-        ...     "encoder": {
-        ...         "model_name": "Qwen/Qwen2.5-0.5B",
-        ...         "latent_token_len": 32,
-        ...         "max_length": 2048,
-        ...         "pretrained": True,
-        ...         "freeze": False,
-        ...     },
-        ...     "decoder": {
-        ...         "model_name": "Qwen/Qwen2.5-1.5B",
-        ...         "latent_token_len": 32,
-        ...         "pretrained": True,
-        ...         "freeze": False,
-        ...     },
-        ... }
-        >>> model = build_c3_model(config)
-    """
-    return C3Model(config)
