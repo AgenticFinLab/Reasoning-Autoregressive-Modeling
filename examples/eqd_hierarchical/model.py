@@ -6,6 +6,7 @@ Uses text-native hierarchical scales: sentence → clause → phrase → word �
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from typing import Dict, Any, List, Optional, Tuple
 
 from ram.models.encoder import build_encoder
@@ -72,16 +73,28 @@ class HierarchicalTextQuantizer(nn.Module):
     def forward(self, z: torch.Tensor):
         """Hierarchical multi-scale quantization.
 
+        Dimension Flow (for L=256, scale_lengths=[1,4,16,64,256]):
+            Input: z [B, L, D] (e.g., [4, 256, 256])
+                ↓
+            For each scale (scale_len in [1, 4, 16, 64, 256]):
+                - Pool: f_rest [B, L, D] -> rest_down [B, scale_len, D]
+                - VQ: rest_down -> indices [B, scale_len], q [B, scale_len, D]
+                - Phi: q -> h [B, scale_len, D]
+                - Upsample: h -> h_up [B, L, D]
+                - Accumulate: f_hat += h_up, f_rest -= h_up
+                ↓
+            Output: f_hat [B, L, D], indices_per_scale, vq_loss
+
         Args:
-            z: [B, L, D] encoder output
+            z: [B, L, D] encoder output (continuous features)
 
         Returns:
-            f_hat: [B, L, D] accumulated quantized features
-            indices_per_scale: List of [B, scale_k] indices
-            vq_loss: scalar VQ loss
+            f_hat: [B, L, D] accumulated quantized features (sum of all scales)
+            indices_per_scale: List of [B, scale_k] codebook indices for each scale
+            vq_loss: scalar VQ commitment loss (encourages encoder to commit to codes)
         """
         B, L, D = z.shape
-        f_rest = z
+        f_rest = z  # Residual starts as full encoder output
         f_hat = torch.zeros_like(z)
         indices_per_scale = []
         vq_loss = 0.0
@@ -92,9 +105,7 @@ class HierarchicalTextQuantizer(nn.Module):
 
             # Pool to scale length
             pool_size = L // scale_len
-            rest_down = F.avg_pool1d(
-                f_rest.transpose(1, 2), pool_size
-            ).transpose(1, 2)
+            rest_down = F.avg_pool1d(f_rest.transpose(1, 2), pool_size).transpose(1, 2)
 
             # VQ
             distances = torch.cdist(rest_down, self.embedding.weight)
@@ -111,8 +122,11 @@ class HierarchicalTextQuantizer(nn.Module):
             f_rest = f_rest - h_up
 
             # VQ loss
-            vq_loss = vq_loss + F.mse_loss(q.detach(), rest_down) + \
-                     self.beta * F.mse_loss(q, rest_down.detach())
+            vq_loss = (
+                vq_loss
+                + F.mse_loss(q.detach(), rest_down)
+                + self.beta * F.mse_loss(q, rest_down.detach())
+            )
 
             indices_per_scale.append(indices)
 
@@ -164,12 +178,23 @@ class EQDHierarchicalModel(nn.Module):
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
         """Forward pass.
 
+        Dimension Flow:
+            texts: List[str] with B texts
+                ↓
+            z: [B, L, D] encoder output (continuous features)
+                ↓
+            f_hat: [B, L, D] quantized features (discrete codes via codebook)
+            indices_per_scale: List of [B, scale_k] codebook indices per scale
+            vq_loss: scalar VQ commitment loss
+                ↓
+            logits: [B, L, V] decoder output (vocabulary logits)
+
         Returns:
-            logits: [B, L, V]
-            loss: total loss (if compute_loss=True)
-            vq_loss: VQ loss (if compute_loss=True)
+            logits: [B, L, V] vocabulary logits for each position
+            loss: total loss = recon_loss + vq_loss_weight * vq_loss (if compute_loss=True)
+            vq_loss: scalar VQ commitment loss (if compute_loss=True)
         """
-        # Encode
+        # Encode: texts -> z [B, L, D]
         z = self.encoder(texts)
 
         # Quantize
@@ -193,10 +218,11 @@ class EQDHierarchicalModel(nn.Module):
             shift_logits = logits[..., :-1, :].contiguous()
             shift_labels = target_ids[..., 1:].contiguous()
 
-            loss_fct = nn.CrossEntropyLoss(ignore_index=self.dec_tokenizer.pad_token_id or -100)
+            loss_fct = nn.CrossEntropyLoss(
+                ignore_index=self.dec_tokenizer.pad_token_id or -100
+            )
             recon_loss = loss_fct(
-                shift_logits.view(-1, shift_logits.size(-1)),
-                shift_labels.view(-1)
+                shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1)
             )
 
             loss = recon_loss + vq_loss_weight * vq_loss
@@ -214,4 +240,3 @@ class EQDHierarchicalModel(nn.Module):
             self.encoder.gradient_checkpointing_disable()
         if hasattr(self.decoder, "gradient_checkpointing_disable"):
             self.decoder.gradient_checkpointing_disable()
-

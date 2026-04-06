@@ -38,16 +38,27 @@ class MultiScaleQuantizer(nn.Module):
     def forward(self, z: torch.Tensor):
         """Multi-scale quantization.
 
+        Dimension Flow:
+            Input: z [B, L, D] encoder output (continuous features)
+                ↓
+            For each scale (scale_len in scale_lengths):
+                - Pool: f_rest [B, L, D] -> rest_down [B, scale_len, D]
+                - VQ: rest_down -> indices [B, scale_len], q [B, scale_len, D]
+                - Upsample: q -> h_up [B, L, D] via repeat_interleave
+                - Accumulate: f_hat += h_up, f_rest -= h_up
+                ↓
+            Output: f_hat [B, L, D], indices_per_scale, vq_loss
+
         Args:
-            z: [B, L, D] encoder output
+            z: [B, L, D] encoder output (continuous features)
 
         Returns:
-            f_hat: [B, L, D] accumulated quantized features
-            indices_per_scale: List of [B, scale_k] indices
-            vq_loss: scalar VQ loss
+            f_hat: [B, L, D] accumulated quantized features (sum of all scales)
+            indices_per_scale: List of [B, scale_k] codebook indices for each scale
+            vq_loss: scalar VQ commitment loss
         """
         B, L, D = z.shape
-        f_rest = z
+        f_rest = z  # Residual starts as full encoder output
         f_hat = torch.zeros_like(z)
         indices_per_scale = []
         vq_loss = 0.0

@@ -89,16 +89,24 @@ class EDModel(nn.Module):
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """Forward pass through encoder-decoder.
 
+        Dimension Flow:
+            texts: List[str] with B texts
+                ↓
+            hidden: [B, L, D] encoder output (continuous features)
+                ↓
+            logits: [B, L, V] decoder output (vocabulary logits)
+
         Args:
-            texts: List of input texts
-            compute_loss: Whether to compute loss
+            texts: List of input texts (batch of B texts)
+            compute_loss: Whether to compute and return loss
             **loss_kwargs: Additional arguments for loss computation
 
         Returns:
-            logits: [B, L, V] token logits
-            loss: Scalar loss value (if compute_loss=True)
+            logits: [B, L, V] vocabulary logits for each position
+            loss: Scalar cross-entropy loss (if compute_loss=True)
         """
         # Encode: texts -> hidden [B, L, D]
+        # Encoder processes raw texts and outputs continuous features
         hidden = self.encoder(texts)
 
         # Decode: hidden -> logits [B, L, V]

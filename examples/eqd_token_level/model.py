@@ -37,18 +37,29 @@ class TokenLevelQuantizer(nn.Module):
     def forward(self, z: torch.Tensor):
         """Token-level quantization.
 
+        Dimension Flow:
+            Input: z [B, L, D] encoder output (continuous features)
+                ↓
+            Flatten: z [B, L, D] -> z_flat [B*L, D]
+            VQ: z_flat -> distances [B*L, K] -> indices [B*L] (nearest codebook entry)
+            Lookup: indices -> q_flat [B*L, D] (codebook vectors)
+            Reshape: q_flat [B*L, D] -> q [B, L, D], indices [B*L] -> indices [B, L]
+                ↓
+            Output: q [B, L, D], indices [B, L], vq_loss
+
         Args:
-            z: [B, L, D] encoder output
+            z: [B, L, D] encoder output (continuous features)
 
         Returns:
-            q: [B, L, D] quantized features
-            indices: [B, L] codebook indices
-            vq_loss: scalar VQ loss
+            q: [B, L, D] quantized features (codebook vectors for each position)
+            indices: [B, L] codebook indices (discrete codes for each position)
+            vq_loss: scalar VQ commitment loss
         """
         B, L, D = z.shape
 
-        # Flatten for VQ
-        z_flat = z.view(-1, D)  # [B*L, D]
+        # Flatten for VQ: [B, L, D] -> [B*L, D]
+        # This allows vectorized distance computation to all codebook entries
+        z_flat = z.reshape(-1, D)  # [B*L, D] - use reshape for safety
 
         # Compute distances to codebook
         distances = torch.cdist(z_flat, self.embedding.weight)  # [B*L, K]
@@ -56,8 +67,9 @@ class TokenLevelQuantizer(nn.Module):
 
         # Get quantized vectors
         q_flat = self.embedding(indices)  # [B*L, D]
-        q = q_flat.view(B, L, D)  # [B, L, D]
-        indices = indices.view(B, L)  # [B, L]
+        # Use reshape for safety (embedding output is contiguous but reshape is safer)
+        q = q_flat.reshape(B, L, D)  # [B, L, D]
+        indices = indices.reshape(B, L)  # [B, L]
 
         # VQ loss
         vq_loss = F.mse_loss(q.detach(), z) + self.beta * F.mse_loss(q, z.detach())

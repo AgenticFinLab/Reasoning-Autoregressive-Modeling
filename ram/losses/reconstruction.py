@@ -210,8 +210,9 @@ class ReconstructionLoss(nn.Module):
             target_ids[attention_mask == 0] = self.ignore_index
 
         # Reshape for cross entropy: [B*L, V] vs [B*L]
-        logits_flat = logits.view(-1, V)
-        target_flat = target_ids.view(-1)
+        # Use reshape instead of view for compatibility with non-contiguous tensors
+        logits_flat = logits.reshape(-1, V)
+        target_flat = target_ids.reshape(-1)
 
         loss = self.ce_loss(logits_flat, target_flat)
 
@@ -346,8 +347,9 @@ class DualTokenizerReconstructionLoss(nn.Module):
         dec_target_ids[dec_attention_mask == 0] = self.ignore_index
 
         # Compute loss
-        logits_flat = logits.view(-1, V)
-        target_flat = dec_target_ids.view(-1)
+        # Use reshape instead of view to handle non-contiguous tensors
+        logits_flat = logits.reshape(-1, V)
+        target_flat = dec_target_ids.reshape(-1)
         loss = self.ce_loss(logits_flat, target_flat)
 
         return loss, dec_target_ids
@@ -498,9 +500,10 @@ def compute_reconstruction_loss(
         target_ids[attention_mask == 0] = ignore_index
 
     # Compute loss
+    # Use reshape instead of view for compatibility with non-contiguous tensors
     loss = F.cross_entropy(
-        logits.view(-1, V),
-        target_ids.view(-1),
+        logits.reshape(-1, V),
+        target_ids.reshape(-1),
         ignore_index=ignore_index,
         label_smoothing=label_smoothing,
     )
