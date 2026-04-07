@@ -69,6 +69,7 @@ from ram import (
     TrainingStep,
     create_reconstruction_samples,
 )
+from ram.evaluation import evaluate_reconstruction
 from ram.models.decoder import build_c3_decoder
 from ram.models.encoder import build_c3_encoder
 from ram.utils import (
@@ -540,8 +541,27 @@ def train_c3(config: dict):
                 recon_samples = create_reconstruction_samples(decode_result)
                 step_record.reconstruction_samples = recon_samples
 
+                # Evaluate reconstruction quality for first sample in batch
+                sample_metrics = None
+                if recon_samples:
+                    sample = recon_samples[0]
+                    sample_metrics = evaluate_reconstruction(
+                        original_text=sample.original,
+                        reconstructed_text=sample.reconstructed,
+                        tokenizer=tokenizer,
+                    )
+                    # Log key metrics
+                    logger.info(
+                        f"    [Metrics: token_precision={sample_metrics.get('token_precision', 0):.2%}, "
+                        f"char_precision={sample_metrics['char_precision']:.2%}, "
+                        f"bleu={sample_metrics['bleu_score']:.3f}]"
+                    )
+
                 # Save samples to block-based store for alignment with training history
-                sample_key = samples_store.save_samples(step_record, recon_samples)
+                # Include metrics in the saved record
+                sample_key = samples_store.save_samples(
+                    step_record, recon_samples, metrics=sample_metrics
+                )
                 logger.info(f"    [Samples saved: {sample_key}]")
 
             # --- Save checkpoint at checkpoint_interval ---

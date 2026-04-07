@@ -27,6 +27,7 @@ from lmbase.dataset import registry
 from lmbase.utils.tools import BlockBasedStoreManager
 from model import C3Model
 from ram import create_reconstruction_samples
+from ram.evaluation import evaluate_reconstruction
 from ram.utils import collate_fn_text, decode_logits_to_text, load_config
 
 
@@ -155,16 +156,26 @@ def run_reconstruction(
             # Create reconstruction samples
             recon_samples = create_reconstruction_samples(decode_result)
 
+            # Get reconstructed text
+            reconstructed_text = recon_samples[0].reconstructed if recon_samples else ""
+
+            # Evaluate reconstruction quality
+            metrics = evaluate_reconstruction(
+                original_text=text,
+                reconstructed_text=reconstructed_text,
+                tokenizer=tokenizer,
+            )
+
             # Build sample record and save immediately
             # No accumulation in memory - saves space
             sample_record = {
                 "sample_id": idx,
                 "original_text": text,
-                "reconstructed_text": (
-                    recon_samples[0].reconstructed if recon_samples else ""
-                ),
+                "reconstructed_text": reconstructed_text,
                 # In reconstruction tasks, target is the original input
-                "target_text": (recon_samples[0].original if recon_samples else text),
+                "target_text": text,
+                # Evaluation metrics
+                "metrics": metrics,
                 # Latent representation info
                 "latent_tokens_shape": [N, model.encoder_hidden_dim],
                 # Store full reconstruction data

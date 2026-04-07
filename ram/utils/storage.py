@@ -193,12 +193,14 @@ class ReconstructionSampleStore:
         self,
         step: TrainingStep,
         samples: List[ReconstructionSample],
+        metrics: dict | None = None,
     ) -> str:
         """Save reconstruction samples for a training step.
 
         Args:
             step: TrainingStep record with epoch/step/global_step info.
             samples: List of ReconstructionSample instances.
+            metrics: Optional evaluation metrics for the samples.
 
         Returns:
             str: The save key ("step_{global_step}").
@@ -217,6 +219,10 @@ class ReconstructionSampleStore:
             "timestamp": step.timestamp,
             "samples": [asdict(s) for s in samples],
         }
+
+        # Add evaluation metrics if provided
+        if metrics is not None:
+            record["metrics"] = metrics
 
         self.store.save(save_key, record)
         return save_key
