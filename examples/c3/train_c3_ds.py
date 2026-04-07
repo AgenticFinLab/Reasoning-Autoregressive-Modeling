@@ -42,13 +42,16 @@ from lmbase.dataset import registry
 from model import C3Model
 from ram import (
     ReconstructionSample,
+    ReconstructionSampleStore,
     TrainingConfig,
     TrainingHistory,
     TrainingLogger,
     TrainingStep,
+    create_reconstruction_samples,
 )
 from ram.utils import (
     collate_fn_text,
+    decode_logits_to_text,
     load_config,
     setup_environment,
 )
@@ -285,6 +288,7 @@ def train_c3(config: dict, ds_config: dict, tee_logger: TeeLogger | None = None)
 
     history = None
     samples_store = None
+    samples_dir = log_dir / "samples"
 
     if is_main_process:
         # Calculate effective batch size: per_gpu × grad_acc × world_size
@@ -314,7 +318,13 @@ def train_c3(config: dict, ds_config: dict, tee_logger: TeeLogger | None = None)
 
         history_path = log_dir / "training_history.json"
         history = TrainingHistory(training_config, history_path)
-        logger.info(f"    Samples store: {log_dir / 'samples'}")
+
+        # Setup reconstruction sample store (block-based storage)
+        samples_store = ReconstructionSampleStore(
+            folder=str(samples_dir),
+            block_size=50,
+        )
+        logger.info(f"    Samples store: {samples_dir}")
         logger.info("")
 
     if resume:
@@ -418,6 +428,7 @@ def train_c3(config: dict, ds_config: dict, tee_logger: TeeLogger | None = None)
             # Log at intervals
             if global_step % log_interval == 0 and is_main_process:
                 assert history is not None
+                assert samples_store is not None
 
                 step_record = TrainingStep(
                     epoch=epoch + 1,
@@ -429,9 +440,39 @@ def train_c3(config: dict, ds_config: dict, tee_logger: TeeLogger | None = None)
                     lr_encoder=model_engine.get_lr()[0],
                     lr_decoder=model_engine.get_lr()[0],
                 )
+
+                # Generate reconstruction samples for inspection
+                # Use training logits for reconstruction (teacher forcing output)
+                # logits: [B, N+L, V] -> skip N latent tokens -> [B, L, V]
+                with torch.no_grad():
+                    # Get attention mask from tokenizer
+                    encoded = tokenizer(
+                        batch_texts,
+                        return_tensors="pt",
+                        padding=True,
+                        truncation=True,
+                        max_length=M,
+                    )
+                    attention_mask = encoded["attention_mask"].to(device)
+
+                    # Skip latent token positions for decoding
+                    # text_logits: [B, L, V]
+                    text_logits = logits[:, N:, :]
+                    decode_result = decode_logits_to_text(
+                        text_logits, tokenizer, batch_texts, attention_mask
+                    )
+
+                # Create reconstruction samples and add to step record
+                recon_samples = create_reconstruction_samples(decode_result)
+                step_record.reconstruction_samples = recon_samples
+
+                # Save samples to block-based store for alignment with training history
+                sample_key = samples_store.save_samples(step_record, recon_samples)
+
                 history.append(step_record)
                 logger.log_step(step_record, log_interval=1)
                 logger.info(f"    [Step logged: global_step_{global_step}]")
+                logger.info(f"    [Samples saved: {sample_key}]")
 
             # Save checkpoint at intervals
             if global_step % checkpoint_interval == 0:
