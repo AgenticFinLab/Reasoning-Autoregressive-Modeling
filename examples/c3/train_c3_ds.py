@@ -14,13 +14,22 @@ DeepSpeed Features:
 Output Structure:
     EXPERIMENT/c3/
     ├── checkpoints/
-    │   ├── global_step_{N}/           # DeepSpeed checkpoint format
+    │   ├── global_step_{N}/           # DeepSpeed ZeRO-2 checkpoint
+    │   │   ├── mp_rank_00_model_states.pt          # Full model weights
+    │   │   └── bf16_zero_pp_rank_*_optim_states.pt # Sharded optimizer states
     │   └── latest -> global_step_{N}
     └── logs/
         ├── training.log
         ├── train_config.json
         ├── training_history.json
         └── terminal_output.json       # Auto-captured terminal output
+
+Checkpoint Format:
+    DeepSpeed ZeRO-2 saves:
+    - mp_rank_00_model_states.pt: Complete model weights (for inference)
+    - bf16_zero_pp_rank_{0,1,2,3}_optim_states.pt: Optimizer states per rank
+
+    For inference/visualization, only model_states.pt is needed.
 """
 
 import argparse

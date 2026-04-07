@@ -32,20 +32,28 @@ from ram.utils import collate_fn_text, decode_logits_to_text, load_config
 
 
 def load_trained_model(model_path: str, device: str = "cuda") -> C3Model:
-    """Load a trained C3 model from checkpoint.
+    """Load a trained C3 model from DeepSpeed ZeRO-2 checkpoint.
+
+    DeepSpeed ZeRO-2 saves checkpoints as:
+        - mp_rank_00_model_states.pt: Full model weights (use this for inference)
+        - bf16_zero_pp_rank_*_optim_states.pt: Sharded optimizer states (training only)
+
+    For inference/visualization, only model_states.pt is needed.
 
     Args:
-        model_path: Path to the model checkpoint directory
+        model_path: Path to the model checkpoint directory (e.g., global_step_870/)
         device: Device to load the model on
 
     Returns:
-        Loaded C3Model instance
+        Loaded C3Model instance and its config
     """
-    # Load model config from checkpoint directory
-    config_path = Path(model_path) / "config.json"
+    model_path = Path(model_path)
+
+    # Load model config from checkpoint directory or parent logs
+    config_path = model_path / "config.json"
     if not config_path.exists():
-        # Fallback: look for config in parent directory
-        config_path = Path(model_path).parent.parent / "logs" / "train_config.json"
+        # Fallback: look for config in parent directory's logs
+        config_path = model_path.parent.parent / "logs" / "train_config.json"
 
     with open(config_path, "r", encoding="utf-8") as f:
         config = json.load(f)
@@ -56,26 +64,37 @@ def load_trained_model(model_path: str, device: str = "cuda") -> C3Model:
     else:
         model_cfg = config
 
-    # Build and load model
+    # Build model
     model = C3Model(model_cfg)
     model = model.to(device)
 
-    # Load model weights
-    # DeepSpeed checkpoint structure: mp_rank_00_model_states.pt
-    model_states_path = Path(model_path) / "mp_rank_00_model_states.pt"
-    if model_states_path.exists():
-        state_dict = torch.load(model_states_path, map_location=device)
-        if "module" in state_dict:
-            state_dict = state_dict["module"]
-        model.load_state_dict(state_dict, strict=False)
-    else:
-        # Try standard PyTorch checkpoint
-        ckpt_path = Path(model_path) / "pytorch_model.bin"
-        if ckpt_path.exists():
-            state_dict = torch.load(ckpt_path, map_location=device)
-            model.load_state_dict(state_dict, strict=False)
+    # Load model weights from DeepSpeed checkpoint
+    # For ZeRO-2: mp_rank_00_model_states.pt contains full model weights
+    model_states_path = model_path / "mp_rank_00_model_states.pt"
 
+    if not model_states_path.exists():
+        raise FileNotFoundError(
+            f"Model checkpoint not found: {model_states_path}\n"
+            f"Expected DeepSpeed ZeRO-2 checkpoint files:\n"
+            f"  - mp_rank_00_model_states.pt (model weights)\n"
+            f"  - bf16_zero_pp_rank_*_optim_states.pt (optimizer states, not needed for inference)"
+        )
+
+    print(f"Loading model weights from: {model_states_path}")
+    state_dict = torch.load(model_states_path, map_location=device)
+
+    # DeepSpeed wraps model in 'module' when saving
+    if "module" in state_dict:
+        state_dict = state_dict["module"]
+
+    # Load weights (non-strict to handle any mismatches)
+    model.load_state_dict(state_dict, strict=False)
     model.eval()
+
+    print(f"Model loaded successfully!")
+    print(f"  Latent tokens: {model.latent_token_len}")
+    print(f"  Max length: {model.max_length}")
+
     return model, model_cfg
 
 
