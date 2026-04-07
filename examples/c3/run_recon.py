@@ -1,14 +1,14 @@
 """C3 Reconstruction Visualization Script.
 
 Usage:
-    python examples/c3/run_recon.py \
-        -m EXPERIMENT/c3/checkpoints/epoch_1 \
-        -d gsm8k \
-        -n 100 \
-        -p EXPERIMENT/c3/recon_results
+    python examples/c3/run_recon.py -c configs/c3/config.yaml
+    python examples/c3/run_recon.py -c configs/c3/config.yaml -n 50
 
-This script loads a trained C3 model and generates reconstruction samples
-for visualization and analysis. It saves:
+This script loads a trained C3 model from the latest checkpoint and generates
+reconstruction samples for visualization and analysis. All settings (model,
+dataset, paths) are read from the config file.
+
+It saves:
     - Original input text
     - Encoder latent representations
     - Decoder reconstruction output
@@ -21,17 +21,18 @@ import os
 from pathlib import Path
 
 import torch
-from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from lmbase.dataset import registry
 from lmbase.utils.tools import BlockBasedStoreManager
 from model import C3Model
 from ram import create_reconstruction_samples
-from ram.utils import collate_fn_text, decode_logits_to_text, load_config
+from ram.utils import decode_logits_to_text, load_config
 
 
-def load_trained_model(model_path: str, device: str = "cuda") -> C3Model:
+def load_trained_model(
+    model_path: str, model_cfg: dict, device: str = "cuda"
+) -> C3Model:
     """Load a trained C3 model from DeepSpeed ZeRO-2 checkpoint.
 
     DeepSpeed ZeRO-2 saves checkpoints as:
@@ -42,29 +43,15 @@ def load_trained_model(model_path: str, device: str = "cuda") -> C3Model:
 
     Args:
         model_path: Path to the model checkpoint directory (e.g., global_step_870/)
+        model_cfg: Model configuration dict
         device: Device to load the model on
 
     Returns:
-        Loaded C3Model instance and its config
+        Loaded C3Model instance
     """
     model_path = Path(model_path)
 
-    # Load model config from checkpoint directory or parent logs
-    config_path = model_path / "config.json"
-    if not config_path.exists():
-        # Fallback: look for config in parent directory's logs
-        config_path = model_path.parent.parent / "logs" / "train_config.json"
-
-    with open(config_path, "r", encoding="utf-8") as f:
-        config = json.load(f)
-
-    # Extract model config (handle both direct and nested config)
-    if "model" in config:
-        model_cfg = config["model"]
-    else:
-        model_cfg = config
-
-    # Build model
+    # Build model from config
     model = C3Model(model_cfg)
     model = model.to(device)
 
@@ -95,21 +82,23 @@ def load_trained_model(model_path: str, device: str = "cuda") -> C3Model:
     print(f"  Latent tokens: {model.latent_token_len}")
     print(f"  Max length: {model.max_length}")
 
-    return model, model_cfg
+    return model
 
 
 def run_reconstruction(
     model: C3Model,
-    dataloader: DataLoader,
+    dataset,
     num_samples: int,
     save_path: Path,
     device: str = "cuda",
 ) -> None:
     """Run reconstruction on dataset samples and save results.
 
+    Processes samples one by one for simplicity and clarity.
+
     Args:
         model: Trained C3 model
-        dataloader: DataLoader with text samples
+        dataset: Dataset with text samples
         num_samples: Number of samples to process
         save_path: Directory to save reconstruction results
         device: Device to run inference on
@@ -126,29 +115,28 @@ def run_reconstruction(
     M = model.max_length
     tokenizer = model.tokenizer
 
-    processed = 0
+    # Limit samples to dataset size
+    num_samples = min(num_samples, len(dataset))
     sample_records = []
 
     print(f"Processing {num_samples} samples...")
 
     with torch.no_grad():
-        for batch_texts in tqdm(dataloader, desc="Reconstructing"):
-            if processed >= num_samples:
-                break
-
-            # Move batch to device
-            batch_size = len(batch_texts)
+        for idx in tqdm(range(num_samples), desc="Reconstructing"):
+            # Get single sample
+            text = dataset[idx]
 
             # Forward pass through model
+            # Model expects list of texts
             logits, _ = model(
-                context_texts=batch_texts,
-                target_texts=batch_texts,
+                context_texts=[text],
+                target_texts=[text],
                 compute_loss=False,
             )
 
             # Get attention mask for decoding
             encoded = tokenizer(
-                batch_texts,
+                [text],
                 return_tensors="pt",
                 padding=True,
                 truncation=True,
@@ -157,61 +145,52 @@ def run_reconstruction(
             attention_mask = encoded["attention_mask"].to(device)
 
             # Decode reconstruction results
-            # logits: [B, N+L, V] -> skip N latent tokens -> [B, L, V]
+            # logits: [1, N+L, V] -> skip N latent tokens -> [1, L, V]
             text_logits = logits[:, N:, :]
             decode_result = decode_logits_to_text(
-                text_logits, tokenizer, batch_texts, attention_mask
+                text_logits, tokenizer, [text], attention_mask
             )
 
             # Create reconstruction samples
             recon_samples = create_reconstruction_samples(decode_result)
 
-            # Store each sample in the batch
-            for i in range(batch_size):
-                if processed >= num_samples:
-                    break
-
-                sample_record = {
-                    "sample_id": processed,
-                    "original_text": batch_texts[i],
-                    "reconstructed_text": (
-                        recon_samples[i].reconstructed_text
-                        if i < len(recon_samples)
-                        else ""
+            # Build sample record
+            sample_record = {
+                "sample_id": idx,
+                "original_text": text,
+                "reconstructed_text": (
+                    recon_samples[0].reconstructed_text if recon_samples else ""
+                ),
+                "target_text": (
+                    recon_samples[0].target_text if recon_samples else text
+                ),
+                # Latent representation info
+                "latent_tokens_shape": [N, model.encoder_hidden_dim],
+                # Store full reconstruction data
+                "full_data": {
+                    "input_ids": encoded["input_ids"][0].cpu().tolist(),
+                    "attention_mask": encoded["attention_mask"][0].cpu().tolist(),
+                    "decoded_tokens": (
+                        decode_result.decoded_tokens[0]
+                        if decode_result.decoded_tokens
+                        else []
                     ),
-                    "target_text": (
-                        recon_samples[i].target_text
-                        if i < len(recon_samples)
-                        else batch_texts[i]
+                    "token_confidences": (
+                        decode_result.token_confidences[0]
+                        if decode_result.token_confidences
+                        else []
                     ),
-                    # Latent representation (encoder output)
-                    "latent_tokens_shape": [N, model.encoder_hidden_dim],
-                    # Store full reconstruction data
-                    "full_data": {
-                        "input_ids": encoded["input_ids"][i].cpu().tolist(),
-                        "attention_mask": encoded["attention_mask"][i].cpu().tolist(),
-                        "decoded_tokens": (
-                            decode_result.decoded_tokens[i]
-                            if i < len(decode_result.decoded_tokens)
-                            else []
-                        ),
-                        "token_confidences": (
-                            decode_result.token_confidences[i]
-                            if i < len(decode_result.token_confidences)
-                            else []
-                        ),
-                    },
-                }
+                },
+            }
 
-                sample_records.append(sample_record)
-                processed += 1
+            sample_records.append(sample_record)
 
     # Save all samples using BlockBasedStoreManager
     result_file = store_manager.save(sample_records, prefix="reconstruction")
 
     # Save metadata
     metadata = {
-        "total_samples": processed,
+        "total_samples": num_samples,
         "model_config": {
             "latent_token_len": N,
             "max_length": M,
@@ -229,7 +208,41 @@ def run_reconstruction(
     print(f"\nReconstruction complete!")
     print(f"  Results saved to: {result_file}")
     print(f"  Metadata saved to: {metadata_path}")
-    print(f"  Total samples processed: {processed}")
+    print(f"  Total samples processed: {num_samples}")
+
+
+def find_all_checkpoints(checkpoint_dir: Path, final_only: bool = False) -> list[Path]:
+    """Find all checkpoint directories with model states.
+
+    Args:
+        checkpoint_dir: Base checkpoint directory
+        final_only: If True, only return checkpoints/final/
+
+    Returns:
+        List of checkpoint directories containing mp_rank_00_model_states.pt
+    """
+    if not checkpoint_dir.exists():
+        return []
+
+    checkpoints = []
+
+    if final_only:
+        # Only use final checkpoint
+        final_dir = checkpoint_dir / "final"
+        if final_dir.exists() and (final_dir / "mp_rank_00_model_states.pt").exists():
+            checkpoints.append(final_dir)
+        return checkpoints
+
+    # Find all subdirectories with model states
+    for subdir in checkpoint_dir.iterdir():
+        if not subdir.is_dir():
+            continue
+        model_file = subdir / "mp_rank_00_model_states.pt"
+        if model_file.exists():
+            checkpoints.append(subdir)
+
+    # Sort by name for consistent ordering
+    return sorted(checkpoints)
 
 
 def main():
@@ -238,18 +251,11 @@ def main():
         description="C3 Reconstruction Visualization",
     )
     parser.add_argument(
-        "-m",
-        "--model-path",
+        "-c",
+        "--config",
         type=str,
         required=True,
-        help="Path to trained model checkpoint directory",
-    )
-    parser.add_argument(
-        "-d",
-        "--dataset",
-        type=str,
-        required=True,
-        help="Dataset name (e.g., gsm8k, math, mmmu)",
+        help="Path to config file (e.g., configs/c3/config.yaml)",
     )
     parser.add_argument(
         "-n",
@@ -259,29 +265,10 @@ def main():
         help="Number of samples to reconstruct (default: 100)",
     )
     parser.add_argument(
-        "-p",
-        "--save-path",
-        type=str,
-        required=True,
-        help="Directory to save reconstruction results",
-    )
-    parser.add_argument(
-        "--batch-size",
-        type=int,
-        default=8,
-        help="Batch size for inference (default: 8)",
-    )
-    parser.add_argument(
-        "--split",
-        type=str,
-        default="test",
-        help="Dataset split to use (default: test)",
-    )
-    parser.add_argument(
-        "--subset",
-        type=str,
-        default=None,
-        help="Dataset subset (e.g., 'algebra' for MATH dataset)",
+        "-f",
+        "--final-only",
+        action="store_true",
+        help="Only use checkpoints/final/ (default: use all checkpoints)",
     )
     parser.add_argument(
         "--device",
@@ -292,36 +279,65 @@ def main():
 
     args = parser.parse_args()
 
-    # Load model
-    print(f"Loading model from: {args.model_path}")
-    model, model_cfg = load_trained_model(args.model_path, args.device)
-    print("Model loaded successfully!")
+    # Load config
+    print(f"Loading config from: {args.config}")
+    config = load_config(args.config)
 
-    # Setup dataset
-    print(f"Loading dataset: {args.dataset}")
-    data_cfg = {"data_name": args.dataset, "split": args.split}
-    if args.subset is not None:
-        data_cfg["subset"] = args.subset
-    dataset = registry.get(data_cfg, split=args.split)
+    # Extract all configs (same as train_c3.py)
+    model_cfg = config["model"]
+    data_cfg = config["data"]
+    log_cfg = config["log"]
 
-    dataloader = DataLoader(
-        dataset,
-        batch_size=args.batch_size,
-        shuffle=False,
-        collate_fn=collate_fn_text,
-        drop_last=False,
-    )
+    # Determine paths from config
+    output_dir = Path(log_cfg["save_folder"])
+    checkpoint_dir = output_dir / "checkpoints"
+    base_save_path = output_dir / "recon_results"
+
+    # Find all checkpoints
+    print(f"Looking for checkpoints in: {checkpoint_dir}")
+    ckpt_dirs = find_all_checkpoints(checkpoint_dir, final_only=args.final_only)
+
+    if not ckpt_dirs:
+        raise FileNotFoundError(f"No checkpoints found in {checkpoint_dir}")
+
+    print(f"Found {len(ckpt_dirs)} checkpoint(s):")
+    for ckpt in ckpt_dirs:
+        print(f"  - {ckpt.name}")
+
+    # Setup dataset (from config)
+    print(f"\nLoading dataset: {data_cfg['data_name']}")
+    dataset = registry.get(data_cfg, split=data_cfg["split"])
     print(f"Dataset loaded: {len(dataset)} samples")
 
-    # Run reconstruction
-    save_path = Path(args.save_path)
-    run_reconstruction(
-        model=model,
-        dataloader=dataloader,
-        num_samples=args.num_samples,
-        save_path=save_path,
-        device=args.device,
-    )
+    # Run reconstruction for each checkpoint
+    for ckpt_path in ckpt_dirs:
+        print(f"\n{'='*60}")
+        print(f"Processing checkpoint: {ckpt_path.name}")
+        print(f"{'='*60}")
+
+        # Create save path for this checkpoint
+        save_path = base_save_path / ckpt_path.name
+
+        # Load model
+        model = load_trained_model(ckpt_path, model_cfg, args.device)
+
+        # Run reconstruction
+        run_reconstruction(
+            model=model,
+            dataset=dataset,
+            num_samples=args.num_samples,
+            save_path=save_path,
+            device=args.device,
+        )
+
+        # Clean up to free memory
+        del model
+        torch.cuda.empty_cache()
+
+    print(f"\n{'='*60}")
+    print(f"All checkpoints processed!")
+    print(f"Results saved to: {base_save_path}")
+    print(f"{'='*60}")
 
 
 if __name__ == "__main__":
