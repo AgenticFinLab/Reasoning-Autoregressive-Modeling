@@ -117,7 +117,6 @@ def run_reconstruction(
 
     # Limit samples to dataset size
     num_samples = min(num_samples, len(dataset))
-    sample_records = []
 
     print(f"Processing {num_samples} samples...")
 
@@ -156,7 +155,8 @@ def run_reconstruction(
             # Create reconstruction samples
             recon_samples = create_reconstruction_samples(decode_result)
 
-            # Build sample record
+            # Build sample record and save immediately
+            # No accumulation in memory - saves space
             sample_record = {
                 "sample_id": idx,
                 "original_text": text,
@@ -177,10 +177,8 @@ def run_reconstruction(
                 },
             }
 
-            sample_records.append(sample_record)
-
-    # Save all samples using BlockBasedStoreManager
-    result_file = store_manager.save(sample_records, prefix="reconstruction")
+            # Save immediately to avoid memory accumulation
+            store_manager.save(f"sample_{idx}", sample_record)
 
     # Save metadata
     metadata = {
@@ -192,7 +190,7 @@ def run_reconstruction(
             "decoder_hidden_dim": model.decoder_hidden_dim,
             "vocab_size": model.vocab_size,
         },
-        "result_file": result_file,
+        "save_path": str(save_path),
     }
 
     metadata_path = save_path / "metadata.json"
@@ -200,7 +198,7 @@ def run_reconstruction(
         json.dump(metadata, f, indent=2, ensure_ascii=False)
 
     print(f"\nReconstruction complete!")
-    print(f"  Results saved to: {result_file}")
+    print(f"  Results saved to: {save_path}")
     print(f"  Metadata saved to: {metadata_path}")
     print(f"  Total samples processed: {num_samples}")
 
