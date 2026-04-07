@@ -27,7 +27,7 @@ from lmbase.dataset import registry
 from lmbase.utils.tools import BlockBasedStoreManager
 from model import C3Model
 from ram import create_reconstruction_samples
-from ram.utils import decode_logits_to_text, load_config
+from ram.utils import collate_fn_text, decode_logits_to_text, load_config
 
 
 def load_trained_model(
@@ -123,8 +123,10 @@ def run_reconstruction(
 
     with torch.no_grad():
         for idx in tqdm(range(num_samples), desc="Reconstructing"):
-            # Get single sample
-            text = dataset[idx]
+            # Get single sample and extract text
+            # Dataset returns dict, collate_fn_text extracts the text field
+            raw_sample = dataset[idx]
+            text = collate_fn_text([raw_sample])[0]
 
             # Forward pass through model
             # Model expects list of texts
