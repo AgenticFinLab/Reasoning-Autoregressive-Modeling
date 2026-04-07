@@ -161,27 +161,19 @@ def run_reconstruction(
                 "sample_id": idx,
                 "original_text": text,
                 "reconstructed_text": (
-                    recon_samples[0].reconstructed_text if recon_samples else ""
+                    recon_samples[0].reconstructed if recon_samples else ""
                 ),
-                "target_text": (
-                    recon_samples[0].target_text if recon_samples else text
-                ),
+                # In reconstruction tasks, target is the original input
+                "target_text": (recon_samples[0].original if recon_samples else text),
                 # Latent representation info
                 "latent_tokens_shape": [N, model.encoder_hidden_dim],
                 # Store full reconstruction data
                 "full_data": {
                     "input_ids": encoded["input_ids"][0].cpu().tolist(),
                     "attention_mask": encoded["attention_mask"][0].cpu().tolist(),
-                    "decoded_tokens": (
-                        decode_result.decoded_tokens[0]
-                        if decode_result.decoded_tokens
-                        else []
-                    ),
-                    "token_confidences": (
-                        decode_result.token_confidences[0]
-                        if decode_result.token_confidences
-                        else []
-                    ),
+                    # Predicted token IDs from decode_result dict
+                    "pred_ids": decode_result["pred_ids"][0],
+                    "pred_text": decode_result["pred_texts"][0],
                 },
             }
 
