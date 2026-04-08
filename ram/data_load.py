@@ -40,6 +40,7 @@ Custom target formatting:
 from typing import Any, Dict, List
 
 from lmbase.dataset import registry
+from lmbase.dataset.base import TextSample
 from torch.utils.data import DataLoader, Dataset
 
 from ram.generic import RamSample

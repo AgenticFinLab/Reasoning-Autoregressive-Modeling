@@ -19,6 +19,7 @@ It saves:
 import argparse
 from pathlib import Path
 
+import torch
 from model import EDModel
 from ram import RamDataLoaderRegistry
 from ram.utils import (
@@ -35,8 +36,9 @@ def run_reconstruction(
     dataset,
     num_samples: int,
     save_path: Path,
-    device: str = "cuda",
-    batch_size: int = 1,
+    device: str,
+    batch_size: int,
+    block_size: int,
 ) -> None:
     """Run reconstruction on dataset samples and save results.
 
@@ -48,7 +50,8 @@ def run_reconstruction(
         num_samples: Number of samples to process
         save_path: Directory to save reconstruction results
         device: Device to run inference on
-        batch_size: Number of samples to process in each batch (default: 1)
+        batch_size: Number of samples to process in each batch
+        block_size: Block size for storage manager
     """
     print(f"Processing {min(num_samples, len(dataset))} samples...")
 
@@ -58,7 +61,6 @@ def run_reconstruction(
         dataset=dataset,
         tokenizer=model.dec_tokenizer,
         num_samples=num_samples,
-        device=device,
         batch_size=batch_size,
     )
 
@@ -72,6 +74,7 @@ def run_reconstruction(
     metadata_path = save_reconstruction_results(
         results=all_results,
         save_path=save_path,
+        block_size=block_size,
         model_info=model_info,
     )
 
@@ -97,20 +100,32 @@ def main():
         "-n",
         "--num-samples",
         type=int,
-        default=100,
-        help="Number of samples to reconstruct (default: 100)",
+        required=True,
+        help="Number of samples to reconstruct",
     )
     parser.add_argument(
         "-f",
         "--final-only",
         action="store_true",
-        help="Only use checkpoint_final.pt (default: use all checkpoints)",
+        help="Only use checkpoint_final.pt",
     )
     parser.add_argument(
         "--device",
         type=str,
-        default="cuda",
-        help="Device to run on (default: cuda)",
+        required=True,
+        help="Device to run on",
+    )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        required=True,
+        help="Batch size for reconstruction",
+    )
+    parser.add_argument(
+        "--block-size",
+        type=int,
+        required=True,
+        help="Block size for storage manager",
     )
 
     args = parser.parse_args()
@@ -146,12 +161,12 @@ def main():
     dataloader = RamDataLoaderRegistry(
         {
             "data_name": data_cfg["data_name"],
-            "data_dir": data_cfg.get("data_dir", ""),
+            "data_dir": data_cfg["data_dir"],
             "split": data_cfg["split"],
-            "batch_size": 1,  # Process one at a time
-            "num_workers": 0,
-            "shuffle": False,
-            "drop_last": False,
+            "batch_size": data_cfg["batch_size"],
+            "num_workers": data_cfg["num_workers"],
+            "shuffle": data_cfg["shuffle"],
+            "drop_last": data_cfg["drop_last"],
         }
     )
     # Get the wrapped dataset from dataloader
@@ -182,6 +197,8 @@ def main():
             num_samples=args.num_samples,
             save_path=save_path,
             device=args.device,
+            batch_size=args.batch_size,
+            block_size=args.block_size,
         )
 
         # Clean up to free memory

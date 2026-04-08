@@ -6,14 +6,15 @@ reconstruction handling.
 """
 
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 import torch
 from lmbase.utils.tools import BlockBasedStoreManager
+from tqdm import tqdm
 from transformers import PreTrainedTokenizer
 
 from ram.evaluation import evaluate_reconstruction
-from ram.generic import RamReconstructSample, RamSample
+from ram.generic import RamReconstructSample
 
 
 def run_reconstruction_evaluation(
@@ -21,8 +22,7 @@ def run_reconstruction_evaluation(
     dataset,
     tokenizer: PreTrainedTokenizer,
     num_samples: int,
-    device: str = "cuda",
-    batch_size: int = 1,
+    batch_size: int,
 ) -> List[RamReconstructSample]:
     """Run reconstruction evaluation on dataset samples.
 
@@ -33,14 +33,11 @@ def run_reconstruction_evaluation(
         dataset: Dataset containing RamSample objects
         tokenizer: Tokenizer for decoding
         num_samples: Number of samples to process
-        device: Device to run evaluation on
-        batch_size: Number of samples per batch (default: 1)
+        batch_size: Number of samples per batch
 
     Returns:
         List of RamReconstructSample with all reconstruction results
     """
-    from tqdm import tqdm
-
     num_samples = min(num_samples, len(dataset))
     all_results = []
 
@@ -92,14 +89,16 @@ def run_reconstruction_evaluation(
 def save_reconstruction_results(
     results: List[RamReconstructSample],
     save_path: Path,
-    model_info: Optional[Dict[str, Any]] = None,
+    block_size: int,
+    model_info: Dict[str, Any],
 ) -> Path:
     """Save reconstruction results to block-based storage.
 
     Args:
         results: List of RamReconstructSample from run_reconstruction_evaluation
         save_path: Directory to save results
-        model_info: Optional model configuration info
+        block_size: Block size for storage manager
+        model_info: Model configuration info
 
     Returns:
         Path to saved metadata file
@@ -109,7 +108,7 @@ def save_reconstruction_results(
     # Setup block-based storage
     store_manager = BlockBasedStoreManager(
         folder=str(save_path),
-        block_size=50,
+        block_size=block_size,
     )
 
     # Save each sample
@@ -126,7 +125,7 @@ def save_reconstruction_results(
     # Save metadata
     metadata = {
         "total_samples": len(results),
-        "model_info": model_info or {},
+        "model_info": model_info,
         "save_path": str(save_path),
     }
 
@@ -143,7 +142,7 @@ def load_trained_model_for_recon(
     checkpoint_path: Path,
     model_class: type,
     model_cfg: Dict[str, Any],
-    device: str = "cuda",
+    device: str,
 ) -> torch.nn.Module:
     """Load a trained model from checkpoint for reconstruction.
 
@@ -198,7 +197,7 @@ def load_trained_model_for_recon(
     return model
 
 
-def find_all_checkpoints(checkpoint_dir: Path, final_only: bool = False) -> List[Path]:
+def find_all_checkpoints(checkpoint_dir: Path, final_only: bool) -> List[Path]:
     """Find all checkpoint files in the checkpoint directory.
 
     Args:
