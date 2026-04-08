@@ -200,6 +200,9 @@ def load_trained_model_for_recon(
 def find_all_checkpoints(checkpoint_dir: Path, final_only: bool) -> List[Path]:
     """Find all checkpoint files in the checkpoint directory.
 
+    Searches both the root checkpoint directory and all subdirectories
+    for .pt checkpoint files.
+
     Args:
         checkpoint_dir: Base checkpoint directory
         final_only: If True, only return checkpoint_final.pt
@@ -214,17 +217,14 @@ def find_all_checkpoints(checkpoint_dir: Path, final_only: bool) -> List[Path]:
 
     if final_only:
         # Only use final checkpoint
-        final_ckpt = checkpoint_dir / "checkpoint_final.pt"
+        final_ckpt = checkpoint_dir / "final" / "mp_rank_00_model_states.pt"
         if final_ckpt.exists():
             checkpoints.append(final_ckpt)
         return checkpoints
 
-    # Find all checkpoint files
-    for ckpt_file in checkpoint_dir.iterdir():
-        if not ckpt_file.is_file():
-            continue
-        if ckpt_file.suffix == ".pt":
-            checkpoints.append(ckpt_file)
+    # Find all .pt files in checkpoint directory and subdirectories
+    for ckpt_file in checkpoint_dir.rglob("*.pt"):
+        checkpoints.append(ckpt_file)
 
-    # Sort by name for consistent ordering
+    # Sort by path for consistent ordering
     return sorted(checkpoints)
