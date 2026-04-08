@@ -42,7 +42,7 @@ def run_reconstruction(
 ) -> None:
     """Run reconstruction on dataset samples and save results.
 
-    Uses shared reconstruction utilities from ram.utils.reconstruction.
+    Uses shared reconstruction utilities with C3-specific forward function.
 
     Args:
         model: Trained C3 model

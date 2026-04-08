@@ -22,16 +22,20 @@ def run_reconstruction_evaluation(
     samples: List[RamSample],
     tokenizer: PreTrainedTokenizer,
     batch_size: int,
+    forward_fn=None,
 ) -> List[RamReconstructSample]:
     """Run reconstruction evaluation on dataset samples.
 
     Processes samples in batches and returns all reconstruction results.
 
     Args:
-        model: The model to evaluate (must have forward(texts, compute_loss=False))
+        model: The model to evaluate
         samples: List of RamSample objects to process
         tokenizer: Tokenizer for decoding
         batch_size: Number of samples per batch
+        forward_fn: Optional callable to handle model forward pass.
+                   If None, uses model(texts=target_texts, compute_loss=False).
+                   Signature: forward_fn(model, target_texts) -> logits
 
     Returns:
         List of RamReconstructSample with all reconstruction results
@@ -48,7 +52,10 @@ def run_reconstruction_evaluation(
             target_texts = [s.target_text for s in batch_samples]
 
             # Forward pass
-            logits, _ = model(texts=target_texts, compute_loss=False)
+            if forward_fn is not None:
+                logits = forward_fn(model, target_texts)
+            else:
+                logits, _ = model(texts=target_texts, compute_loss=False)
 
             # Get predictions for all samples in batch
             pred_ids_tensor = torch.argmax(logits, dim=-1)

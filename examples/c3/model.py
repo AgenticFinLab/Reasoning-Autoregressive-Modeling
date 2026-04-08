@@ -55,17 +55,16 @@ class C3Model(nn.Module):
         ... }
         >>> model = C3Model(config)
         >>>
-        >>> # Training forward
+        >>> # Reconstruction mode (default prompt: "Repeat the text: ")
         >>> logits, loss = model(
-        ...     context_texts=["long context..."],
-        ...     target_texts=["target text..."],
+        ...     texts=["input text..."],
         ...     compute_loss=True
         ... )
         >>>
-        >>> # Inference forward
+        >>> # Custom generation prompts
         >>> logits = model(
-        ...     context_texts=["long context..."],
-        ...     prompt_texts=["prompt..."]
+        ...     texts=["input text..."],
+        ...     decode_prompts=["Summarize: "]
         ... )
 
     Args:
@@ -117,54 +116,45 @@ class C3Model(nn.Module):
 
     def forward(
         self,
-        context_texts: List[str],
-        target_texts: Optional[List[str]] = None,
-        prompt_texts: Optional[List[str]] = None,
+        texts: List[str],
+        decode_prompts: Optional[List[str]] = None,
         compute_loss: bool = False,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """Forward pass through C3 model.
 
         Args:
-            context_texts: List of context texts to compress
-            target_texts: List of target texts for reconstruction (training)
-            prompt_texts: List of prompts for generation (inference)
+            texts: List of input texts to compress
+            decode_prompts: Optional list of prompts for decoder.
+                           If None, uses default "Repeat the text: " prompt.
+                           If provided, uses custom prompts for generation.
             compute_loss: Whether to compute and return loss
 
         Returns:
             logits: [B, L, V] decoder output logits
-            loss: Scalar loss if compute_loss=True and target_texts provided
-
-        Raises:
-            ValueError: If neither target_texts nor prompt_texts provided
-            ValueError: If compute_loss=True but target_texts is None
+            loss: Scalar loss if compute_loss=True
         """
-        # Encode context texts to latent tokens
+        # Encode texts to latent tokens
         # latent_tokens: [B, N, D_enc]
-        latent_tokens = self.encoder(inputs=context_texts)
+        latent_tokens = self.encoder(inputs=texts)
 
-        # Determine decoder input and tokenize
-        if target_texts is not None:
-            # Training mode: use target texts as prompt
-            decoder_input_texts = target_texts
-        elif prompt_texts is not None:
-            # Inference mode: use provided prompts
-            decoder_input_texts = prompt_texts
+        # Determine decoder prompts
+        if decode_prompts is not None:
+            # Use provided prompts
+            decoder_prompts = decode_prompts
         else:
-            raise ValueError(
-                "Either target_texts (for training) or prompt_texts (for inference) "
-                "must be provided."
-            )
+            # Default reconstruction prompt
+            decoder_prompts = ["Repeat the text: "] * len(texts)
 
         # Wrap prompts with special tokens for C3
         # Format: <img> <imgpad>*N </img> prompt
         wrapped_prompts = []
-        for text in decoder_input_texts:
+        for prompt in decoder_prompts:
             wrapped = (
                 C3_IM_START_TOKEN
                 + C3_IM_PATCH_TOKEN * self.latent_token_len
                 + C3_IM_END_TOKEN
                 + "\n"
-                + text
+                + prompt
             )
             wrapped_prompts.append(wrapped)
 
@@ -188,8 +178,8 @@ class C3Model(nn.Module):
 
         # Compute loss if requested
         loss = None
-        if compute_loss and target_texts is not None:
-            loss = self._compute_loss(logits, target_texts)
+        if compute_loss:
+            loss = self._compute_loss(logits, texts)
 
         return logits, loss
 
@@ -214,15 +204,15 @@ class C3Model(nn.Module):
 
     def generate(
         self,
-        context_texts: List[str],
+        texts: List[str],
         prompt: str = "Repeat the text: ",
         max_new_tokens: int = 512,
         **generate_kwargs,
     ) -> torch.Tensor:
-        """Generate text from context and prompt.
+        """Generate text from compressed texts and prompt.
 
         Args:
-            context_texts: List of context texts to compress
+            texts: List of input texts to compress
             prompt: Prompt for generation (single string, applied to all)
             max_new_tokens: Maximum number of new tokens to generate
             **generate_kwargs: Additional arguments for decoder.generate()
@@ -230,8 +220,8 @@ class C3Model(nn.Module):
         Returns:
             generated_ids: [B, L] generated token IDs
         """
-        # Encode context
-        latent_tokens = self.encoder(inputs=context_texts)
+        # Encode texts
+        latent_tokens = self.encoder(inputs=texts)
 
         # Generate using decoder
         generated_ids = self.decoder.generate(
