@@ -1,33 +1,25 @@
 #!/bin/bash
 # =============================================================================
-# SLURM Script: Hierarchical Text Quantization Training (PreExp)
+# SLURM Script: EQD Token Level Training (DeepSpeed ZeRO-2)
 # =============================================================================
-# Task: Train VQ-AE with linguistically-motivated hierarchical quantization
-# Pipeline: texts -> Encoder -> [B, L, D] -> HierarchicalQuantizer -> Decoder
-#
-# Hierarchy Structure:
-#   Scale 0: [1]   -> sentence embedding (topic)
-#   Scale 1: [4]   -> clause embeddings (structure)
-#   Scale 2: [16]  -> phrase embeddings (phrasing)
-#   Scale 3: [64]  -> word embeddings (words)
-#   Scale 4: [256] -> subword embeddings (tokens)
-#   Total: 341 codes
+# Task: Train encoder-quantizer-decoder with DeepSpeed for multi-GPU distributed training
+# Pipeline: texts -> Encoder -> [B, L, D] -> Quantizer (token-level) -> Decoder -> [B, L, V]
 #
 # Usage:
-#   sbatch run_eqd_hierarchical.slurm
+#   sbatch train_eqd_token_level_ds.slurm
 # =============================================================================
 
-#SBATCH --job-name=PreExp-eqd_hierarchical
-#SBATCH --output=EXPERIMENT/PreExp-eqd_hierarchical/logs/slurm_%j.out
-#SBATCH --error=EXPERIMENT/PreExp-eqd_hierarchical/logs/slurm_%j.err
+#SBATCH --job-name=eqd_token_ds
+#SBATCH --output=EXPERIMENT/eqd_token_level_ds/logs/slurm_%j.out
+#SBATCH --error=EXPERIMENT/eqd_token_level_ds/logs/slurm_%j.err
 
 # --- Resource Configuration ---
 #SBATCH --partition=gpu
 #SBATCH --nodes=1
-#SBATCH --ntasks=1
+#SBATCH --ntasks-per-node=4
 #SBATCH --cpus-per-task=4
-#SBATCH --mem=32G
-#SBATCH --gres=gpu:1
+#SBATCH --mem=64G
+#SBATCH --gres=gpu:4
 #SBATCH --time=08:00:00
 
 # =============================================================================
@@ -40,6 +32,10 @@ echo "Node: $SLURM_NODELIST"
 echo "Start Time: $(date)"
 echo "=========================================="
 
+# Create directories
+mkdir -p EXPERIMENT/eqd_token_level_ds/logs
+mkdir -p EXPERIMENT/eqd_token_level_ds/checkpoints
+
 # Navigate to project root
 cd $SLURM_SUBMIT_DIR
 echo "Working directory: $(pwd)"
@@ -49,17 +45,16 @@ echo "Working directory: $(pwd)"
 # conda activate LMSim
 
 # =============================================================================
-# Run Training
+# Run Training (DeepSpeed)
 # =============================================================================
 echo ""
-echo "Starting Hierarchical Text Quantization Training..."
-echo "Config: configs/PreExp/eqd_hierarchical.yml"
-echo "Pipeline: Encoder -> HierarchicalQuantizer -> Decoder"
-echo "Hierarchy: sentence -> clause -> phrase -> word -> subword"
+echo "Starting EQD Token Level Training (DeepSpeed)..."
+echo "Config: configs/eqd_token_level/config.yaml"
+echo "GPUs: 4"
 echo ""
 
-PYTHONPATH=. python examples/PreExp/eqd_hierarchical.py \
-    -c configs/PreExp/eqd_hierarchical.yml
+PYTHONPATH=. torchrun --nproc_per_node=4 examples/eqd_token_level/train_eqd_token_level_ds.py \
+    --config configs/eqd_token_level/config.yaml
 
 # =============================================================================
 # Completion

@@ -1,17 +1,17 @@
 #!/bin/bash
 # =============================================================================
-# SLURM Script: Encoder-Decoder Baseline Training (PreExp)
+# SLURM Script: C3 Reconstruction Inference
 # =============================================================================
-# Task: Train encoder-decoder for text reconstruction (baseline, no quantizer)
-# Pipeline: texts -> Encoder -> [B, L, D] -> Decoder -> [B, L, V] -> loss
+# Task: Run reconstruction inference on trained C3 model
+# Pipeline: texts -> Encoder -> [B, N, D] latent -> Decoder -> reconstructed texts
 #
 # Usage:
-#   sbatch run_ed_original.slurm
+#   sbatch run_recon.slurm
 # =============================================================================
 
-#SBATCH --job-name=PreExp-ed_original
-#SBATCH --output=EXPERIMENT/PreExp-ed_original/logs/slurm_%j.out
-#SBATCH --error=EXPERIMENT/PreExp-ed_original/logs/slurm_%j.err
+#SBATCH --job-name=c3_recon
+#SBATCH --output=EXPERIMENT/c3_recon/logs/slurm_%j.out
+#SBATCH --error=EXPERIMENT/c3_recon/logs/slurm_%j.err
 
 # --- Resource Configuration ---
 #SBATCH --partition=gpu
@@ -20,7 +20,7 @@
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=32G
 #SBATCH --gres=gpu:1
-#SBATCH --time=04:00:00
+#SBATCH --time=02:00:00
 
 # =============================================================================
 # Environment Setup
@@ -32,6 +32,10 @@ echo "Node: $SLURM_NODELIST"
 echo "Start Time: $(date)"
 echo "=========================================="
 
+# Create directories
+mkdir -p EXPERIMENT/c3_recon/logs
+mkdir -p EXPERIMENT/c3_recon/recon_results
+
 # Navigate to project root
 cd $SLURM_SUBMIT_DIR
 echo "Working directory: $(pwd)"
@@ -41,16 +45,21 @@ echo "Working directory: $(pwd)"
 # conda activate LMSim
 
 # =============================================================================
-# Run Training
+# Run Reconstruction
 # =============================================================================
 echo ""
-echo "Starting Encoder-Decoder Baseline Training..."
-echo "Config: configs/PreExp/ed_original.yml"
-echo "Pipeline: Encoder (BERT) -> Decoder (GPT2)"
+echo "Starting C3 Reconstruction Inference..."
+echo "Config: configs/c3/config.yaml"
 echo ""
 
-PYTHONPATH=. python examples/PreExp/ed_original.py \
-    -c configs/PreExp/ed_original.yml
+# Modify checkpoint path as needed
+CHECKPOINT_PATH="EXPERIMENT/c3_ds/checkpoints/checkpoint_final.pt"
+
+PYTHONPATH=. python examples/c3/run_recon.py \
+    --config configs/c3/config.yaml \
+    --checkpoint_path $CHECKPOINT_PATH \
+    --num_samples 100 \
+    --output_dir EXPERIMENT/c3_recon/recon_results
 
 # =============================================================================
 # Completion

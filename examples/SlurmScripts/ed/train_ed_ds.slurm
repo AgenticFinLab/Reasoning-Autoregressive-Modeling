@@ -1,30 +1,25 @@
 #!/bin/bash
 # =============================================================================
-# SLURM Script: Token-Level Quantization Training (PreExp)
+# SLURM Script: Encoder-Decoder Training (DeepSpeed ZeRO-2)
 # =============================================================================
-# Task: Train VQ-AE with standard token-level VQ-VAE (1:1 mapping)
-# Pipeline: texts -> Encoder -> [B, L, D] -> TokenLevelQuantizer -> Decoder
-#
-# Key Feature:
-#   - Each token gets its own discrete code (1:1 mapping)
-#   - No multi-scale hierarchy
-#   - Standard VQ-VAE for text
+# Task: Train encoder-decoder model with DeepSpeed for multi-GPU distributed training
+# Pipeline: texts -> Encoder (BERT) -> [B, L, D] -> Decoder (GPT2) -> [B, L, V] -> loss
 #
 # Usage:
-#   sbatch run_eqd_token_level.slurm
+#   sbatch train_ed_ds.slurm
 # =============================================================================
 
-#SBATCH --job-name=PreExp-eqd_token_level
-#SBATCH --output=EXPERIMENT/PreExp-eqd_token_level/logs/slurm_%j.out
-#SBATCH --error=EXPERIMENT/PreExp-eqd_token_level/logs/slurm_%j.err
+#SBATCH --job-name=ed_train_ds
+#SBATCH --output=EXPERIMENT/ed_ds/logs/slurm_%j.out
+#SBATCH --error=EXPERIMENT/ed_ds/logs/slurm_%j.err
 
 # --- Resource Configuration ---
 #SBATCH --partition=gpu
 #SBATCH --nodes=1
-#SBATCH --ntasks=1
+#SBATCH --ntasks-per-node=4
 #SBATCH --cpus-per-task=4
-#SBATCH --mem=32G
-#SBATCH --gres=gpu:1
+#SBATCH --mem=64G
+#SBATCH --gres=gpu:4
 #SBATCH --time=08:00:00
 
 # =============================================================================
@@ -37,6 +32,10 @@ echo "Node: $SLURM_NODELIST"
 echo "Start Time: $(date)"
 echo "=========================================="
 
+# Create directories
+mkdir -p EXPERIMENT/ed_ds/logs
+mkdir -p EXPERIMENT/ed_ds/checkpoints
+
 # Navigate to project root
 cd $SLURM_SUBMIT_DIR
 echo "Working directory: $(pwd)"
@@ -46,16 +45,16 @@ echo "Working directory: $(pwd)"
 # conda activate LMSim
 
 # =============================================================================
-# Run Training
+# Run Training (DeepSpeed)
 # =============================================================================
 echo ""
-echo "Starting Token-Level Quantization Training..."
-echo "Config: configs/PreExp/eqd_token_level.yml"
-echo "Pipeline: Encoder -> TokenLevelQuantizer (1:1) -> Decoder"
+echo "Starting Encoder-Decoder Training (DeepSpeed)..."
+echo "Config: configs/ed/config.yaml"
+echo "GPUs: 4"
 echo ""
 
-PYTHONPATH=. python examples/PreExp/eqd_token_level.py \
-    -c configs/PreExp/eqd_token_level.yml
+PYTHONPATH=. torchrun --nproc_per_node=4 examples/ed/train_ed_ds.py \
+    --config configs/ed/config.yaml
 
 # =============================================================================
 # Completion
