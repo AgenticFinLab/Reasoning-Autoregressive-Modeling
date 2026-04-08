@@ -108,6 +108,8 @@ training:
 # =============================================================================
 log:
   save_folder: "EXPERIMENT/c3"
+  checkpoint_path: "EXPERIMENT/c3/checkpoints"
+  log_path: "EXPERIMENT/c3/logs"
   log_level: "INFO"
   checkpoint_step_interval: 5000
   log_step_interval: 10

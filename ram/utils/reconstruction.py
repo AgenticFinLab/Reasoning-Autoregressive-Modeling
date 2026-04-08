@@ -14,14 +14,13 @@ from tqdm import tqdm
 from transformers import PreTrainedTokenizer
 
 from ram.evaluation import evaluate_reconstruction
-from ram.generic import RamReconstructSample
+from ram.generic import RamReconstructSample, RamSample
 
 
 def run_reconstruction_evaluation(
     model: torch.nn.Module,
-    dataset,
+    samples: List[RamSample],
     tokenizer: PreTrainedTokenizer,
-    num_samples: int,
     batch_size: int,
 ) -> List[RamReconstructSample]:
     """Run reconstruction evaluation on dataset samples.
@@ -30,21 +29,20 @@ def run_reconstruction_evaluation(
 
     Args:
         model: The model to evaluate (must have forward(texts, compute_loss=False))
-        dataset: Dataset containing RamSample objects
+        samples: List of RamSample objects to process
         tokenizer: Tokenizer for decoding
-        num_samples: Number of samples to process
         batch_size: Number of samples per batch
 
     Returns:
         List of RamReconstructSample with all reconstruction results
     """
-    num_samples = min(num_samples, len(dataset))
+    num_samples = len(samples)
     all_results = []
 
     with torch.no_grad():
         for start_idx in tqdm(range(0, num_samples, batch_size), desc="Reconstructing"):
             end_idx = min(start_idx + batch_size, num_samples)
-            batch_samples = [dataset[i] for i in range(start_idx, end_idx)]
+            batch_samples = samples[start_idx:end_idx]
 
             # Extract target texts for this batch
             target_texts = [s.target_text for s in batch_samples]

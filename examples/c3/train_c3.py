@@ -136,12 +136,10 @@ def train_c3(config: dict):
     checkpoint_interval = log_cfg["checkpoint_step_interval"]
     block_size = log_cfg["block_size"]
 
-    output_dir = Path(log_cfg["save_folder"])
-    checkpoint_dir = output_dir / "checkpoints"
-    log_dir = output_dir / "logs"
+    checkpoint_dir = Path(log_cfg["checkpoint_path"])
+    log_dir = Path(log_cfg["log_path"])
 
     # Create output directories
-    output_dir.mkdir(parents=True, exist_ok=True)
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
     log_dir.mkdir(parents=True, exist_ok=True)
 

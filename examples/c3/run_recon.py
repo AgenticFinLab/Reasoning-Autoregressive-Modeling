@@ -34,7 +34,7 @@ from ram.utils import (
 
 def run_reconstruction(
     model: C3Model,
-    dataset,
+    dataloader,
     num_samples: int,
     save_path: Path,
     batch_size: int,
@@ -46,20 +46,27 @@ def run_reconstruction(
 
     Args:
         model: Trained C3 model
-        dataset: Dataset with RamSample objects
+        dataloader: RamDataLoaderRegistry that yields RamSample objects
         num_samples: Number of samples to process
         save_path: Directory to save reconstruction results
         batch_size: Number of samples to process in each batch
         block_size: Block size for storage manager
     """
-    print(f"Processing {min(num_samples, len(dataset))} samples...")
+    print(f"Processing {num_samples} samples...")
+
+    # Collect samples from dataloader
+    all_samples = []
+    for batch in dataloader:
+        all_samples.extend(batch)
+        if len(all_samples) >= num_samples:
+            break
+    all_samples = all_samples[:num_samples]
 
     # Run reconstruction using shared utility
     all_results = run_reconstruction_evaluation(
         model=model,
-        dataset=dataset,
+        samples=all_samples,
         tokenizer=model.tokenizer,
-        num_samples=num_samples,
         batch_size=batch_size,
     )
 
@@ -128,9 +135,8 @@ def main():
     device = get_device(device_map["decoder"]["device"])
 
     # Determine paths from config
-    output_dir = Path(log_cfg["save_folder"])
-    checkpoint_dir = output_dir / "checkpoints"
-    base_save_path = output_dir / "recon_results"
+    checkpoint_dir = Path(log_cfg["checkpoint_path"])
+    base_save_path = Path(log_cfg["save_folder"]) / "recon_results"
 
     # Find all checkpoints
     print(f"Looking for checkpoints in: {checkpoint_dir}")
@@ -157,17 +163,16 @@ def main():
             "drop_last": False,
         }
     )
-    dataset = dataloader.dataset
-    print(f"Dataset loaded: {len(dataset)} samples")
+    print(f"Dataset loaded")
 
     # Run reconstruction for each checkpoint
     for ckpt_path in ckpt_files:
         print(f"\n{'='*60}")
-        print(f"Processing checkpoint: {ckpt_path.name}")
+        print(f"Processing checkpoint: {ckpt_path.parent.name}/{ckpt_path.name}")
         print(f"{'='*60}")
 
-        # Create save path for this checkpoint
-        save_path = base_save_path / ckpt_path.stem
+        # Create save path for this checkpoint (use parent folder name)
+        save_path = base_save_path / ckpt_path.parent.name
 
         # Load model using shared utility
         model = load_trained_model_for_recon(
@@ -180,7 +185,7 @@ def main():
         # Run reconstruction
         run_reconstruction(
             model=model,
-            dataset=dataset,
+            dataloader=dataloader,
             num_samples=args.num_samples,
             save_path=save_path,
             batch_size=training_cfg["batch_size"],

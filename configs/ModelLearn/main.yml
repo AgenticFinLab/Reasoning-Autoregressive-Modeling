@@ -164,6 +164,13 @@ log:
   # Note: This is a PLACEHOLDER - replace with your experiment path.
   save_folder: "EXPERIMENT/YourFramework/YourExperiment"
 
+  # Checkpoint directory for intermediate model saves
+  # All model checkpoints are saved here during training
+  checkpoint_path: "EXPERIMENT/YourFramework/YourExperiment/checkpoints"
+
+  # Log directory for training logs and metrics
+  log_path: "EXPERIMENT/YourFramework/YourExperiment/logs"
+
   # Logging verbosity level
   # Options: "DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"
   log_level: "INFO"
