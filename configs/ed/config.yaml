@@ -94,6 +94,8 @@ log:
   log_level: "INFO"
   checkpoint_step_interval: 5000
   log_step_interval: 10
+  # Block size for ReconstructionSampleStore (samples per block)
+  block_size: 50
 
 # =============================================================================
 # BLOCK 6: Evaluation Configuration

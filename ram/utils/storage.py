@@ -164,13 +164,13 @@ class ReconstructionSampleStore:
     def __init__(
         self,
         folder: str,
-        block_size: int = 50,
+        block_size: int,
     ):
         """Initialize ReconstructionSampleStore.
 
         Args:
             folder: Directory path for sample storage.
-            block_size: Maximum sample records per block file (default: 50).
+            block_size: Maximum sample records per block file.
 
         Raises:
             RuntimeError: If lmbase package is not installed.

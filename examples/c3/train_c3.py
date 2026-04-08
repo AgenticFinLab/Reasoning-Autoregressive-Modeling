@@ -134,6 +134,7 @@ def train_c3(config: dict):
     # Logging intervals
     log_interval = log_cfg["log_step_interval"]
     checkpoint_interval = log_cfg["checkpoint_step_interval"]
+    block_size = log_cfg["block_size"]
 
     output_dir = Path(log_cfg["save_folder"])
     checkpoint_dir = output_dir / "checkpoints"
@@ -328,7 +329,7 @@ def train_c3(config: dict):
     # Setup reconstruction sample store (block-based storage)
     samples_store = ReconstructionSampleStore(
         folder=str(log_dir / "samples"),
-        block_size=50,
+        block_size=block_size,
     )
     logger.info(f"    Samples store: {log_dir / 'samples'}")
     logger.info("")

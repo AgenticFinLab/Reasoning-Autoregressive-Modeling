@@ -36,7 +36,6 @@ def run_reconstruction(
     dataset,
     num_samples: int,
     save_path: Path,
-    device: str,
     batch_size: int,
     block_size: int,
 ) -> None:
@@ -49,7 +48,6 @@ def run_reconstruction(
         dataset: Dataset with RamSample objects
         num_samples: Number of samples to process
         save_path: Directory to save reconstruction results
-        device: Device to run inference on
         batch_size: Number of samples to process in each batch
         block_size: Block size for storage manager
     """
@@ -116,18 +114,6 @@ def main():
         required=True,
         help="Device to run on",
     )
-    parser.add_argument(
-        "--batch-size",
-        type=int,
-        required=True,
-        help="Batch size for reconstruction",
-    )
-    parser.add_argument(
-        "--block-size",
-        type=int,
-        required=True,
-        help="Block size for storage manager",
-    )
 
     args = parser.parse_args()
 
@@ -139,6 +125,7 @@ def main():
     model_cfg = config["model"]
     data_cfg = config["data"]
     log_cfg = config["log"]
+    training_cfg = config["training"]
 
     # Determine paths from config
     output_dir = Path(log_cfg["save_folder"])
@@ -195,9 +182,8 @@ def main():
             dataset=dataset,
             num_samples=args.num_samples,
             save_path=save_path,
-            device=args.device,
-            batch_size=args.batch_size,
-            block_size=args.block_size,
+            batch_size=training_cfg["batch_size"],
+            block_size=log_cfg["block_size"],
         )
 
         # Clean up to free memory

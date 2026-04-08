@@ -187,6 +187,7 @@ def train_c3(config: dict, ds_config: dict, tee_logger: TeeLogger | None = None)
 
     log_interval = log_cfg["log_step_interval"]
     checkpoint_interval = log_cfg["checkpoint_step_interval"]
+    block_size = log_cfg["block_size"]
 
     output_dir = Path(log_cfg["save_folder"])
     checkpoint_dir = output_dir / "checkpoints"
@@ -332,7 +333,7 @@ def train_c3(config: dict, ds_config: dict, tee_logger: TeeLogger | None = None)
         # Setup reconstruction sample store (block-based storage)
         samples_store = ReconstructionSampleStore(
             folder=str(samples_dir),
-            block_size=50,
+            block_size=block_size,
         )
         logger.info(f"    Samples store: {samples_dir}")
         logger.info("")
