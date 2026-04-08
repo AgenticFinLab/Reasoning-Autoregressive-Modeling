@@ -96,9 +96,12 @@ training:
 # =============================================================================
 log:
   save_folder: "EXPERIMENT/eqd_hierarchical"
+  checkpoint_path: "EXPERIMENT/eqd_hierarchical/checkpoints"
+  log_path: "EXPERIMENT/eqd_hierarchical/logs"
   log_level: "INFO"
   checkpoint_step_interval: 5000
   log_step_interval: 10
+  block_size: 50
 
 # =============================================================================
 # BLOCK 6: Evaluation Configuration

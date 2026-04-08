@@ -55,7 +55,9 @@ def run_reconstruction_evaluation(
             if forward_fn is not None:
                 logits = forward_fn(model, target_texts)
             else:
-                logits, _ = model(texts=target_texts, compute_loss=False)
+                output = model(texts=target_texts, compute_loss=False)
+                # Handle both (logits, loss) and (logits, loss, vq_loss) returns
+                logits = output[0] if isinstance(output, tuple) else output
 
             # Get predictions for all samples in batch
             pred_ids_tensor = torch.argmax(logits, dim=-1)
