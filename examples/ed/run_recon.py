@@ -146,7 +146,7 @@ def main():
 
     print(f"Found {len(ckpt_files)} checkpoint(s):")
     for ckpt in ckpt_files:
-        print(f"  - {ckpt.name}")
+        print(f"  - {ckpt.parent.name}/{ckpt.name}")
 
     # Setup dataset (from config)
     print(f"\nLoading dataset: {data_cfg['data_name']}")

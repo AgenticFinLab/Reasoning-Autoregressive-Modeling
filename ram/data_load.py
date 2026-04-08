@@ -143,14 +143,19 @@ class RamDataLoaderRegistry:
         Default implementation: combines question + cot_answer.
 
         Args:
-            sample: A TextSample from the lmbase dataset
+            sample: A TextSample or dict from the lmbase dataset
 
         Returns:
             Formatted text string
         """
-        # Direct attribute access - lmbase TextSample has these fields
-        question = sample.question
-        cot = sample.cot_answer
+        # Handle both TextSample objects and dicts from lmbase
+        if isinstance(sample, dict):
+            question = sample["question"]
+            cot = sample["cot_answer"]
+        else:
+            # Direct attribute access for TextSample objects
+            question = sample.question
+            cot = sample.cot_answer
 
         # Combine question and CoT
         parts = [p for p in [question, cot] if p]
