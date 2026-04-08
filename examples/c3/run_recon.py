@@ -148,12 +148,13 @@ def main():
     dataloader = RamDataLoaderRegistry(
         {
             "data_name": data_cfg["data_name"],
-            "data_dir": data_cfg["data_dir"],
+            "data_path": data_cfg["data_path"],
             "split": data_cfg["split"],
-            "batch_size": data_cfg["batch_size"],
-            "num_workers": data_cfg["num_workers"],
-            "shuffle": data_cfg["shuffle"],
-            "drop_last": data_cfg["drop_last"],
+            "subset": data_cfg["subset"],
+            "batch_size": training_cfg["batch_size"],
+            "num_workers": env_cfg["dataloader_num_workers"],
+            "shuffle": False,
+            "drop_last": False,
         }
     )
     dataset = dataloader.dataset

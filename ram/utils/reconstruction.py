@@ -222,8 +222,9 @@ def find_all_checkpoints(checkpoint_dir: Path, final_only: bool) -> List[Path]:
             checkpoints.append(final_ckpt)
         return checkpoints
 
-    # Find all .pt files in checkpoint directory and subdirectories
-    for ckpt_file in checkpoint_dir.rglob("*.pt"):
+    # Find all mp_rank_00_model_states.pt files in subdirectories
+    # This is the DeepSpeed ZeRO-2 checkpoint format
+    for ckpt_file in checkpoint_dir.rglob("mp_rank_00_model_states.pt"):
         checkpoints.append(ckpt_file)
 
     # Sort by path for consistent ordering
