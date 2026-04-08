@@ -1,7 +1,7 @@
 """ED (Encoder-Decoder) Unified Model.
 
 This module provides a unified Encoder-Decoder model for text reconstruction.
-Combines encoder and decoder into a single nn.Module for DeepSpeed training.
+Combines encoder and decoder into a single nn.Module for flexible training.
 
 Architecture:
     EDModel (unified)
@@ -11,18 +11,19 @@ Architecture:
         └── GPT2 or similar decoder
 
 Benefits:
-    1. Single model for DeepSpeed training (one optimizer)
+    1. Single model for training (one optimizer)
     2. Clean interface
     3. Simplified checkpoint management
+    4. Compatible with both basic and DeepSpeed training
 """
+
+from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
-from typing import Dict, Any, List, Optional, Tuple
 
-from ram.models.encoder import build_encoder
 from ram.models.decoder import build_decoder
-from ram.losses import build_loss_from_config
+from ram.models.encoder import build_encoder
 
 
 class EDModel(nn.Module):
@@ -37,8 +38,8 @@ class EDModel(nn.Module):
 
     Example:
         >>> config = {
-        ...     "encoder": {...},
-        ...     "decoder": {...},
+        ...     "encoder": {"model_name": "bert-base-uncased", ...},
+        ...     "decoder": {"model_name": "gpt2", ...},
         ... }
         >>> model = EDModel(config)
         >>>
@@ -56,9 +57,18 @@ class EDModel(nn.Module):
         decoder: Decoder instance (e.g., GPT2)
         hidden_dim: Encoder hidden dimension
         vocab_size: Decoder vocabulary size
+        encoder_model_name: Name of the encoder model
+        decoder_model_name: Name of the decoder model
+        enc_tokenizer: Encoder tokenizer
+        dec_tokenizer: Decoder tokenizer
     """
 
     def __init__(self, config: Dict[str, Any]):
+        """Initialize the ED model.
+
+        Args:
+            config: Configuration dictionary containing 'encoder' and 'decoder' settings
+        """
         super().__init__()
 
         enc_cfg = config["encoder"]
@@ -102,8 +112,9 @@ class EDModel(nn.Module):
             **loss_kwargs: Additional arguments for loss computation
 
         Returns:
-            logits: [B, L, V] vocabulary logits for each position
-            loss: Scalar cross-entropy loss (if compute_loss=True)
+            Tuple of (logits, loss) where:
+                logits: [B, L, V] vocabulary logits for each position
+                loss: Scalar cross-entropy loss (if compute_loss=True, else None)
         """
         # Encode: texts -> hidden [B, L, D]
         # Encoder processes raw texts and outputs continuous features
@@ -124,10 +135,12 @@ class EDModel(nn.Module):
     ) -> torch.Tensor:
         """Compute reconstruction loss.
 
+        Uses cross-entropy loss for next-token prediction.
+
         Args:
             logits: [B, L, V] token logits from decoder
             target_texts: List of target texts
-            **kwargs: Additional loss arguments
+            **kwargs: Additional loss arguments (unused)
 
         Returns:
             loss: Scalar loss value
@@ -142,6 +155,8 @@ class EDModel(nn.Module):
         )["input_ids"].to(logits.device)
 
         # Shift for next-token prediction
+        # logits[..., :-1, :]: predictions for tokens 1..L
+        # target_ids[..., 1:]: target tokens 1..L
         shift_logits = logits[..., :-1, :].contiguous()
         shift_labels = target_ids[..., 1:].contiguous()
 
@@ -160,10 +175,12 @@ class EDModel(nn.Module):
     ) -> List[str]:
         """Generate text from input.
 
+        Performs greedy generation by taking argmax at each step.
+
         Args:
             texts: List of input texts
             max_length: Maximum generation length
-            **generate_kwargs: Additional generation arguments
+            **generate_kwargs: Additional generation arguments (unused)
 
         Returns:
             List of generated texts
@@ -186,14 +203,14 @@ class EDModel(nn.Module):
 
         return generated_texts
 
-    def gradient_checkpointing_enable(self):
+    def gradient_checkpointing_enable(self) -> None:
         """Enable gradient checkpointing for memory efficiency."""
         if hasattr(self.encoder, "gradient_checkpointing_enable"):
             self.encoder.gradient_checkpointing_enable()
         if hasattr(self.decoder, "gradient_checkpointing_enable"):
             self.decoder.gradient_checkpointing_enable()
 
-    def gradient_checkpointing_disable(self):
+    def gradient_checkpointing_disable(self) -> None:
         """Disable gradient checkpointing."""
         if hasattr(self.encoder, "gradient_checkpointing_disable"):
             self.encoder.gradient_checkpointing_disable()

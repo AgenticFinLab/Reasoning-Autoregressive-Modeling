@@ -26,6 +26,7 @@ from typing import Any, Dict, List, Optional
 import torch
 import torch.nn as nn
 
+from lmbase.dataset.base import TextSample
 from ram.utils.serialization import load_json, save_json, to_json_serializable
 
 
@@ -45,6 +46,9 @@ __all__ = [
     "TrainingStep",
     "TrainingStepWithQuantizer",
     "ReconstructionSample",
+    # Data Loading
+    "RamSample",
+    "RamReconstructSample",
     # Checkpoint
     "CheckpointMetadata",
     "CheckpointData",
@@ -315,6 +319,68 @@ class ReconstructionSample:
     index: int = 0
     original: str = ""
     reconstructed: str = ""
+
+
+@dataclass
+class RamSample:
+    """Standardized sample wrapper for RAM framework.
+
+    Wraps the original lmbase sample and provides formatted target text.
+    This allows models to access both raw sample data and processed text.
+
+    Attributes:
+        original: The original lmbase sample (TextSample)
+        target_text: Formatted text for model input (question + cot by default)
+        sample_id: Optional unique identifier for the sample
+        metadata: Optional additional metadata
+
+    Example:
+        >>> sample = RamSample(
+        ...     original=text_sample,
+        ...     target_text="What is 2+2?\nLet me think... 2+2=4",
+        ...     sample_id=0,
+        ... )
+        >>> print(sample.target_text)
+        'What is 2+2?\nLet me think... 2+2=4'
+    """
+
+    original: TextSample
+    target_text: str
+    sample_id: Optional[int] = None
+    metadata: Optional[Dict[str, Any]] = None
+
+
+@dataclass
+class RamReconstructSample:
+    """Standardized reconstruction result for RAM framework.
+
+    Captures all intermediate and final results from reconstruction.
+    Used for saving reconstruction evaluation results.
+
+    Attributes:
+        sample_id: Unique identifier for the sample
+        original_text: Original input text
+        reconstructed_text: Reconstructed output text
+        pred_ids: Predicted token IDs
+        metrics: Evaluation metrics (token_precision, char_precision, BLEU, etc.)
+        metadata: Additional metadata
+
+    Example:
+        >>> sample = RamReconstructSample(
+        ...     sample_id=0,
+        ...     original_text="What is 2+2?",
+        ...     reconstructed_text="What is 2+2? Answer: 4",
+        ...     pred_ids=[101, 2023, 2003, 1016, 1024, 1016, 1024, 102],
+        ...     metrics={"token_precision": 0.95, "bleu_score": 0.89},
+        ... )
+    """
+
+    sample_id: int
+    original_text: str
+    reconstructed_text: str
+    pred_ids: List[int]
+    metrics: Optional[Dict[str, Any]] = None
+    metadata: Optional[Dict[str, Any]] = None
 
 
 @dataclass

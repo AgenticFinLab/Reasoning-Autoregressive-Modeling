@@ -14,6 +14,13 @@ Data Loading:
     >>> from lmbase.dataset import registry
     >>> dataset = registry.get("gsm8k", split="train")
 
+    Or use RAM's data loading utilities:
+    >>> from ram.data_load import RamDataLoaderRegistry
+    >>> loader = RamDataLoaderRegistry(
+    ...     data_config={"data_name": "gsm8k"},
+    ...     split="train",
+    ... )
+
 Usage:
     from ram.models import TextEncoder, build_encoder
     from ram.utils import load_config
@@ -53,6 +60,9 @@ from .generic import (
     TrainingStep,
     TrainingStepWithQuantizer,
     ReconstructionSample,
+    # Data Loading
+    RamSample,
+    RamReconstructSample,
     # Checkpoint
     CheckpointData,
     CheckpointMetadata,
@@ -70,6 +80,10 @@ from .utils import (
     save_json,
     load_json,
     to_json_serializable,
+)
+from .data_load import (
+    # Data Loading
+    RamDataLoaderRegistry,
 )
 
 __version__ = "0.4.0"
@@ -118,4 +132,6 @@ __all__ = [
     "save_json",
     "load_json",
     "to_json_serializable",
+    # Data Loading
+    "RamDataLoaderRegistry",
 ]
