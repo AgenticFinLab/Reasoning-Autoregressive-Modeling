@@ -1,24 +1,99 @@
 #!/bin/bash
 # =============================================================================
-# SCP Script: Download EQD Hierarchical Experiment Results to Local Machine
+# SCP Script: Download Experiment Results to Local Machine
 # =============================================================================
-# Server: sjia@10.123.4.30
-# Remote Path: /home/sjia/projects/Reasoning-Autoregressive-Modeling/
-#
 # Usage:
-#   ./scp_results.sh [experiment_name]
+#   ./scp_results.sh -e <experiment> -t <type> [-p <local_base>]
+#
+# Options:
+#   -e  Experiment name (required): eqd_hierarchical, eqd_hierarchical_ds, etc.
+#   -t  Download type (required): logs, checkpoints, all
+#   -p  Local base folder (optional): default is EXPERIMENT
+#
+# Path structure:
+#   Remote: $PROJECT/$EXPERIMENT_DIR/$EXPERIMENT/
+#   Local:  $LOCAL_BASE/$EXPERIMENT/
+#
+# Setup (add to ~/.bashrc or ~/.zshrc):
+#   export AgenticFin_Sjia_SERVER="user@host"
+#   export AgenticFin_Sjia_BASE="/path/to/projects"
 #
 # Examples:
-#   ./scp_results.sh eqd_hierarchical        # Download training results
-#   ./scp_results.sh eqd_hierarchical_ds     # Download DeepSpeed results
-#   ./scp_results.sh all                     # Download all experiments
+#   ./scp_results.sh -e eqd_hierarchical -t all           # Download to ./EXPERIMENT/eqd_hierarchical/
+#   ./scp_results.sh -e eqd_hierarchical_ds -t logs       # Download logs to ./EXPERIMENT/eqd_hierarchical_ds/
+#   ./scp_results.sh -e eqd_hierarchical_ds -t all -p ./results
 # =============================================================================
 
-SERVER="sjia@10.123.4.30"
-REMOTE_BASE="/home/sjia/projects/Reasoning-Autoregressive-Modeling"
-LOCAL_BASE="./EXPERIMENT"
+# Read from environment variables
+SERVER="${AgenticFin_Sjia_SERVER:?Error: AgenticFin_Sjia_SERVER not set}"
+REMOTE_BASE="${AgenticFin_Sjia_BASE:?Error: AgenticFin_Sjia_BASE not set}"
 
-EXPERIMENT=${1:-eqd_hierarchical}
+# Project name (set per project)
+PROJECT_NAME="Reasoning-Autoregressive-Modeling"
+REMOTE_PROJECT="$REMOTE_BASE/$PROJECT_NAME"
+
+# Experiment folder name (used for both remote and local)
+EXPERIMENT_DIR="EXPERIMENT"
+
+# =============================================================================
+# Parse Arguments
+# =============================================================================
+EXPERIMENT=""
+DOWNLOAD_TYPE=""
+LOCAL_BASE=""
+
+while getopts "e:t:p:h" opt; do
+    case $opt in
+        e) EXPERIMENT="$OPTARG" ;;
+        t) DOWNLOAD_TYPE="$OPTARG" ;;
+        p) LOCAL_BASE="$OPTARG" ;;
+        h)
+            echo "Usage: $0 -e <experiment> -t <type> [-p <local_base>]"
+            echo ""
+            echo "Options:"
+            echo "  -e  Experiment name (required): eqd_hierarchical, eqd_hierarchical_ds, etc."
+            echo "  -t  Download type (required): logs, checkpoints, all"
+            echo "  -p  Local base folder (optional): default is EXPERIMENT"
+            echo ""
+            echo "Path structure:"
+            echo "  Remote: \$PROJECT/\$EXPERIMENT_DIR/\$EXPERIMENT/"
+            echo "  Local:  \$LOCAL_BASE/\$EXPERIMENT/"
+            echo ""
+            echo "Examples:"
+            echo "  $0 -e eqd_hierarchical -t all"
+            echo "  $0 -e eqd_hierarchical_ds -t logs"
+            echo "  $0 -e eqd_hierarchical_ds -t checkpoints"
+            exit 0
+            ;;
+        \?)
+            echo "Invalid option: -$OPTARG" >&2
+            exit 1
+            ;;
+        :)
+            echo "Option -$OPTARG requires an argument." >&2
+            exit 1
+            ;;
+    esac
+done
+
+# Validate required arguments
+if [ -z "$EXPERIMENT" ]; then
+    echo "Error: Experiment name (-e) is required"
+    exit 1
+fi
+
+if [ -z "$DOWNLOAD_TYPE" ]; then
+    echo "Error: Download type (-t) is required"
+    exit 1
+fi
+
+# Set default local base if not specified
+if [ -z "$LOCAL_BASE" ]; then
+    LOCAL_BASE="$EXPERIMENT_DIR"
+fi
+
+# Construct full local path: LOCAL_BASE/EXPERIMENT
+LOCAL_PATH="$LOCAL_BASE/$EXPERIMENT"
 
 # =============================================================================
 # Download Functions
@@ -26,46 +101,48 @@ EXPERIMENT=${1:-eqd_hierarchical}
 
 download_logs() {
     local exp=$1
+    local dest=$2
     echo "Downloading logs for $exp..."
-    mkdir -p $LOCAL_BASE/$exp/logs
-    scp -r $SERVER:$REMOTE_BASE/EXPERIMENT/$exp/logs/* $LOCAL_BASE/$exp/logs/
+    mkdir -p "$dest/logs"
+    scp -r $SERVER:$REMOTE_PROJECT/$EXPERIMENT_DIR/$exp/logs/* "$dest/logs/"
 }
 
 download_checkpoints() {
     local exp=$1
+    local dest=$2
     echo "Downloading checkpoints for $exp..."
-    mkdir -p $LOCAL_BASE/$exp/checkpoints
-    scp -r $SERVER:$REMOTE_BASE/EXPERIMENT/$exp/checkpoints/* $LOCAL_BASE/$exp/checkpoints/
+    mkdir -p "$dest/checkpoints"
+    scp -r $SERVER:$REMOTE_PROJECT/$EXPERIMENT_DIR/$exp/checkpoints/* "$dest/checkpoints/"
 }
 
 download_all() {
     local exp=$1
-    download_logs $exp
-    download_checkpoints $exp
+    local dest=$2
+    download_logs "$exp" "$dest"
+    download_checkpoints "$exp" "$dest"
 }
 
 # =============================================================================
-# Main
+# Execute Download
 # =============================================================================
 
-case $EXPERIMENT in
-    eqd_hierarchical)
-        download_all "eqd_hierarchical"
+case $DOWNLOAD_TYPE in
+    logs)
+        download_logs "$EXPERIMENT" "$LOCAL_PATH"
         ;;
-    eqd_hierarchical_ds)
-        download_all "eqd_hierarchical_ds"
+    checkpoints)
+        download_checkpoints "$EXPERIMENT" "$LOCAL_PATH"
         ;;
     all)
-        download_all "eqd_hierarchical"
-        download_all "eqd_hierarchical_ds"
+        download_all "$EXPERIMENT" "$LOCAL_PATH"
         ;;
     *)
-        echo "Unknown experiment: $EXPERIMENT"
-        echo "Usage: $0 [eqd_hierarchical|eqd_hierarchical_ds|all]"
+        echo "Error: Unknown download type: $DOWNLOAD_TYPE"
+        echo "Valid types: logs, checkpoints, all"
         exit 1
         ;;
 esac
 
 echo ""
 echo "Download complete!"
-echo "Results saved to: $LOCAL_BASE/$EXPERIMENT"
+echo "Results saved to: $LOCAL_PATH"
