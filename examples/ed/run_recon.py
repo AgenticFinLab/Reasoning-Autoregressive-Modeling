@@ -24,6 +24,7 @@ from model import EDModel
 from ram import RamDataLoaderRegistry
 from ram.utils import (
     find_all_checkpoints,
+    get_device,
     load_config,
     load_trained_model_for_recon,
     run_reconstruction_evaluation,
@@ -107,12 +108,6 @@ def main():
         action="store_true",
         help="Only use checkpoint_final.pt",
     )
-    parser.add_argument(
-        "--device",
-        type=str,
-        required=True,
-        help="Device to run on",
-    )
 
     args = parser.parse_args()
 
@@ -125,6 +120,11 @@ def main():
     data_cfg = config["data"]
     log_cfg = config["log"]
     training_cfg = config["training"]
+    env_cfg = config["environment"]
+
+    # Get device from config or auto-select
+    device_map = env_cfg["device_map"]
+    device = get_device(device_map["decoder"]["device"])
 
     # Determine paths from config
     output_dir = Path(log_cfg["save_folder"])
@@ -174,7 +174,7 @@ def main():
             checkpoint_path=ckpt_path,
             model_class=EDModel,
             model_cfg=model_cfg,
-            device=args.device,
+            device=str(device),
         )
 
         # Run reconstruction
