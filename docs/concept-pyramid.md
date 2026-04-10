@@ -148,14 +148,60 @@ $$
 
 ## 4. 预训练策略与目标函数 (Pretraining & Optimization)
 
-### 4.1 完整损失函数
+### 4.1 完整损失函数与训练数据格式
+
+#### 4.1.1 训练数据格式 (Q+CoT)
+
+不同于传统 LLM 直接学习 `Q → Answer` 的映射，NLCP 在训练时利用完整的 **Q+CoT (Question + Chain-of-Thought)** 数据：
+
+```
+Input:  Question Q (Token IDs)
+Target: Chain-of-Thought C = [c_1, c_2, ..., c_T] (Token IDs)
+        └── 包含完整推理步骤的自然语言序列
+```
+
+**关键区别**：
+| 范式         | 输入 | 目标            | 损失计算                                     |
+|:-------------|:-----|:----------------|:---------------------------------------------|
+| **传统 LLM** | Q    | Answer tokens   | 仅对 Answer 部分计算 NTP loss                |
+| **NLCP**     | Q    | Full CoT tokens | 对**每层隐空间**都计算 NTP loss + 层级一致性 |
+
+#### 4.1.2 层级化 NTP 损失机制
+
+对于每个训练样本 $(Q, C)$，NLCP 构建动态金字塔 $\{H_0, H_1, ..., H_K\}$，其中 $H_K$ 与 CoT 序列 $C$ 对齐。损失函数包含四个部分：
+
 $$
 \mathcal{L}_{\text{total}} = \underbrace{\sum_{k=0}^{K} \mathcal{L}_{\text{NTP}}(H_k \mid H_{<k}, Q)}_{\text{层级自回归}} 
 + \lambda_1 \underbrace{\mathcal{L}_{\text{consist}}}_{\text{跨层一致性}} 
 + \lambda_2 \underbrace{\mathcal{L}_{\text{depth}}}_{\text{扩展率正则}} 
 + \lambda_3 \underbrace{\mathcal{L}_{\text{CE}}(\text{Tokens} \mid H_K)}_{\text{最终对齐}}
 $$
-- $\mathcal{L}_{\text{NTP}}$：各层投影到词表计算标准交叉熵（可共享或独立 LM Head）。
+
+**各层 NTP 损失的计算方式**：
+
+```python
+# 对于每层 k，将隐状态投影到词表
+logits_k = H_k @ W_unemb.T  # [B, L_k, V]
+
+# 与目标 CoT 的对应位置计算交叉熵
+# 注意：L_k 可能与 len(C) 不同，需要位置对齐
+loss_k = CrossEntropy(logits_k, C_aligned)
+```
+
+**位置对齐策略**（关键实现细节）：
+- **Level 0** ($L_0=8$): 预测 CoT 的宏观结构标签（如 `[PLAN]`、`[STEP1]`、`[RESULT]`）
+- **Level K** ($L_K \approx$ len(C)): 与完整 CoT token 序列对齐，计算标准 NTP
+- **中间层**: 通过 `expand_mask` 建立粗层位置到细层位置的映射，实现分层监督
+
+#### 4.1.3 与传统 CoT 训练的本质差异
+
+| 特性         | 传统 CoT 训练     | NLCP 层级化训练                  |
+|:-------------|:------------------|:---------------------------------|
+| **监督信号** | 仅最终 token 预测 | 每层都有 NTP 监督 + 跨层一致性   |
+| **梯度传播** | 单层深反向传播    | 分层梯度，粗层提供稳定锚点       |
+| **错误累积** | 单点失败影响大    | 粗层错误可被细层修正（误差隔离） |
+| **学习难度** | 长序列建模困难    | 短粗层先学结构，长细层再学细节   |
+
 - 权重初始化：$\lambda_1=0.1, \lambda_2=0.05, \lambda_3=1.0$，随训练余弦衰减。
 
 ### 4.2 Decoupled µP 适配
@@ -226,23 +272,114 @@ def generate_nlc_pyramid(Q_ids, max_depth=4, τ=0.4, ε=1e-3):
 
 ## 6. 端到端案例推演：Q+CoT 处理流程 (Case Study)
 
-### 6.1 输入样本
+### 6.1 输入样本与训练目标
+
+**问题 (Question)**:
 ```
 Q: "A train travels 120km at 60km/h, then 180km at 90km/h. What is the average speed?"
 ```
-Token 编码后 $L_q = 28$。模型进入动态金字塔生成。
+Token 编码后 $L_q = 28$。
 
-### 6.2 逐层张量流与语义映射
-| 阶段       | 张量尺寸                       | 核心操作                     | 语义解释                                                        | 动态决策                              |
-|:-----------|:-------------------------------|:-----------------------------|:----------------------------------------------------------------|:--------------------------------------|
-| **L0**     | $[1, 8, 1024]$                 | Encoder + Self-Attn          | 抽象为：`[求平均速度, 分段行程, 速度已知]`                      | Depth Gate $p=0.85 > \tau$ → 继续     |
-| **Exp0**   | $[1, 8] \to [4,3,5,4,3,4,5,4]$ | Predictor 预测展开率         | 逻辑复杂处分配更多槽位（如分段计算）                            | $L_1 = 32$                            |
-| **L1**     | $[1, 32, 1024]$                | Cross-Attn(L0) + Self-Attn   | 生成公式骨架：`t1=120/60`, `t2=180/90`, `v_avg=(d1+d2)/(t1+t2)` | Depth Gate $p=0.68 > \tau$ → 继续     |
-| **Exp1**   | $[1, 32] \to [2,2,4,1,3,...]$  | Predictor 预测展开率         | 计算节点展开，连接词压缩                                        | $L_2 = 156$                           |
-| **L2**     | $[1, 156, 1024]$               | Cross-Attn(L1) + Self-Attn   | 细粒度语义对齐：`第一步...`, `第二步...`, `合并...`, `答案`     | Depth Gate $p=0.22 < \tau$ → **终止** |
-| **Decode** | $[1, 156, 128000]$             | $H_2 W_{\text{unemb}}^T / s$ | 逐 Token 自回归输出自然语言 CoT                                 | Early Exit 生效                       |
+**推理链 (Chain-of-Thought, 训练目标)**:
+```
+C: "To find average speed, I need total distance divided by total time.
+    First, calculate time for first segment: t1 = 120/60 = 2 hours.
+    Then, calculate time for second segment: t2 = 180/90 = 2 hours.
+    Total distance = 120 + 180 = 300 km.
+    Total time = 2 + 2 = 4 hours.
+    Therefore, average speed = 300/4 = 75 km/h."
+```
+Token 编码后 $C = [c_1, c_2, ..., c_{48}]$，共 48 个 tokens。
 
-### 6.3 关键观察
+**训练任务**: 学习从 Q 生成 C 的映射，但通过层级化隐空间实现。
+
+### 6.2 逐层张量流、语义映射与训练损失
+
+| 阶段       | 张量尺寸                       | 核心操作                     | 语义解释                                                           | 训练损失计算                                                           |
+|:-----------|:-------------------------------|:-----------------------------|:-------------------------------------------------------------------|:-----------------------------------------------------------------------|
+| **L0**     | $[1, 8, 1024]$                 | Encoder + Self-Attn          | 抽象为：`[PLAN, STEP1, STEP2, MERGE, RESULT]`                      | $\mathcal{L}_{\text{NTP}}^{(0)}$: 预测宏观结构标签                     |
+| **Exp0**   | $[1, 8] \to [4,3,5,4,3,4,5,4]$ | Predictor 预测展开率         | 逻辑复杂处分配更多槽位（如分段计算）                               | $\mathcal{L}_{\text{depth}}$: 正则化扩展率                             |
+| **L1**     | $[1, 32, 1024]$                | Cross-Attn(L0) + Self-Attn   | 生成公式骨架：`t1=120/60`, `t2=180/90`, `v_avg=(d1+d2)/(t1+t2)`    | $\mathcal{L}_{\text{NTP}}^{(1)}$: 预测公式骨架 tokens                  |
+|            |                                |                              |                                                                    | $\mathcal{L}_{\text{consist}}^{(0)}$: L0-L1 一致性                     |
+| **Exp1**   | $[1, 32] \to [2,2,4,1,3,...]$  | Predictor 预测展开率         | 计算节点展开，连接词压缩                                           | $\mathcal{L}_{\text{depth}}$: 正则化扩展率                             |
+| **L2**     | $[1, 48, 1024]$                | Cross-Attn(L1) + Self-Attn   | 完整 CoT 对齐：`To find...`, `First...`, `Then...`, `Therefore...` | $\mathcal{L}_{\text{NTP}}^{(2)}$: **与目标 C 对齐，计算标准 NTP loss** |
+|            |                                |                              |                                                                    | $\mathcal{L}_{\text{consist}}^{(1)}$: L1-L2 一致性                     |
+| **Decode** | $[1, 48, 128000]$              | $H_2 W_{\text{unemb}}^T / s$ | 输出分布与目标 C 计算交叉熵                                        | $\mathcal{L}_{\text{CE}}$: 最终对齐损失（与 L2 NTP 相同）              |
+
+**训练时的完整损失**:
+```
+L_total = L_NTP^(0) + L_NTP^(1) + L_NTP^(2) 
+        + λ_1 * (L_consist^(0) + L_consist^(1))
+        + λ_2 * (L_depth^(0) + L_depth^(1))
+        + λ_3 * L_CE
+```
+
+**关键观察**：
+- **L0** (8 positions): 学习预测高层结构标签，而非具体 tokens
+- **L1** (32 positions): 学习公式骨架，连接自然语言与数学表达式
+- **L2** (48 positions): 与完整 CoT 对齐，承担主要的 NTP 学习任务
+
+### 6.3 训练数据对齐详解
+
+#### 6.3.1 Q+CoT → 层级隐空间的映射
+
+训练时，每个样本是 $(Q, C)$ 对。NLCP 需要建立 $C$ 与每层 $H_k$ 的对应关系：
+
+```python
+# 目标 CoT: 48 tokens
+C = ["To", "find", "average", "speed", ",", "I", "need", "total", ...]  # 48 tokens
+
+# 层级对齐策略:
+# L0 (8 positions) ←→ C 的结构标签
+C_structure = [PLAN, STEP1, STEP2, MERGE, RESULT, PAD, PAD, PAD]  # 8 tokens
+
+# L1 (32 positions) ←→ C 的公式骨架
+C_skeleton = ["To", "find", "average", "speed", ",", "t1", "=", "120/60", 
+              "t2", "=", "180/90", "v_avg", "=", "(d1+d2)/(t1+t2)", 
+              "=", "75", "km/h", PAD, ...]  # 32 tokens
+
+# L2 (48 positions) ←→ 完整 C
+C_full = C  # 48 tokens
+```
+
+#### 6.3.2 层级 NTP 损失的具体计算
+
+```python
+def compute_level_loss(H_k, C_aligned, level_k):
+    """
+    H_k: [B, L_k, D] - Level k hidden states
+    C_aligned: [B, L_target] - Aligned target tokens for this level
+    """
+    # Project to vocabulary
+    logits = lm_head(H_k)  # [B, L_k, V]
+    
+    # Shift for next-token prediction
+    shift_logits = logits[..., :-1, :]  # Predict next token
+    shift_labels = C_aligned[..., 1:]   # Target is next token
+    
+    # Compute cross-entropy
+    loss = F.cross_entropy(
+        shift_logits.reshape(-1, V),
+        shift_labels.reshape(-1)
+    )
+    return loss
+
+# Training forward pass
+L_NTP_0 = compute_level_loss(H_0, C_structure, level=0)
+L_NTP_1 = compute_level_loss(H_1, C_skeleton, level=1)
+L_NTP_2 = compute_level_loss(H_2, C_full, level=2)  # Main learning signal
+```
+
+#### 6.3.3 为什么分层 NTP 比单层更有效？
+
+| 问题         | 传统单层 AR                | NLCP 分层 AR                             |
+|:-------------|:---------------------------|:-----------------------------------------|
+| **长程依赖** | 48-step 反向传播，梯度消失 | 每步最多 8→32→48，短路径                 |
+| **结构学习** | 隐式学习，难以控制         | 显式在 L0 学习 PLAN/STEP 结构            |
+| **错误定位** | 不知道哪里错了             | L1 公式错 → 修正 L1；L2 语言错 → 修正 L2 |
+| **样本效率** | 每个样本一个监督信号       | 每个样本 3 个监督信号 + 2 个一致性约束   |
+
+### 6.4 关键观察
 - **算力重分配**：高信息节点（公式推导、约束引入）获得 $L_{k+1}/L_k \approx 4\sim5$ 的展开，低信息过渡词仅 $\approx 1$。
 - **U型 Loss 分布再现**：L1 到 L2 的 Cross-Attn 使逻辑起点/终点 Loss 显著降低，中间细节由 Self-Attn 补充，完美对齐 DLCM Sec 7.2.2 的机制分析。
 - **误差隔离**：若 L1 的公式骨架正确，L2 仅做语言实例化；若 L1 错误，Depth Gate 可提前终止或触发回溯（未来可接 Verifier）。

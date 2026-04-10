@@ -1,7 +1,24 @@
 """NLCP (Next-Level Concept Pyramid) Loss Functions.
 
 This module implements all loss functions for NLCP training.
-Reference: concept-pyramid.md Section 4 - Pretraining Strategy and Objective Functions
+
+DESIGN SOURCE:
+    - concept-pyramid.md Section 4 - Pretraining Strategy and Objective Functions
+    - concept-pyramid-critic.md - Critical analysis of loss design
+
+COMPLETE LOSS FUNCTION (Section 4.1):
+    L_total = Σ_k L_NTP(H_k | H_{<k}, Q)    (hierarchical autoregressive)
+            + λ_1 * L_consist               (cross-scale consistency)
+            + λ_2 * L_depth                 (expansion rate regularization)
+            + λ_3 * L_CE(Tokens | H_K)      (final alignment)
+
+    Weight initialization (Section 4.1):
+        λ_1 = 0.1, λ_2 = 0.05, λ_3 = 1.0
+        (cosine decay during training)
+
+CRITICAL ISSUES:
+    - CrossScaleConsistencyLoss: Too strict L2 constraint (critic Problem 2)
+    - ExpansionRateRegularization: Only batch-level, not per-sample
 """
 
 import torch
@@ -87,21 +104,124 @@ class NextTokenPredictionLoss(nn.Module):
 class CrossScaleConsistencyLoss(nn.Module):
     """Cross-Scale Consistency Regularization Loss.
 
-    Reference: concept-pyramid.md Section 3.5
-    "Prevent level degradation or attention dilution, provide strong
-    supervision gradient anchor points"
+    DESIGN SOURCE - concept-pyramid.md Section 3.5:
+        Formula:
+            L_consist = Σ_k ||MeanPool(H_{k+1}, expand_mask_k) - H_k||_2^2
+                        + λ_NCE * L_InfoNCE
 
-    Formula from Section 3.5:
-        L_consist = Σ_k ||MeanPool(H_{k+1}, expand_mask_k) - H_k||_2^2
-                    + λ_NCE * L_InfoNCE
+        Purpose: "Prevent level degradation or attention dilution, provide strong
+        supervision gradient anchor points"
 
-    Physical meaning from Section 3.5:
-        "Force fine level to preserve coarse level semantics after aggregation,
-        avoid 'skip coarse level and directly fit fine level' optimization shortcut"
+        Physical meaning:
+            "Force fine level to preserve coarse level semantics after aggregation,
+            avoid 'skip coarse level and directly fit fine level' optimization shortcut"
+
+        MeanPool operation:
+            Groups fine positions by their parent coarse position,
+            computes mean within each group to match coarse dimensions.
+
+    CRITICAL ISSUE - concept-pyramid-critic.md Problem 2:
+        "Consistency Loss Creates Information Bottleneck"
+
+        ISSUE DESCRIPTION:
+            The loss forces: MeanPool(H_{k+1}) ≈ H_k
+
+            This creates a FUNDAMENTAL CONTRADICTION:
+            - Goal A: Fine layer should "expand" and add new information/detail
+            - Goal B: After pooling back, it should equal coarse layer (no new info)
+
+        CONCRETE EXAMPLE:
+            Coarse Level (H_k): "Calculate average speed"
+            Fine Level (H_{k+1}): "t1 = 120/60, t2 = 180/90, v_avg = (d1+d2)/(t1+t2)"
+
+            After MeanPool(H_{k+1}) should equal H_k per consistency loss.
+            But H_{k+1} contains NEW information (the actual formulas) not in H_k!
+
+            Mathematical issue:
+                To minimize loss, H_{k+1} must satisfy:
+                mean(H_{k+1}[i*4:(i+1)*4]) ≈ H_k[i]
+
+                This means H_{k+1} can ONLY add information that averages to zero!
+                Any "new" semantic content must be balanced by opposite content.
+                This severely limits expressiveness.
+
+    IMPLEMENTATION CHOICE:
+        Current implementation (line ~149) uses strict L2:
+            consistency_loss = F.mse_loss(pooled_fine, coarse_hidden_states)
+
+        This forces EXACT equality between pooled fine and coarse.
+        The model learns to put new information only in variance, not mean.
+
+    RECOMMENDED FIXES - concept-pyramid-critic.md Solutions 2A-2C:
+
+        SOLUTION 2A: Directional Consistency (Relaxed Constraint)
+        ```python
+        class DirectionalConsistencyLoss(nn.Module):
+            def __init__(self, epsilon=0.5):
+                self.epsilon = epsilon  # Allow deviation
+
+            def forward(self, H_fine_pooled, H_coarse):
+                distance = torch.norm(H_fine_pooled - H_coarse, dim=-1)
+
+                # Hinge loss: only penalize if distance > epsilon
+                loss = torch.clamp(distance - self.epsilon, min=0.0).mean()
+
+                return loss
+
+        # Now fine level can deviate up to epsilon!
+        # Allows meaningful new information to be added.
+        ```
+
+        SOLUTION 2B: Residual-Based Consistency
+        ```python
+        class ResidualConsistencyLoss(nn.Module):
+            def __init__(self, hidden_dim):
+                # Learn how much each position can deviate
+                self.delta_proj = nn.Linear(hidden_dim, hidden_dim)
+
+            def forward(self, H_fine_pooled, H_coarse):
+                # Learnable refinement vector
+                delta_H = torch.tanh(self.delta_proj(H_coarse))
+
+                # Target is coarse + refinement, not just coarse
+                target = H_coarse + delta_H
+
+                loss = F.mse_loss(H_fine_pooled, target)
+                return loss
+
+        # Example:
+        # H_coarse[0] = "average speed concept"
+        # delta_H[0] = "specific formula: v_avg = total_distance / total_time"
+        # H_fine_pooled[0] should match H_coarse[0] + delta_H[0]
+        # Now the fine level can add meaningful semantic content!
+        ```
+
+        SOLUTION 2C: Information-Theoretic (Mutual Information)
+        ```python
+        class MutualInformationConsistency(nn.Module):
+            def forward(self, H_fine_pooled, H_coarse):
+                # Maximize mutual information between coarse and pooled fine
+                # This ensures information is preserved without forcing equality
+
+                H_fine_norm = F.normalize(H_fine_pooled, dim=-1)
+                H_coarse_norm = F.normalize(H_coarse, dim=-1)
+
+                sim_matrix = torch.matmul(H_fine_norm, H_coarse_norm.T)
+
+                # InfoNCE loss: positive pairs on diagonal
+                labels = torch.arange(H_fine_norm.size(0))
+                loss = F.cross_entropy(sim_matrix / 0.07, labels)
+
+                return loss
+
+        # Encodes H_fine_pooled to be "predictable" from H_coarse
+        # But doesn't force them to be equal
+        # H_fine can contain additional information!
+        ```
 
     Attributes:
         use_info_nce: Whether to add InfoNCE contrastive term
-        info_nce_weight: Weight for InfoNCE term
+        info_nce_weight: Weight for InfoNCE term λ_NCE
     """
 
     def __init__(self, use_info_nce: bool, info_nce_weight: float):
@@ -396,10 +516,35 @@ class NLCPLossComputer(nn.Module):
         target_ratio: float,
         use_info_nce: bool,
         info_nce_weight: float,
+        consistency_loss_type: str = "standard",
+        directional_epsilon: float = 0.5,
+        mi_temperature: float = 0.07,
     ):
         super().__init__()
         self.ntp_loss = NextTokenPredictionLoss(vocab_size, hidden_dim)
-        self.consist_loss = CrossScaleConsistencyLoss(use_info_nce, info_nce_weight)
+
+        # Select consistency loss type based on config (critic.md Solutions 2A-2C)
+        if consistency_loss_type == "directional":
+            self.consist_loss = DirectionalConsistencyLoss(
+                epsilon=directional_epsilon,
+                use_info_nce=use_info_nce,
+                info_nce_weight=info_nce_weight,
+            )
+        elif consistency_loss_type == "residual":
+            self.consist_loss = ResidualConsistencyLoss(
+                use_info_nce=use_info_nce,
+                info_nce_weight=info_nce_weight,
+            )
+        elif consistency_loss_type == "mi":
+            self.consist_loss = MutualInformationConsistencyLoss(
+                temperature=mi_temperature,
+            )
+        else:  # "standard"
+            self.consist_loss = CrossScaleConsistencyLoss(
+                use_info_nce=use_info_nce,
+                info_nce_weight=info_nce_weight,
+            )
+
         self.depth_loss = ExpansionRateRegularization(target_ratio)
         self.ce_loss = FinalTokenAlignmentLoss(padding_id)
 
@@ -498,3 +643,272 @@ class NLCPLossComputer(nn.Module):
         }
 
         return total_loss, loss_dict
+
+
+class DirectionalConsistencyLoss(nn.Module):
+    """Directional Consistency Loss (concept-pyramid-critic.md Solution 2A).
+
+    Relaxed version of CrossScaleConsistencyLoss.
+    Instead of forcing exact equality (MSE), only requires coarse and fine
+    to be "close enough" within an epsilon margin.
+
+    Solves the information bottleneck problem by allowing fine level
+    to deviate from coarse level up to epsilon.
+
+    Advantages:
+        - Allows fine level to add new information
+        - Only penalizes large deviations
+        - Hinge loss: no gradient when within epsilon
+
+    Reference: concept-pyramid-critic.md Solution 2A
+    """
+
+    def __init__(
+        self,
+        epsilon: float = 0.5,
+        use_info_nce: bool = False,
+        info_nce_weight: float = 0.1,
+    ):
+        super().__init__()
+        self.epsilon = epsilon
+        self.use_info_nce = use_info_nce
+        self.info_nce_weight = info_nce_weight
+
+    def _mean_pool_by_expand_mask(
+        self,
+        fine_hidden_states: torch.Tensor,
+        expand_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        """Mean pool fine level back to coarse dimensions."""
+        B = fine_hidden_states.size(0)
+        L_coarse = expand_mask.size(1)
+        D = fine_hidden_states.size(-1)
+
+        pooled = torch.zeros(
+            B,
+            L_coarse,
+            D,
+            device=fine_hidden_states.device,
+            dtype=fine_hidden_states.dtype,
+        )
+
+        for b in range(B):
+            start_idx = 0
+            for i in range(L_coarse):
+                count = int(expand_mask[b, i].item())
+                if count > 0:
+                    end_idx = start_idx + count
+                    pooled[b, i] = fine_hidden_states[b, start_idx:end_idx].mean(dim=0)
+                    start_idx = end_idx
+
+        return pooled
+
+    def forward(
+        self,
+        fine_hidden_states: torch.Tensor,
+        coarse_hidden_states: torch.Tensor,
+        expand_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        """Compute directional consistency loss with hinge.
+
+        Args:
+            fine_hidden_states: [B, L_{k+1}, D] fine level hidden states
+            coarse_hidden_states: [B, L_k, D] coarse level hidden states
+            expand_mask: [B, L_k] expansion counts per coarse position
+
+        Returns:
+            loss: Scalar directional consistency loss
+        """
+        # MeanPool fine level back to coarse level dimensions
+        pooled_fine = self._mean_pool_by_expand_mask(fine_hidden_states, expand_mask)
+
+        # Compute L2 distance per position
+        distance = torch.norm(pooled_fine - coarse_hidden_states, dim=-1)  # [B, L_k]
+
+        # Hinge loss: only penalize if distance > epsilon
+        loss = torch.clamp(distance - self.epsilon, min=0.0).mean()
+
+        return loss
+
+
+class ResidualConsistencyLoss(nn.Module):
+    """Residual-Based Consistency Loss (concept-pyramid-critic.md Solution 2B).
+
+    Instead of forcing MeanPool(H_fine) ≈ H_coarse,
+    learns a refinement vector: MeanPool(H_fine) ≈ H_coarse + ΔH.
+
+    This allows the fine level to add meaningful semantic content
+    beyond what's in the coarse level.
+
+    Example:
+        H_coarse[0] = "average speed concept"
+        ΔH[0] = "specific formula: v_avg = total_distance / total_time"
+        Target = H_coarse[0] + ΔH[0]
+
+    Reference: concept-pyramid-critic.md Solution 2B
+    """
+
+    def __init__(
+        self, hidden_dim: int, use_info_nce: bool = False, info_nce_weight: float = 0.1
+    ):
+        super().__init__()
+        self.hidden_dim = hidden_dim
+
+        # Learnable refinement projection
+        self.delta_proj = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, hidden_dim),
+        )
+
+        self.use_info_nce = use_info_nce
+        self.info_nce_weight = info_nce_weight
+
+    def _mean_pool_by_expand_mask(
+        self,
+        fine_hidden_states: torch.Tensor,
+        expand_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        """Mean pool fine level back to coarse dimensions."""
+        B = fine_hidden_states.size(0)
+        L_coarse = expand_mask.size(1)
+        D = fine_hidden_states.size(-1)
+
+        pooled = torch.zeros(
+            B,
+            L_coarse,
+            D,
+            device=fine_hidden_states.device,
+            dtype=fine_hidden_states.dtype,
+        )
+
+        for b in range(B):
+            start_idx = 0
+            for i in range(L_coarse):
+                count = int(expand_mask[b, i].item())
+                if count > 0:
+                    end_idx = start_idx + count
+                    pooled[b, i] = fine_hidden_states[b, start_idx:end_idx].mean(dim=0)
+                    start_idx = end_idx
+
+        return pooled
+
+    def forward(
+        self,
+        fine_hidden_states: torch.Tensor,
+        coarse_hidden_states: torch.Tensor,
+        expand_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        """Compute residual-based consistency loss.
+
+        Args:
+            fine_hidden_states: [B, L_{k+1}, D] fine level hidden states
+            coarse_hidden_states: [B, L_k, D] coarse level hidden states
+            expand_mask: [B, L_k] expansion counts per coarse position
+
+        Returns:
+            loss: Scalar residual consistency loss
+        """
+        # MeanPool fine level back to coarse level dimensions
+        pooled_fine = self._mean_pool_by_expand_mask(fine_hidden_states, expand_mask)
+
+        # Learnable refinement vector
+        delta_H = torch.tanh(self.delta_proj(coarse_hidden_states))
+
+        # Target is coarse + refinement, not just coarse
+        target = coarse_hidden_states + delta_H
+
+        # MSE loss to target
+        loss = F.mse_loss(pooled_fine, target)
+
+        return loss
+
+
+class MutualInformationConsistencyLoss(nn.Module):
+    """Mutual Information Consistency Loss (concept-pyramid-critic.md Solution 2C).
+
+    Information-theoretic approach: maximize mutual information between
+    coarse and pooled fine representations.
+
+    Ensures information is preserved without forcing equality.
+    Fine level can contain additional information!
+
+    Uses InfoNCE loss as a lower bound on mutual information.
+
+    Reference: concept-pyramid-critic.md Solution 2C
+    """
+
+    def __init__(self, temperature: float = 0.07):
+        super().__init__()
+        self.temperature = temperature
+
+    def _mean_pool_by_expand_mask(
+        self,
+        fine_hidden_states: torch.Tensor,
+        expand_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        """Mean pool fine level back to coarse dimensions."""
+        B = fine_hidden_states.size(0)
+        L_coarse = expand_mask.size(1)
+        D = fine_hidden_states.size(-1)
+
+        pooled = torch.zeros(
+            B,
+            L_coarse,
+            D,
+            device=fine_hidden_states.device,
+            dtype=fine_hidden_states.dtype,
+        )
+
+        for b in range(B):
+            start_idx = 0
+            for i in range(L_coarse):
+                count = int(expand_mask[b, i].item())
+                if count > 0:
+                    end_idx = start_idx + count
+                    pooled[b, i] = fine_hidden_states[b, start_idx:end_idx].mean(dim=0)
+                    start_idx = end_idx
+
+        return pooled
+
+    def forward(
+        self,
+        fine_hidden_states: torch.Tensor,
+        coarse_hidden_states: torch.Tensor,
+        expand_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        """Compute mutual information consistency loss.
+
+        Args:
+            fine_hidden_states: [B, L_{k+1}, D] fine level hidden states
+            coarse_hidden_states: [B, L_k, D] coarse level hidden states
+            expand_mask: [B, L_k] expansion counts per coarse position
+
+        Returns:
+            loss: Scalar MI consistency loss (InfoNCE)
+        """
+        # MeanPool fine level back to coarse level dimensions
+        pooled_fine = self._mean_pool_by_expand_mask(fine_hidden_states, expand_mask)
+
+        # Normalize for cosine similarity
+        pooled_fine_norm = F.normalize(pooled_fine, dim=-1)  # [B, L_k, D]
+        coarse_norm = F.normalize(coarse_hidden_states, dim=-1)  # [B, L_k, D]
+
+        # Compute similarity matrix
+        # For each coarse position, compute similarity with all pooled fine positions
+        B, L_k, D = pooled_fine_norm.shape
+
+        # Reshape for batch matrix multiplication
+        pooled_flat = pooled_fine_norm.reshape(B * L_k, D)  # [B*L_k, D]
+        coarse_flat = coarse_norm.reshape(B * L_k, D)  # [B*L_k, D]
+
+        # Similarity matrix: [B*L_k, B*L_k]
+        sim_matrix = torch.matmul(pooled_flat, coarse_flat.T) / self.temperature
+
+        # Labels: diagonal elements are positive pairs
+        labels = torch.arange(B * L_k, device=sim_matrix.device)
+
+        # InfoNCE loss
+        loss = F.cross_entropy(sim_matrix, labels)
+
+        return loss

@@ -1,7 +1,42 @@
 """NLCP (Next-Level Concept Pyramid) Main Model.
 
 This module implements the complete NLCP architecture.
-Reference: concept-pyramid.md Section 2 - Architecture Overview
+
+DESIGN SOURCE:
+    - concept-pyramid.md Section 2 - Architecture Overview
+    - concept-pyramid.md Section 3 - Core Mechanisms
+    - concept-pyramid-critic.md - Critical analysis and gaps
+
+ARCHITECTURE DATA FLOW (Section 2.1):
+    Input: Question Q (Token IDs)
+       ↓ [Lightweight Encoder]
+    H₀ ∈ ℝ^{L₀ × d}          (Level 0: Global Intent / Problem Abstraction)
+       ↓ [Depth Gate] p_cont^(0) > τ ? ──No──→ Terminate
+       ↓ Yes
+    [Expansion Predictor] λ₀ → L₁
+       ↓ [Next-Level Generator (Causal Cross-Attn + Self-Attn)]
+    H₁ ∈ ℝ^{L₁ × d}          (Level 1: Logical Skeleton / High-Level Steps)
+       ↓ [Depth Gate] p_cont^(1) > τ ? ──No──→ Terminate
+       ↓ Yes
+    [Expansion Predictor] λ₁ → L₂
+       ↓ [Next-Level Generator]
+    H₂ ∈ ℝ^{L₂ × d}          (Level 2: Intermediate Reasoning / Constraints)
+       ↓ ... (dynamic loop to Level K)
+       ↓ Terminate Condition Met
+    [Token Projection Head] → Logits ∈ ℝ^{L_out × V} → Autoregressive Decoding
+
+MODULE TASKS (Section 2.2 Table):
+    Encoder:       x ∈ [1, L_q] → H_0 ∈ [1, L_0, d]
+    Depth Gate:    H_k ∈ [1, L_k, d] → p_cont ∈ [0,1]
+    Expansion:     H_k → expand_mask ∈ [1, L_k] → L_{k+1} = Σλ
+    Generator:     H_k, Q → H_{k+1} ∈ [1, L_{k+1}, d]
+    Token Decoder: H_K → Logits ∈ [1, L_K, V]
+
+KNOWN IMPLEMENTATION GAPS (from concept-pyramid-critic.md):
+    1. ExpansionPredictor uses non-differentiable floor()
+    2. DepthGate uses full attention (not causal)
+    3. CrossLevelAttention has rigid parent-child mapping
+    4. ConsistencyLoss uses strict L2 (not relaxed)
 """
 
 import torch
@@ -14,12 +49,21 @@ from examples.nlcp.base import (
     NLCPOutput,
 )
 from examples.nlcp.modules import (
+    # Original components
     DepthGate,
     ExpansionPredictor,
+    CrossLevelCausalAttention,
     NextLevelGenerator,
     TokenDecoder,
     LightweightEncoder,
     RMSNorm,
+    # Critic.md solution components
+    GumbelSoftmaxExpansionPredictor,
+    REINFORCEExpansionPredictor,
+    SoftExpansionPredictor,
+    CausalDepthGate,
+    RelaxedCrossLevelAttention,
+    HybridCrossLevelAttention,
 )
 from examples.nlcp.losses import NLCPLossComputer
 
@@ -27,32 +71,102 @@ from examples.nlcp.losses import NLCPLossComputer
 class NLCPModel(nn.Module):
     """Next-Level Concept Pyramid Model.
 
-    Reference: concept-pyramid.md Section 2.1
-    High-level data flow:
-        Input: Question Q (Token IDs)
-           ↓ [Lightweight Encoder]
-        H₀ ∈ ℝ^{L₀ × d}          (Level 0: Global Intent / Problem Abstraction)
-           ↓ [Depth Gate] p_cont^(0) > τ ? ──No──→ Terminate
-           ↓ Yes
-        [Expansion Predictor] λ₀ → L₁
-           ↓ [Next-Level Generator (Causal Cross-Attn + Self-Attn)]
-        H₁ ∈ ℝ^{L₁ × d}          (Level 1: Logical Skeleton / High-Level Steps)
-           ↓ ... (动态循环至 Level K)
-           ↓ Terminate Condition Met
-        [Token Projection Head] → Logits
+    DESIGN SOURCE - concept-pyramid.md Section 2.1:
+        High-level data flow:
+            Input: Question Q (Token IDs)
+               ↓ [Lightweight Encoder]
+            H₀ ∈ ℝ^{L₀ × d}          (Level 0: Global Intent / Problem Abstraction)
+               ↓ [Depth Gate] p_cont^(0) > τ ? ──No──→ Terminate
+               ↓ Yes
+            [Expansion Predictor] λ₀ → L₁
+               ↓ [Next-Level Generator (Causal Cross-Attn + Self-Attn)]
+            H₁ ∈ ℝ^{L₁ × d}          (Level 1: Logical Skeleton / High-Level Steps)
+               ↓ ... (dynamic loop to Level K)
+               ↓ Terminate Condition Met
+            [Token Projection Head] → Logits
 
-    Reference: concept-pyramid.md Section 2.2 Table
-    Module Tasks and Connection Logic
+    MODULE TASKS - concept-pyramid.md Section 2.2 Table:
+        Module          Input                    Output                    Function
+        ─────────────────────────────────────────────────────────────────────────────
+        Encoder         x ∈ [1, L_q]            H_0 ∈ [1, L_0, d]         Problem abstraction
+        Depth Gate      H_k ∈ [1, L_k, d]       p_cont ∈ [0,1]            Continue/terminate decision
+        Expansion       H_k ∈ [1, L_k, d]       expand_mask ∈ [1, L_k]    Per-position expansion rates
+        Generator       H_k, Q                  H_{k+1} ∈ [1, L_{k+1}, d] Next level generation
+        Token Decoder   H_K ∈ [1, L_K, d]       Logits ∈ [1, L_K, V]      Vocabulary projection
+
+    COMPARISON WITH VAR AND DLCM - concept-pyramid.md Section 1.3:
+        VAR (Visual Autoregressive):
+            - Fixed pyramid structure (8×8 → 16×16 → 32×32)
+            - Image generation focus
+            - Deterministic expansion (always 4×)
+
+        DLCM (Dynamic Large Concept Model):
+            - Semantic compression (text → latent → text)
+            - Dynamic latent mapping
+            - No hierarchical generation
+
+        NLCP (This work):
+            - Dynamic pyramid depth K (per sample)
+            - Dynamic expansion rates λ_k (per position)
+            - Hierarchical autoregressive generation
+            - Cross-level consistency supervision
+
+    CRITICAL IMPLEMENTATION GAPS (from concept-pyramid-critic.md):
+
+        ISSUE 1 - Expansion Predictor Gradient Flow (Problem 1):
+            Location: self.expansion_predictor() calls in forward()
+            Problem: floor() operation is non-differentiable
+            Impact: Model cannot learn optimal expansion rates directly
+            Current workaround: L_depth regularization provides indirect signal
+
+        ISSUE 3 - Depth Gate Causality (Problem 3):
+            Location: self.depth_gate() calls in forward()
+            Problem: Full attention pooling during training
+            Impact: Train/test mismatch in depth decisions
+            Current workaround: None (significant gap!)
+
+        ISSUE 4 - Rigid Cross-Level Mapping (Problem 4):
+            Location: level_generator (CrossLevelCausalAttention)
+            Problem: repeat_interleave enforces strict 1-to-many parent-child
+            Impact: Cannot access multi-parent context
+            Current workaround: None
+
+    FORWARD PASS ALGORITHM:
+        1. Encode input to Level 0 (H_0)
+           - Uses LightweightEncoder
+           - Projects to hidden_dim via l0_proj
+           - Applies RMSNorm for stability
+
+        2. Dynamic Pyramid Expansion Loop:
+           while current_level < max_depth:
+               a. Compute continuation probability p_cont = depth_gate(H_k)
+               b. Check termination: if p_cont < τ OR L_k >= L_max: break
+               c. Predict expansion: expand_mask, lambda_k = expansion_predictor(H_k)
+               d. Generate next level: H_{k+1} = generator(H_k, expand_mask)
+               e. Store level state for loss computation
+               f. Increment level counter
+
+        3. Final Projection:
+           - Apply token_decoder to deepest level H_K
+           - Get logits ∈ [B, L_K, V]
+
+        4. Loss Computation (if training):
+           - NTP loss at each level
+           - Consistency loss between adjacent levels
+           - Depth regularization for expansion rates
+           - Cross-entropy alignment
 
     Attributes:
-        config: Model configuration
-        encoder: Lightweight encoder for input tokens
-        depth_gate: Dynamic depth gate for pyramid depth control
-        expansion_predictor: Content-adaptive expansion rate predictor
-        level_generators: List of Next-Level Generators
-        token_decoder: Token decoder for vocabulary projection
-        loss_computer: Loss computation module
+        config: NLCPModelConfig with all hyperparameters
+        encoder: LightweightEncoder for initial token encoding
+        depth_gate: DepthGate for dynamic depth control (see critic Problem 3)
+        expansion_predictor: ExpansionPredictor for λ_k prediction (see critic Problem 1)
+        level_generators: List of NextLevelGenerator for each level (see critic Problem 4)
+        token_decoder: TokenDecoder for vocabulary projection
+        loss_computer: NLCPLossComputer for multi-objective training
         level_embedding: Learnable embeddings for each level
+        l0_proj: Projection for Level 0
+        l0_norm: RMSNorm for Level 0
     """
 
     def __init__(
@@ -81,23 +195,54 @@ class NLCPModel(nn.Module):
 
         # Dynamic Depth Gate
         # Reference: Section 3.2 "Replaces fixed level count, achieves true pyramid structure"
-        self.depth_gate = DepthGate(
-            hidden_dim=config.hidden_dim,
-            dropout=config.dropout,
-        )
+        # Component selection based on config (critic.md Solution 3B)
+        if config.depth_gate_type == "causal":
+            self.depth_gate = CausalDepthGate(
+                hidden_dim=config.hidden_dim,
+                dropout=config.dropout,
+            )
+        else:  # "standard"
+            self.depth_gate = DepthGate(
+                hidden_dim=config.hidden_dim,
+                dropout=config.dropout,
+            )
 
         # Content-Adaptive Expansion Predictor
         # Reference: Section 3.3 "Fine level length is not preset, but determined by coarse level semantic density"
-        self.expansion_predictor = ExpansionPredictor(
-            hidden_dim=config.hidden_dim,
-            expansion_min=config.expansion_min,
-            expansion_max=config.expansion_max,
-            dropout=config.dropout,
-        )
+        # Component selection based on config (critic.md Solutions 1A-1C)
+        if config.expansion_predictor_type == "gumbel":
+            self.expansion_predictor = GumbelSoftmaxExpansionPredictor(
+                hidden_dim=config.hidden_dim,
+                expansion_min=config.expansion_min,
+                expansion_max=config.expansion_max,
+                dropout=config.dropout,
+            )
+        elif config.expansion_predictor_type == "reinforce":
+            self.expansion_predictor = REINFORCEExpansionPredictor(
+                hidden_dim=config.hidden_dim,
+                expansion_min=config.expansion_min,
+                expansion_max=config.expansion_max,
+                dropout=config.dropout,
+            )
+        elif config.expansion_predictor_type == "soft":
+            self.expansion_predictor = SoftExpansionPredictor(
+                hidden_dim=config.hidden_dim,
+                expansion_min=config.expansion_min,
+                expansion_max=config.expansion_max,
+                dropout=config.dropout,
+            )
+        else:  # "floor" (original)
+            self.expansion_predictor = ExpansionPredictor(
+                hidden_dim=config.hidden_dim,
+                expansion_min=config.expansion_min,
+                expansion_max=config.expansion_max,
+                dropout=config.dropout,
+            )
 
         # Next-Level Generators (one per possible transition)
         # Reference: Section 3.4 "Fine level generation is not coarse upsampling,
         # but strictly conditional autoregressive process on coarse level"
+        # Component selection based on config (critic.md Solutions 4A-4B)
         self.level_generators = nn.ModuleList(
             [
                 NextLevelGenerator(
@@ -105,6 +250,7 @@ class NLCPModel(nn.Module):
                     num_heads=config.num_heads,
                     num_layers=num_generator_layers,
                     dropout=config.dropout,
+                    cross_attn_type=config.cross_attention_type,
                 )
                 for _ in range(config.max_depth)
             ]
@@ -126,6 +272,7 @@ class NLCPModel(nn.Module):
         self.l0_norm = RMSNorm(config.hidden_dim)
 
         # Loss computer
+        # Component selection for consistency loss (critic.md Solutions 2A-2C)
         self.loss_computer = NLCPLossComputer(
             vocab_size=config.vocab_size,
             hidden_dim=config.hidden_dim,
@@ -136,6 +283,9 @@ class NLCPModel(nn.Module):
             target_ratio=4.0,
             use_info_nce=use_info_nce,
             info_nce_weight=info_nce_weight,
+            consistency_loss_type=config.consistency_loss_type,
+            directional_epsilon=0.5,  # Will be overridden by training config
+            mi_temperature=0.07,  # Will be overridden by training config
         )
 
     def forward(

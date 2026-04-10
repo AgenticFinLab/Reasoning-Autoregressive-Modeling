@@ -5,6 +5,8 @@
 > **Document Purpose**: Critical examination of the NLCP (Next-Level Concept Pyramid) framework design, identifying potential problems, proposing solutions, and suggesting improvements with specific examples.
 >
 > **Reference**: [concept-pyramid.md](file:///Users/sjia/Documents/AgenticFinLab/Projects/Reasoning-Autoregressive-Modeling/docs/concept-pyramid.md)
+>
+> **Training Context**: This review assumes Q+CoT training data format where each sample consists of (Question, Chain-of-Thought) pairs, and the model learns hierarchical representations that align with different granularities of the target CoT.
 
 ---
 
@@ -16,6 +18,60 @@
 | **Feasibility**   | ⭐⭐⭐☆☆ (3/5) | Significant engineering challenges, especially in training dynamics and gradient flow        |
 | **Accuracy**      | ⭐⭐⭐⭐☆ (4/5) | Mathematical formulation is solid, but some claims need empirical verification               |
 | **Effectiveness** | ⭐⭐⭐☆☆ (3/5) | Promising but unproven; risk of compounding issues in deep hierarchies                       |
+
+---
+
+## 📝 Training Data Format Considerations (Q+CoT)
+
+### Context: How NLCP Uses Q+CoT for Training
+
+Unlike traditional LLMs that learn `Q → Answer` mappings, NLCP is trained on **Q+CoT (Question + Chain-of-Thought)** pairs where the full reasoning chain is the target:
+
+```
+Input:  Q = "A train travels 120km at 60km/h..."
+Target: C = "To find average speed, I need... t1 = 120/60 = 2 hours..."
+```
+
+**Key Training Challenge**: The target CoT $C$ has fixed length (e.g., 48 tokens), but NLCP generates hierarchical representations with **dynamic lengths** at each level ($L_0=8, L_1=32, L_2=48$). This creates a fundamental alignment problem.
+
+### The Alignment Problem
+
+| Level | Hidden State Shape | Target Alignment                                    | Loss Type        |
+|:------|:-------------------|:----------------------------------------------------|:-----------------|
+| L0    | $[B, 8, D]$        | Structure labels: `[PLAN, STEP1, STEP2, ...]`       | NTP on structure |
+| L1    | $[B, 32, D]$       | Skeleton tokens: `["To", "find", "t1=120/60", ...]` | NTP on skeleton  |
+| L2    | $[B, 48, D]$       | Full CoT: `["To", "find", "average", "speed", ...]` | NTP on full text |
+
+**Critical Question**: How do we create these aligned targets $C^{(0)}, C^{(1)}, C^{(2)}$ from a single CoT $C$?
+
+### Proposed Solutions for Target Alignment
+
+**Solution A: Manual Annotation (High Quality, Low Scale)**
+- Human annotators create structure labels and skeletons for each CoT
+- Pros: High quality, clear semantics
+- Cons: Expensive, doesn't scale
+
+**Solution B: Automatic Compression (Recommended)**
+- Use a smaller LM to compress CoT into structure labels and skeletons
+- Train compression model: `C → C_structure` and `C → C_skeleton`
+- Pros: Scalable, automatic
+- Cons: Compression quality depends on auxiliary model
+
+**Solution C: Multi-Task Learning (Alternative)**
+- Don't align explicitly; instead, use attention weights to guide learning
+- Higher loss weight on positions where expansion rates are high
+- Pros: No need for explicit alignment
+- Cons: Weaker supervision signal
+
+### Implications for Critical Problems
+
+The Q+CoT training format **exacerbates** some critical problems:
+
+1. **Problem 1 (Expansion Predictor)**: If expansion rates are wrong, the alignment between $H_k$ and $C^{(k)}$ breaks, causing training instability.
+
+2. **Problem 2 (Consistency Loss)**: The strict L2 consistency may conflict with the fact that $C^{(k)}$ and $C^{(k+1)}$ contain different information (structure vs. details).
+
+3. **Problem 4 (Rigid Parent-Child)**: If a token in $C$ requires context from multiple structural elements, the rigid 1-to-1 mapping fails.
 
 ---
 
@@ -37,14 +93,21 @@ L_{k+1} = Σ expand_mask_k[i]
 
 **Concrete Example**:
 
-Consider a simple training scenario:
+Consider a simple training scenario with Q+CoT format:
 
 ```python
-# Input: A math word problem
+# Training Sample: Q + CoT (Question + Chain-of-Thought)
 Q = "A train travels 120km at 60km/h, then 180km at 90km/h. What is the average speed?"
+C = "To find average speed, I need total distance divided by total time. " \
+    "First, t1 = 120/60 = 2 hours. Then, t2 = 180/90 = 2 hours. " \
+    "Total distance = 300 km. Total time = 4 hours. Average speed = 75 km/h."
 
-# Level 0 hidden states (after encoder)
-H_0 = encoder(Q)  # Shape: [1, 8, 1024]
+# Tokenized: Q has 28 tokens, C has 48 tokens
+input_ids = tokenizer(Q + C)          # [1, 76] - Full input
+labels = [-100]*28 + tokenizer(C)      # [1, 76] - Mask Q with -100 (ignore in loss)
+
+# Level 0: Encoder processes Q (NOT Q+C!)
+H_0 = encoder(tokenizer(Q))  # Shape: [1, 8, 1024]
 
 # Expansion predictor output (continuous)
 lambda_0 = [3.7, 2.1, 4.8, 1.9, 2.5, 3.2, 2.8, 1.5]  # Before floor
@@ -59,10 +122,10 @@ expand_mask_0 = [3, 2, 4, 1, 2, 3, 2, 1]  # L_1 = 18
 **Why This Matters**:
 
 In the math problem example:
-- Position 0 represents "average speed calculation" (complex, needs 4 slots)
-- Position 3 represents "then" (simple, needs 1 slot)
+- Position 0 represents "average speed calculation" (complex concept in Q, needs 4 slots in C)
+- Position 3 represents "then" (transition word in C, needs 1 slot)
 
-If the model predicts λ_0[0] = 3.7 but the optimal is 4.2, the floor makes both 3 and 4. The model receives **zero gradient signal** about whether to increase or decrease λ_0[0]. It only learns through the indirect and delayed `L_depth` regularization loss.
+The expansion predictor must learn to map from **Q's semantic density** to **C's required granularity**. If the model predicts λ_0[0] = 3.7 but needs 4.2 to properly generate the formula "t1 = 120/60 = 2 hours" in C, the floor operation blocks gradient flow. The model receives **zero gradient signal** about whether to increase or decrease λ_0[0], even though the NTP loss on C would improve with better expansion.
 
 **Impact**:
 - The model cannot learn *why* certain expansion rates lead to better outcomes
@@ -236,19 +299,38 @@ This creates a **fundamental contradiction**:
 - **Goal A**: Fine layer should "expand" and add new information/detail
 - **Goal B**: After pooling back, it should equal the coarse layer (no new information)
 
-**Concrete Example**:
+**Concrete Example with Q+CoT Training**:
 
-Consider a reasoning task:
+Consider a training sample with Q+CoT:
+
+```python
+Q = "A train travels 120km at 60km/h, then 180km at 90km/h. What is the average speed?"
+C = "To find average speed, I need total distance divided by total time. " \
+    "First, t1 = 120/60 = 2 hours. Then, t2 = 180/90 = 2 hours. " \
+    "Total distance = 300 km. Total time = 4 hours. Average speed = 75 km/h."
+
+# During training:
+# - Q is encoded to H_0 (input, no loss)
+# - C is the target for all NTP losses at each level
+```
+
+The hierarchical representations:
 
 ```
-Level 0 (Coarse): "Calculate average speed"
-  H_0[0] = [0.5, 0.3, 0.2, ...]  # Abstract concept vector
+Level 0 (Coarse, L_0=8): Represents abstract plan from Q
+  H_0[0] = [0.5, 0.3, 0.2, ...]  # "Calculate average speed" concept
+  H_0[1] = [0.4, 0.4, 0.2, ...]  # "Segment 1 info" concept
+  ...
+  Target: Predict structure labels [PLAN, STEP1, STEP2, MERGE, RESULT, PAD, PAD, PAD]
 
-Level 1 (Fine): "t1 = 120/60, t2 = 180/90, v_avg = (d1+d2)/(t1+t2)"
-  H_1[0:4] = detailed calculation steps
+Level 1 (Fine, L_1=32): Represents formula skeleton aligned to C
+  H_1[0:4] = detailed calculation for "t1 = 120/60"
+  H_1[4:7] = detailed calculation for "t2 = 180/90"
+  ...
+  Target: Predict skeleton tokens ["To", "find", "t1=120/60", "t2=180/90", ...]
   
 # After MeanPool(H_1[0:4]) should equal H_0[0] per consistency loss
-# But H_1 contains NEW information (the actual formulas) not in H_0!
+# But H_1 contains NEW information (the actual formulas from C) not in H_0!
 ```
 
 **The Mathematical Issue**:
@@ -387,17 +469,23 @@ class MutualInformationConsistency(nn.Module):
 
 During training, the depth gate sees the **full sequence** (teacher forcing). During inference, it must decide **autoregressively** without seeing future tokens.
 
-**Concrete Example**:
+**Concrete Example with Q+CoT Training**:
 
 ```python
-# Training (teacher forcing):
-# The depth gate sees the complete H_k for all positions
-H_k = model.generate_level_k(...)  # Complete sequence
+# Training Sample
+Q = "Solve the system: x + y = 10, x - y = 2"
+C = "From first equation: y = 10 - x. Substitute into second: x - (10 - x) = 2. " \
+    "Simplify: 2x - 10 = 2. Therefore: x = 6, y = 4."
+
+# Training (teacher forcing with Q+CoT):
+# The depth gate sees the complete H_k generated from Q, aligned to C
+H_k = model.generate_level_k(Q, target=C)  # Complete sequence
 
 p_cont = depth_gate(H_k)  # Gate sees: [h_1, h_2, h_3, ..., h_L]
 # It can use information from position 10 to decide about position 5!
+# Loss: Only computed on C positions (Q is masked with -100)
 
-# Inference (autoregressive):
+# Inference (autoregressive, no target C available):
 # The depth gate must decide after generating each position
 for pos in range(L_k):
     h_pos = generate_next_token(...)  # Only h_pos is new
@@ -406,25 +494,32 @@ for pos in range(L_k):
     # Gate must decide based ONLY on partial information
     p_cont = depth_gate(H_k_partial)  # Missing future context!
 
-# Mismatch: Training uses full context, inference uses partial context
+# Mismatch: Training uses full context (from complete C), 
+#           inference uses partial context (generating C token by token)
 ```
 
-**Why This Causes Problems**:
-
-Consider a complex reasoning problem:
+**Why This Causes Problems in Q+CoT Training**:
 
 ```
 Q: "Solve the system: x + y = 10, x - y = 2"
+C: "From first equation: y = 10 - x. Substitute into second: x - (10 - x) = 2. 
+    Simplify: 2x - 10 = 2. Therefore: x = 6, y = 4."
 
-Level 1 (generating):
+Level 1 (generating, aligned to C):
   Position 1: "From first equation: y = 10 - x"
   Position 2: "Substitute into second: x - (10 - x) = 2"
   Position 3: "Simplify: 2x - 10 = 2"
-  Position 4: "Therefore: x = 6"
+  Position 4: "Therefore: x = 6, y = 4"
   
-# During training, gate sees all 4 positions and decides p_cont = 0.8 (continue)
-# During inference, after position 1, gate hasn't seen positions 2-4
-# It might decide p_cont = 0.3 (stop) because it doesn't know complexity yet!
+# During training:
+# - Gate sees all 4 positions (because C is fully available)
+# - Decides p_cont = 0.8 (continue to next level)
+# - NTP loss computed against C
+
+# During inference:
+# - After position 1, gate hasn't seen positions 2-4 (C not yet generated)
+# - Might decide p_cont = 0.3 (stop) because it doesn't know complexity yet
+# - Result: Premature termination, incomplete reasoning
 ```
 
 **Impact**:
@@ -574,25 +669,38 @@ K_rep = repeat_interleave(K_coarse, expand_mask, dim=1)
 # Position mapping: [0,0,0,1,1,2,2,2,2] (if expand_mask=[3,2,4])
 ```
 
-**Concrete Example of the Limitation**:
+**Concrete Example of the Limitation with Q+CoT Training**:
 
-Consider generating a detailed explanation:
+Consider training with Q+CoT where the model learns to generate detailed explanations:
+
+```python
+Q = "Find x and y given: x + y = 10, x - y = 2"
+C = "From the problem, we define variables x and y. " \
+    "From first equation: y = 10 - x. " \
+    "Substitute into second: x - (10 - x) = 2. " \
+    "Solving: 2x = 12, so x = 6. Then y = 4."
+
+# During training, model learns hierarchical representations:
+```
 
 ```
-Coarse Level (H_k):
-  [0]: "Problem setup"
-  [1]: "Step 1: Define variables"
-  [2]: "Step 2: Write equations"
+Coarse Level (H_k, from Q):
+  [0]: "Problem setup"          ← "Find x and y given..."
+  [1]: "Step 1: Define variables" ← "we define variables x and y"
+  [2]: "Step 2: Write equations"  ← "From first equation..."
   
-Fine Level (H_{k+1}) - What we WANT:
-  [0]: "Problem setup" → attends to coarse[0]
-  [1]: "Let x be the unknown" → attends to coarse[1] 
-  [2]: "Let y be another variable" → attends to coarse[1]
-  [3]: "From the problem:" → attends to coarse[0] AND coarse[1]!
-  [4]: "We know that x + y = 10" → attends to coarse[2]
+Fine Level (H_{k+1}, aligned to C):
+  [0]: "From the problem," → attends to coarse[0]
+  [1]: "we define variables" → attends to coarse[1] 
+  [2]: "x and y." → attends to coarse[1]
+  [3]: "From the problem, we define" → attends to coarse[0] AND coarse[1]!
+  [4]: "variables x and y. From first" → attends to coarse[1] AND coarse[2]!
   
-# Problem: Position 3 needs context from BOTH coarse[0] and coarse[1]
-# But repeat_interleave forces it to attend to only ONE parent!
+# Problem in Q+CoT Training:
+# - Position 3 "From the problem, we define" bridges problem context (coarse[0]) 
+#   and variable definition (coarse[1])
+# - But repeat_interleave forces it to attend to only ONE parent!
+# - Result: Model cannot properly learn to generate transition phrases in C
 ```
 
 **The Mathematical Issue**:
@@ -723,23 +831,30 @@ But NLCP introduces **new variables** not in the original DLCM formulation:
 - Per-layer expansion rates $\{R_k\}$ (not single $R$)
 - Cross-layer attention parameters
 
-**Concrete Example of the Gap**:
+**Concrete Example of the Gap with Q+CoT Training**:
 
 ```python
 # DLCM assumes fixed compression ratio R=4
 # NLCP has dynamic R_k that varies per layer and per sample
+# Training uses Q+CoT pairs where C complexity determines actual R_k
 
-# Example 1: Simple query
+# Example 1: Simple query with short CoT
 Q = "What is 2+2?"
-R_0 = 2.0  # Little expansion needed
+C = "2 + 2 = 4."  # Short CoT
+R_0 = 2.0  # Little expansion needed (L_0=8 → L_1=16)
 K = 1  # Only 1 level needed
 
-# Example 2: Complex proof
+# Example 2: Complex proof with long CoT
 Q = "Prove the fundamental theorem of calculus"
-R_0 = 5.0, R_1 = 4.0, R_2 = 3.0
-K = 3  # 3 levels needed
+C = "First, we define the integral as the limit of Riemann sums... " \
+    "[50 more tokens of detailed proof]"
+R_0 = 5.0, R_1 = 4.0, R_2 = 3.0  # Progressive expansion
+K = 3  # 3 levels needed to generate full C
 
 # The scaling law L(N, D, R, P) doesn't account for:
+# - Varying CoT lengths in training data
+# - Dynamic depth K based on C complexity
+# - Per-sample expansion rates determined by Q→C mapping
 # 1. Variable K across samples
 # 2. Different R_k at each level
 # 3. Interaction between levels

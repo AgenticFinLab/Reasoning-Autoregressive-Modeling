@@ -1,0 +1,56 @@
+# =============================================================================
+# NLCP REINFORCE Configuration
+# =============================================================================
+# Purpose:
+#   Configuration using REINFORCE expansion predictor (Solution 1B).
+#   For comparison with Gumbel-Softmax approach.
+#
+# Components:
+#   - ExpansionPredictor: REINFORCE (policy gradient)
+#   - DepthGate: causal
+#   - CrossAttention: relaxed
+#   - ConsistencyLoss: directional
+# =============================================================================
+
+lm_type: "nlcp"
+lm_name: "nlcp-reinforce"
+
+model_config:
+  hidden_dim: 1024
+  num_heads: 16
+  vocab_size: 128000
+  max_depth: 4
+  depth_gate_threshold: 0.4
+  l0_length: 8
+  l_max: 512
+  dropout: 0.1
+  expansion_min: 1
+  expansion_max: 8
+  
+  # REINFORCE expansion predictor
+  expansion_predictor_type: "reinforce"
+  depth_gate_type: "causal"
+  cross_attention_type: "relaxed"
+  consistency_loss_type: "directional"
+
+inference_config:
+  torch_dtype: "bfloat16"
+  entropy_config:
+    topk_v: inf
+    topk_adaptive: false
+    temperature: 0.0
+
+generation_config:
+  max_new_tokens: 512
+  temperature: 0.7
+  top_p: 0.9
+  do_sample: true
+
+sys_message: "examples.nlcp.prompts:SYS_PROMPT"
+user_message: "examples.nlcp.prompts:USER_PROMPT"
+
+nlcp_inference:
+  max_depth: 4
+  depth_threshold: 0.4
+  expansion_temperature: 1.0
+  enable_early_exit: true

@@ -1,0 +1,56 @@
+# =============================================================================
+# NLCP Original Configuration (Baseline)
+# =============================================================================
+# Purpose:
+#   Baseline configuration using original components from concept-pyramid.md
+#   WITHOUT critic.md improvements. Used for ablation studies.
+#
+# Components:
+#   - ExpansionPredictor: floor() (non-differentiable)
+#   - DepthGate: standard (non-causal)
+#   - CrossAttention: standard (rigid)
+#   - ConsistencyLoss: standard (strict L2)
+# =============================================================================
+
+lm_type: "nlcp"
+lm_name: "nlcp-original-baseline"
+
+model_config:
+  hidden_dim: 1024
+  num_heads: 16
+  vocab_size: 128000
+  max_depth: 4
+  depth_gate_threshold: 0.4
+  l0_length: 8
+  l_max: 512
+  dropout: 0.1
+  expansion_min: 1
+  expansion_max: 8
+  
+  # Original components (NO critic.md improvements)
+  expansion_predictor_type: "floor"
+  depth_gate_type: "standard"
+  cross_attention_type: "standard"
+  consistency_loss_type: "standard"
+
+inference_config:
+  torch_dtype: "bfloat16"
+  entropy_config:
+    topk_v: inf
+    topk_adaptive: false
+    temperature: 0.0
+
+generation_config:
+  max_new_tokens: 512
+  temperature: 0.7
+  top_p: 0.9
+  do_sample: true
+
+sys_message: "examples.nlcp.prompts:SYS_PROMPT"
+user_message: "examples.nlcp.prompts:USER_PROMPT"
+
+nlcp_inference:
+  max_depth: 4
+  depth_threshold: 0.4
+  expansion_temperature: 1.0
+  enable_early_exit: true

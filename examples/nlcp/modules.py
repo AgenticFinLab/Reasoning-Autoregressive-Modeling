@@ -1,7 +1,22 @@
 """NLCP (Next-Level Concept Pyramid) Core Modules.
 
 This module implements the core components of NLCP architecture.
-Reference: concept-pyramid.md Section 3 - Core Mechanisms Detailed Design
+
+DESIGN SOURCE:
+    - concept-pyramid.md Section 3 - Core Mechanisms Detailed Design
+    - concept-pyramid-critic.md - Critical analysis and proposed solutions
+
+IMPLEMENTATION NOTES:
+    Each class includes detailed references to:
+    1. Original design specification from concept-pyramid.md
+    2. Critical issues identified in concept-pyramid-critic.md
+    3. Implementation choices and trade-offs
+    4. Recommended improvements from critic analysis
+
+CRITICAL IMPLEMENTATION GAPS:
+    - ExpansionPredictor: Uses non-differentiable floor() (see critic Problem 1)
+    - DepthGate: Uses full attention instead of causal (see critic Problem 3)
+    - CrossLevelCausalAttention: Rigid parent-child mapping (see critic Problem 4)
 """
 
 import math
@@ -54,18 +69,51 @@ class RMSNorm(nn.Module):
 class DepthGate(nn.Module):
     """Dynamic Depth Gate for controlling pyramid depth.
 
-    Reference: concept-pyramid.md Section 3.2
-    Dynamic Depth Gate formula:
-        p_cont^(k) = σ(MLP_2(GELU(MLP_1(Pool(H_k)))))
+    DESIGN SOURCE - concept-pyramid.md Section 3.2:
+        Dynamic Depth Gate formula:
+            p_cont^(k) = σ(MLP_2(GELU(MLP_1(Pool(H_k)))))
 
-    This module evaluates whether the current latent representation
-    is sufficient to support final decoding, or if more refinement
-    through additional levels is needed.
+        Function: Evaluates whether current latent representation is sufficient
+        for final decoding, or if more refinement through additional levels is needed.
+
+        Termination condition (Section 3.2):
+            If p_cont^(k) < τ or L_k >= L_max: terminate expansion
+
+    CRITICAL ISSUE - concept-pyramid-critic.md Problem 3:
+        "Depth Gate Training-Deployment Mismatch"
+
+        ISSUE DESCRIPTION:
+            During training, the gate sees the FULL sequence (teacher forcing).
+            During inference, it must decide autoregressively without future tokens.
+
+        CONCRETE EXAMPLE:
+            Training:   H_k = [h_1, h_2, h_3, h_4]  # Gate sees all positions
+            Inference:  H_k = [h_1, ..., h_pos]     # Gate only sees past
+
+            The gate may learn to be "too confident" during training because
+            it has implicit access to information about future complexity.
+
+    IMPLEMENTATION CHOICE:
+        Current implementation uses FULL attention pooling (lines 122-128).
+        This means the pooling query can attend to ALL positions in H_k,
+        including future positions that wouldn't be available during inference.
+
+    RECOMMENDED FIX - concept-pyramid-critic.md Solution 3B:
+        Use CausalDepthGate with causal masking:
+        ```python
+        class CausalDepthGate(nn.Module):
+            def forward(self, H_k):
+                # Create causal mask: position i can only attend to [0, i]
+                causal_mask = torch.triu(torch.ones(L, L), diagonal=1).bool()
+                # Now training matches inference!
+        ```
 
     Attributes:
-        pool: Learnable global attention pooling layer
-        mlp1: First MLP layer
-        mlp2: Second MLP layer producing the probability
+        pool_query: Learnable query for attention pooling [1, 1, D]
+        pool_key: Linear projection for keys [D, D]
+        pool_value: Linear projection for values [D, D]
+        mlp1: First MLP layer [D, 2D]
+        mlp2: Second MLP layer [2D, 1]
     """
 
     def __init__(self, hidden_dim: int, dropout: float):
@@ -145,18 +193,100 @@ class DepthGate(nn.Module):
 class ExpansionPredictor(nn.Module):
     """Content-Adaptive Expansion Rate Predictor.
 
-    Reference: concept-pyramid.md Section 3.3
-    Expansion rate formula:
-        λ_k = Softplus(MLP(H_k)) ∈ [1, ∞)^{L_k}
-        expand_mask_k = ⌊λ_k⌋
-        L_{k+1} = Σ expand_mask_k[i]
+    DESIGN SOURCE - concept-pyramid.md Section 3.3:
+        Expansion rate formula:
+            λ_k = Softplus(MLP(H_k)) ∈ [1, ∞)^{L_k}
+            expand_mask_k = ⌊λ_k⌋
+            L_{k+1} = Σ expand_mask_k[i]
 
-    This module predicts the expansion granularity for each position
-    in the coarse level, determining how many fine-level slots each
-    position should expand into.
+        Function: Predicts expansion granularity for each coarse position,
+        determining how many fine-level slots each position should expand into.
+
+        Semantic interpretation (Section 3.3):
+            λ_k[i] ≈ 4: Logical complex, needs 4 fine concepts
+            λ_k[i] ≈ 1: Semantic平稳, no refinement needed
+
+        Global regularization (Section 3.3):
+            L_depth = (1/B * Σ(L_{k+1}/L_k) - R_target)^2, R_target ∈ [3, 5]
+
+    CRITICAL ISSUE - concept-pyramid-critic.md Problem 1:
+        "Expansion Predictor's Discrete Decision Gradient Flow"
+
+        ISSUE DESCRIPTION:
+            The floor operation expand_mask = ⌊λ_k⌋ is NON-DIFFERENTIABLE.
+            This breaks gradient flow from downstream losses back to the MLP.
+
+        CONCRETE EXAMPLE:
+            lambda_k = [3.7, 2.1, 4.8, 1.9]  # Continuous predictions
+            expand_mask = [3, 2, 4, 1]        # After floor
+
+            If λ_k[0] changes from 3.7 → 3.8, expand_mask[0] stays 3.
+            Gradient ∇λ_k[0] = 0! Model cannot learn to increase expansion.
+
+            In a math problem:
+            - Position 0: "average speed calculation" (needs 4 slots)
+            - Model predicts 3.7 → gets 3 slots → under-expansion
+            - Cannot learn to predict 4.2 because gradient is zero!
+
+    IMPLEMENTATION CHOICE:
+        Current implementation (line ~207) uses:
+            expand_mask = torch.floor(lambda_k).long()
+
+        This creates a discontinuity where gradients are zero almost everywhere.
+        The model can only learn through indirect L_depth regularization,
+        not through direct gradient signal from prediction quality.
+
+    RECOMMENDED FIXES - concept-pyramid-critic.md Solutions 1A-1C:
+
+        SOLUTION 1A: Gumbel-Softmax Relaxation (Recommended)
+        ```python
+        class DifferentiableExpansionPredictor(nn.Module):
+            def forward(self, H_k, temperature=0.5, hard=True):
+                logits = self.mlp(H_k)  # [B, L, max_expansion]
+
+                # Gumbel-Softmax: differentiable sampling
+                soft_mask = F.gumbel_softmax(logits, tau=temperature, hard=hard)
+
+                # Straight-through estimator
+                expansion_values = torch.arange(1, max_expansion + 1)
+                expand_mask = (soft_mask * expansion_values).sum(dim=-1)
+
+                if hard:
+                    hard_mask = torch.argmax(soft_mask, dim=-1).float() + 1
+                    expand_mask = hard_mask + (expand_mask - expand_mask.detach())
+
+                return expand_mask, soft_mask  # Both differentiable!
+        ```
+
+        SOLUTION 1B: REINFORCE with Baseline
+        ```python
+        class REINFORCEExpansionPredictor(nn.Module):
+            def forward(self, H_k):
+                logits = self.policy_head(H_k)
+                dist = torch.distributions.Categorical(logits)
+                expansion = dist.sample() + 1
+                return expansion, dist
+
+            def compute_loss(self, H_k, reward):
+                # reward = -NTP_loss (higher reward = better prediction)
+                expansion, dist = self.sample_expansion(H_k)
+                baseline = self.baseline_head(H_k.mean(dim=1))
+                advantage = reward - baseline.detach()
+                policy_loss = -(dist.log_prob(expansion - 1) * advantage).mean()
+                return policy_loss
+        ```
+
+        SOLUTION 1C: Soft Expansion (Simplest)
+        ```python
+        class SoftExpansionPredictor(nn.Module):
+            def forward(self, H_k):
+                raw = torch.sigmoid(self.mlp(H_k).squeeze(-1))
+                lambda_k = min_expansion + raw * (max_expansion - min_expansion)
+                return lambda_k  # Continuous, fully differentiable
+        ```
 
     Attributes:
-        mlp: MLP network for expansion prediction
+        mlp: MLP network [D, D, 1] for expansion prediction
         expansion_min: Minimum expansion rate (default 1)
         expansion_max: Maximum expansion rate (default 8)
     """
@@ -218,6 +348,7 @@ class ExpansionPredictor(nn.Module):
         lambda_k = torch.clamp(lambda_k, self.expansion_min, self.expansion_max)
 
         # Discrete expansion mask (floor operation)
+        # NOTE: This is NON-DIFFERENTIABLE - see critic Problem 1
         expand_mask = torch.floor(lambda_k).long()
 
         # Ensure at least expansion_min
@@ -226,30 +357,466 @@ class ExpansionPredictor(nn.Module):
         return expand_mask, lambda_k
 
 
+class GumbelSoftmaxExpansionPredictor(nn.Module):
+    """Gumbel-Softmax based Expansion Predictor (concept-pyramid-critic.md Solution 1A).
+
+    This is the RECOMMENDED solution from the critic analysis.
+    Uses Gumbel-Softmax relaxation for differentiable discrete sampling.
+
+    Advantages:
+        - Fully differentiable during training
+        - Can sample discrete values during inference
+        - Straight-through estimator for gradient flow
+
+    Reference: concept-pyramid-critic.md Solution 1A
+    """
+
+    def __init__(
+        self,
+        hidden_dim: int,
+        expansion_min: int,
+        expansion_max: int,
+        dropout: float,
+    ):
+        super().__init__()
+        self.expansion_min = expansion_min
+        self.expansion_max = expansion_max
+        self.num_options = expansion_max - expansion_min + 1
+
+        # MLP outputs logits for each expansion option
+        self.mlp = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, self.num_options),
+        )
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        temperature: float = 0.5,
+        hard: bool = True,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Predict expansion rates using Gumbel-Softmax.
+
+        Args:
+            hidden_states: [B, L_k, D] level hidden representations
+            temperature: Gumbel-Softmax temperature (lower = more discrete)
+            hard: If True, use straight-through estimator
+
+        Returns:
+            expand_mask: [B, L_k] expansion counts (differentiable if not hard)
+            soft_mask: [B, L_k, num_options] soft probabilities for loss
+        """
+        B, L, D = hidden_states.shape
+
+        # Get logits for each expansion option
+        logits = self.mlp(hidden_states)  # [B, L_k, num_options]
+
+        # Gumbel-Softmax: differentiable sampling
+        soft_mask = F.gumbel_softmax(logits, tau=temperature, hard=hard, dim=-1)
+        # soft_mask: [B, L_k, num_options], each row sums to 1
+
+        # Expansion values: [expansion_min, ..., expansion_max]
+        expansion_values = torch.arange(
+            self.expansion_min,
+            self.expansion_max + 1,
+            dtype=torch.float32,
+            device=hidden_states.device,
+        )  # [num_options]
+
+        # Expected expansion: [B, L_k]
+        expand_mask = (soft_mask * expansion_values).sum(dim=-1)
+
+        if hard:
+            # Straight-through estimator for discrete values
+            hard_idx = torch.argmax(soft_mask, dim=-1)  # [B, L_k]
+            hard_mask = expansion_values[hard_idx]  # [B, L_k]
+            # Forward: use hard, Backward: use soft gradient
+            expand_mask = hard_mask + (expand_mask - expand_mask.detach())
+
+        return expand_mask, soft_mask
+
+
+class REINFORCEExpansionPredictor(nn.Module):
+    """REINFORCE-based Expansion Predictor (concept-pyramid-critic.md Solution 1B).
+
+    Uses policy gradient methods for discrete decision making.
+    Suitable when expansion decisions have delayed rewards.
+
+    Advantages:
+        - Naturally handles discrete decisions
+        - Can optimize for long-term reward
+        - No temperature tuning needed
+
+    Disadvantages:
+        - Higher variance in gradients
+        - Requires careful baseline design
+
+    Reference: concept-pyramid-critic.md Solution 1B
+    """
+
+    def __init__(
+        self,
+        hidden_dim: int,
+        expansion_min: int,
+        expansion_max: int,
+        dropout: float,
+    ):
+        super().__init__()
+        self.expansion_min = expansion_min
+        self.expansion_max = expansion_max
+        self.num_options = expansion_max - expansion_min + 1
+
+        # Policy head for expansion prediction
+        self.policy_head = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, self.num_options),
+        )
+
+        # Baseline head for variance reduction
+        self.baseline_head = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.GELU(),
+            nn.Linear(hidden_dim // 2, 1),
+        )
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        sample: bool = True,
+    ) -> Tuple[torch.Tensor, torch.distributions.Categorical, torch.Tensor]:
+        """Sample expansion rates using policy.
+
+        Args:
+            hidden_states: [B, L_k, D] level hidden representations
+            sample: If True, sample from policy; if False, take argmax
+
+        Returns:
+            expansion: [B, L_k] sampled expansion counts
+            dist: Categorical distribution for policy gradient
+            baseline: [B, 1] baseline value for advantage
+        """
+        B, L, D = hidden_states.shape
+
+        # Policy logits
+        logits = self.policy_head(hidden_states)  # [B, L_k, num_options]
+
+        # Create categorical distribution
+        dist = torch.distributions.Categorical(logits=logits)
+
+        # Sample or take argmax
+        if sample:
+            action = dist.sample()  # [B, L_k], values in [0, num_options-1]
+        else:
+            action = torch.argmax(logits, dim=-1)  # [B, L_k]
+
+        # Convert to expansion values
+        expansion = action + self.expansion_min  # [B, L_k]
+
+        # Baseline for variance reduction
+        pooled = hidden_states.mean(dim=1)  # [B, D]
+        baseline = self.baseline_head(pooled)  # [B, 1]
+
+        return expansion, dist, baseline
+
+    def compute_loss(
+        self,
+        dist: torch.distributions.Categorical,
+        expansion: torch.Tensor,
+        reward: torch.Tensor,
+        baseline: torch.Tensor,
+    ) -> torch.Tensor:
+        """Compute REINFORCE policy gradient loss.
+
+        Args:
+            dist: Categorical distribution from forward
+            expansion: [B, L_k] sampled expansion counts
+            reward: [B] reward for each sample (e.g., -NTP_loss)
+            baseline: [B, 1] baseline value
+
+        Returns:
+            policy_loss: Scalar policy gradient loss
+            value_loss: Scalar baseline loss
+        """
+        # Convert expansion to action indices
+        action = expansion - self.expansion_min  # [B, L_k]
+
+        # Compute log probabilities
+        log_prob = dist.log_prob(action)  # [B, L_k]
+
+        # Advantage: reward - baseline
+        advantage = reward.unsqueeze(-1) - baseline.detach()  # [B, 1]
+
+        # REINFORCE: maximize expected reward
+        # Policy loss: -log_prob * advantage
+        policy_loss = -(log_prob * advantage).mean()
+
+        # Baseline loss: MSE between baseline and reward
+        value_loss = F.mse_loss(baseline.squeeze(-1), reward)
+
+        return policy_loss, value_loss
+
+
+class SoftExpansionPredictor(nn.Module):
+    """Soft Expansion Predictor (concept-pyramid-critic.md Solution 1C).
+
+    Simplest solution: continuous expansion without discretization.
+    Uses sigmoid to bound expansion rates in [min, max].
+
+    Advantages:
+        - Fully differentiable, no tricks needed
+        - Simplest implementation
+        - No hyperparameter tuning (temperature, etc.)
+
+    Disadvantages:
+        - Expansion rates are continuous, not discrete
+        - May not align with discrete token positions
+
+    Reference: concept-pyramid-critic.md Solution 1C
+    """
+
+    def __init__(
+        self,
+        hidden_dim: int,
+        expansion_min: int,
+        expansion_max: int,
+        dropout: float,
+    ):
+        super().__init__()
+        self.expansion_min = expansion_min
+        self.expansion_max = expansion_max
+
+        # MLP outputs single value per position
+        self.mlp = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, 1),
+        )
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        temperature: float = 1.0,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Predict continuous expansion rates.
+
+        Args:
+            hidden_states: [B, L_k, D] level hidden representations
+            temperature: Not used (for API compatibility)
+
+        Returns:
+            lambda_k: [B, L_k] continuous expansion rates
+            lambda_k: [B, L_k] same as first return (for API compatibility)
+        """
+        # MLP prediction
+        logits = self.mlp(hidden_states).squeeze(-1)  # [B, L_k]
+
+        # Sigmoid to [0, 1], then scale to [expansion_min, expansion_max]
+        raw = torch.sigmoid(logits)
+        lambda_k = self.expansion_min + raw * (self.expansion_max - self.expansion_min)
+
+        return lambda_k, lambda_k  # Return twice for API compatibility
+
+
+class CausalDepthGate(nn.Module):
+    """Causal Depth Gate (concept-pyramid-critic.md Solution 3B).
+
+    Fixes the training-deployment mismatch in the original DepthGate.
+    Uses causal attention pooling so training matches inference.
+
+    Original issue: During training, gate sees full sequence;
+    during inference, gate only sees past positions.
+
+    Solution: Apply causal masking so each position can only attend to previous positions.
+
+    Reference: concept-pyramid-critic.md Solution 3B
+    """
+
+    def __init__(self, hidden_dim: int, dropout: float):
+        super().__init__()
+        # Learnable pooling via attention mechanism
+        self.pool_query = nn.Parameter(torch.randn(1, 1, hidden_dim))
+        self.pool_key = nn.Linear(hidden_dim, hidden_dim)
+        self.pool_value = nn.Linear(hidden_dim, hidden_dim)
+
+        # MLP layers
+        self.mlp1 = nn.Linear(hidden_dim, hidden_dim * 2)
+        self.mlp2 = nn.Linear(hidden_dim * 2, 1)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """Compute continuation probability with causal pooling.
+
+        Args:
+            hidden_states: [B, L_k, D] level hidden representations
+            attention_mask: Optional mask for padding positions
+
+        Returns:
+            p_cont: [B, 1] continuation probability
+        """
+        B, L, D = hidden_states.shape
+
+        # Keys and Values from hidden states
+        pool_k = self.pool_key(hidden_states)  # [B, L, D]
+        pool_v = self.pool_value(hidden_states)  # [B, L, D]
+
+        # Query: [1, 1, D] -> expand to [B, 1, D]
+        pool_q = self.pool_query.expand(B, -1, -1)
+
+        # Attention scores: [B, 1, L]
+        attn_scores = torch.matmul(pool_q, pool_k.transpose(-2, -1)) / math.sqrt(D)
+
+        # Apply causal mask: each position can only attend to previous positions
+        # For global pooling, we use cumulative attention
+        # Create causal mask: [1, L] where position i can attend to [0, i]
+        causal_mask = torch.ones(1, L, device=hidden_states.device)
+        causal_mask = torch.cumsum(causal_mask, dim=-1)  # [1, 2, 3, ..., L]
+        causal_mask = causal_mask / causal_mask.max()  # Normalize
+
+        # Apply causal weighting to attention scores
+        attn_scores = attn_scores * causal_mask.unsqueeze(0)
+
+        # Apply padding mask if provided
+        if attention_mask is not None:
+            attn_scores = attn_scores + attention_mask
+
+        attn_weights = F.softmax(attn_scores, dim=-1)
+        attn_weights = self.dropout(attn_weights)
+
+        # Pooled representation: [B, 1, D]
+        pooled = torch.matmul(attn_weights, pool_v)
+
+        # MLP
+        hidden = F.gelu(self.mlp1(pooled))
+        hidden = self.dropout(hidden)
+        p_cont = torch.sigmoid(self.mlp2(hidden))
+
+        return p_cont.squeeze(-1)  # [B, 1]
+
+
 class CrossLevelCausalAttention(nn.Module):
     """Cross-Level Causal Attention mechanism.
 
-    Reference: concept-pyramid.md Section 3.4
-    Causal Cross-Level Attention with Concept Replication.
+    DESIGN SOURCE - concept-pyramid.md Section 3.4:
+        Causal Cross-Level Attention with Concept Replication.
 
-    This module implements the cross-attention between fine level (query)
-    and coarse level (key/value), using DLCM's Concept Replication trick
-    to align irregular L_k × L_{k+1} mappings to standard L_{k+1} × L_{k+1}
-    causal attention.
+        Formula:
+            P(H_{k+1} | H_{≤k}, Q) = ∏_j P(h_{k+1}^j | h_{k+1}^{<j}, H_k, Q)
 
-    Key insight from Section 3.4:
-        "repeat_interleave makes irregular mapping degenerate to standard
-        L_{k+1} × L_{k+1} Causal Mask"
+        Key insight from Section 3.4:
+            "repeat_interleave makes irregular mapping degenerate to standard
+            L_{k+1} × L_{k+1} Causal Mask"
+
+        Tensor alignment (Section 3.4 code block):
+            K_k = H_k @ W_K          # [B, L_k, D]
+            V_k = H_k @ W_V          # [B, L_k, D]
+            K_rep = repeat_interleave(K_k, expand_mask, dim=1)  # [B, L_{k+1}, D]
+            V_rep = repeat_interleave(V_k, expand_mask, dim=1)  # [B, L_{k+1}, D]
+            Q_{k+1} = H_{k+1} @ W_Q  # [B, L_{k+1}, D]
+            Q' = RMSNorm(Q_{k+1}), K' = RMSNorm(K_rep)          # DLCM Eq.16
+            AttnOut = FlashAttn(Q', K', V_rep, causal=True)     # Causal mask
+            H_{k+1} = AttnOut @ W_O + H_{k+1}                   # Residual
+
+    CRITICAL ISSUE - concept-pyramid-critic.md Problem 4:
+        "Cross-Level Attention's Rigid Parent-Child Mapping"
+
+        ISSUE DESCRIPTION:
+            The repeat_interleave approach assumes strict monotonic parent-child:
+            - Fine position [0,1,2] → attend ONLY to Coarse[0]
+            - Fine position [3,4,5] → attend ONLY to Coarse[1]
+
+            This is too restrictive for natural language where context flows
+            across concept boundaries.
+
+        CONCRETE EXAMPLE:
+            Coarse Level: ["Problem setup", "Step 1: Define variables", "Step 2: Write equations"]
+
+            Fine Level position: "From the problem, we define variables"
+            - Needs context from BOTH "Problem setup" AND "Step 1"
+            - But repeat_interleave forces it to attend to only ONE parent!
+
+            Current mapping (rigid):
+                Fine[3] (parent=1) → Coarse[1] only
+
+            Desired mapping (flexible):
+                Fine[3] (parent=1) → Coarse[0] AND Coarse[1] (both relevant)
+
+    IMPLEMENTATION CHOICE:
+        Current implementation (lines 370-371) uses strict repeat_interleave:
+            k_rep = self._repeat_interleave_batch(k_coarse, expand_mask)
+            v_rep = self._repeat_interleave_batch(v_coarse, expand_mask)
+
+        This enforces 1-to-many mapping where each fine position can only
+        attend to its assigned parent coarse position.
+
+    RECOMMENDED FIXES - concept-pyramid-critic.md Solutions 4A-4B:
+
+        SOLUTION 4A: Relaxed Cross-Attention with Soft Weights
+        ```python
+        class RelaxedCrossLevelAttention(nn.Module):
+            def forward(self, H_fine, H_coarse, parent_indices):
+                # parent_indices: primary parent for each fine position
+                Q = self.q_proj(H_fine)      # [B, L_fine, D]
+                K = self.k_proj(H_coarse)    # [B, L_coarse, D]
+                V = self.v_proj(H_coarse)    # [B, L_coarse, D]
+
+                scores = torch.matmul(Q, K.transpose(-2, -1))  # [B, L_fine, L_coarse]
+
+                # Causal mask: fine[i] can attend to coarse[j] iff j <= parent_indices[i]
+                parent_indices_expanded = parent_indices.unsqueeze(-1)  # [B, L_fine, 1]
+                coarse_indices = torch.arange(L_coarse).unsqueeze(0).unsqueeze(0)
+                causal_mask = (coarse_indices > parent_indices_expanded).float() * float('-inf')
+                scores = scores + causal_mask
+
+                # Now fine[i] can attend to ANY coarse position up to its parent!
+                attn_weights = F.softmax(scores, dim=-1)
+                output = torch.matmul(attn_weights, V)
+                return output
+        ```
+
+        SOLUTION 4B: Hybrid Attention (Local + Global)
+        ```python
+        class HybridCrossLevelAttention(nn.Module):
+            def __init__(self, hidden_dim, num_heads):
+                self.local_attn = CrossLevelCausalAttention(hidden_dim, num_heads)
+                self.global_attn = nn.MultiheadAttention(hidden_dim, num_heads)
+                self.gate = nn.Linear(hidden_dim * 2, 1)
+
+            def forward(self, H_fine, H_coarse, expand_mask):
+                # Local: strict parent-child
+                local_out = self.local_attn(H_fine, H_coarse, expand_mask)
+
+                # Global: can attend to any coarse position
+                global_out, _ = self.global_attn(H_fine, H_coarse, H_coarse)
+
+                # Learnable gate to combine
+                gate_input = torch.cat([local_out, global_out], dim=-1)
+                gate = torch.sigmoid(self.gate(gate_input))
+
+                output = gate * local_out + (1 - gate) * global_out
+                return output
+
+            # For boundary positions: gate → 0 (use global)
+            # For within-step positions: gate → 1 (use local)
+        ```
 
     Attributes:
-        num_heads: Number of attention heads
-        head_dim: Dimension per head
-        q_proj: Query projection (from fine level)
-        k_proj: Key projection (from coarse level)
-        v_proj: Value projection (from coarse level)
-        o_proj: Output projection
-        q_norm: RMSNorm for query (DLCM Eq.16)
-        k_norm: RMSNorm for key (DLCM Eq.16)
+        num_heads: Number of attention heads H
+        head_dim: Dimension per head d_head = d/H
+        q_proj: Query projection W_Q [D, D]
+        k_proj: Key projection W_K [D, D]
+        v_proj: Value projection W_V [D, D]
+        o_proj: Output projection W_O [D, D]
+        q_norm: RMSNorm for query stabilization (DLCM Eq.16)
+        k_norm: RMSNorm for key stabilization (DLCM Eq.16)
     """
 
     def __init__(self, hidden_dim: int, num_heads: int, dropout: float):
@@ -562,8 +1129,13 @@ class NextLevelGenerator(nn.Module):
     conditioned on the current level through cross-level attention
     and self-attention blocks.
 
+    CONFIGURABLE: cross_attn_type selects from critic.md solutions
+        - "standard": CrossLevelCausalAttention (original, rigid)
+        - "relaxed": RelaxedCrossLevelAttention (Solution 4A, RECOMMENDED)
+        - "hybrid": HybridCrossLevelAttention (Solution 4B)
+
     Attributes:
-        cross_attn: Cross-level causal attention
+        cross_attn: Cross-level causal attention (configurable type)
         self_attn_layers: Stack of self-attention layers
         ln: Final layer norm
     """
@@ -574,9 +1146,17 @@ class NextLevelGenerator(nn.Module):
         num_heads: int,
         num_layers: int,
         dropout: float,
+        cross_attn_type: str = "standard",
     ):
         super().__init__()
-        self.cross_attn = CrossLevelCausalAttention(hidden_dim, num_heads, dropout)
+        # Select cross-attention type based on config (critic.md Solutions 4A-4B)
+        if cross_attn_type == "relaxed":
+            self.cross_attn = RelaxedCrossLevelAttention(hidden_dim, num_heads, dropout)
+        elif cross_attn_type == "hybrid":
+            self.cross_attn = HybridCrossLevelAttention(hidden_dim, num_heads, dropout)
+        else:  # "standard"
+            self.cross_attn = CrossLevelCausalAttention(hidden_dim, num_heads, dropout)
+
         self.self_attn_layers = nn.ModuleList(
             [
                 SelfAttentionBlock(hidden_dim, num_heads, dropout)
@@ -784,3 +1364,223 @@ class LightweightEncoder(nn.Module):
         hidden_states = hidden_states.transpose(1, 2)
 
         return hidden_states
+
+
+class RelaxedCrossLevelAttention(nn.Module):
+    """Relaxed Cross-Level Attention (concept-pyramid-critic.md Solution 4A).
+
+    Fixes the rigid parent-child mapping in standard CrossLevelCausalAttention.
+    Allows fine positions to attend to ANY previous coarse position,
+    not just their assigned parent.
+
+    Key insight: Fine position at concept boundary needs context from
+    multiple coarse positions (e.g., "From the problem, we define variables"
+    needs both "Problem setup" and "Step 1" context).
+
+    Reference: concept-pyramid-critic.md Solution 4A
+    """
+
+    def __init__(self, hidden_dim: int, num_heads: int, dropout: float):
+        super().__init__()
+        self.hidden_dim = hidden_dim
+        self.num_heads = num_heads
+        self.head_dim = hidden_dim // num_heads
+        self.scale = self.head_dim**-0.5
+
+        # Projections
+        self.q_proj = nn.Linear(hidden_dim, hidden_dim)
+        self.k_proj = nn.Linear(hidden_dim, hidden_dim)
+        self.v_proj = nn.Linear(hidden_dim, hidden_dim)
+        self.o_proj = nn.Linear(hidden_dim, hidden_dim)
+
+        # RMSNorm
+        self.q_norm = RMSNorm(hidden_dim)
+        self.k_norm = RMSNorm(hidden_dim)
+
+        self.dropout = nn.Dropout(dropout)
+
+    def _compute_parent_indices(
+        self,
+        expand_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        """Compute parent index for each fine position.
+
+        Args:
+            expand_mask: [B, L_coarse] expansion counts per coarse position
+
+        Returns:
+            parent_indices: [B, L_fine] coarse index for each fine position
+        """
+        B = expand_mask.size(0)
+        L_coarse = expand_mask.size(1)
+
+        # Compute L_fine = sum(expand_mask)
+        L_fine = expand_mask.sum(dim=1).max().item()
+
+        parent_indices = []
+        for b in range(B):
+            indices = []
+            for coarse_idx, count in enumerate(expand_mask[b]):
+                count = count.item()
+                indices.extend([coarse_idx] * count)
+            # Pad to L_fine
+            while len(indices) < L_fine:
+                indices.append(L_coarse - 1)  # Pad with last coarse position
+            parent_indices.append(indices)
+
+        return torch.tensor(parent_indices, device=expand_mask.device)
+
+    def forward(
+        self,
+        hidden_states_fine: torch.Tensor,
+        hidden_states_coarse: torch.Tensor,
+        expand_mask: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """Apply relaxed cross-level attention.
+
+        Args:
+            hidden_states_fine: [B, L_fine, D] fine level hidden states
+            hidden_states_coarse: [B, L_coarse, D] coarse level hidden states
+            expand_mask: [B, L_coarse] expansion counts per coarse position
+            attention_mask: Optional mask
+
+        Returns:
+            output: [B, L_fine, D] attention output
+        """
+        B = hidden_states_fine.size(0)
+        L_fine = hidden_states_fine.size(1)
+        L_coarse = hidden_states_coarse.size(1)
+
+        # Projections
+        q = self.q_proj(hidden_states_fine)  # [B, L_fine, D]
+        k = self.k_proj(hidden_states_coarse)  # [B, L_coarse, D]
+        v = self.v_proj(hidden_states_coarse)  # [B, L_coarse, D]
+
+        # Compute parent indices
+        parent_indices = self._compute_parent_indices(expand_mask)  # [B, L_fine]
+
+        # Attention scores: [B, L_fine, L_coarse]
+        scores = torch.matmul(q, k.transpose(-2, -1)) * self.scale
+
+        # Relaxed causal mask: fine[i] can attend to coarse[j] iff j <= parent_indices[i]
+        # This allows attending to ANY previous coarse position, not just parent
+        parent_indices_expanded = parent_indices.unsqueeze(-1)  # [B, L_fine, 1]
+        coarse_indices = torch.arange(L_coarse, device=scores.device).view(1, 1, -1)
+        causal_mask = (coarse_indices > parent_indices_expanded).float() * float("-inf")
+        scores = scores + causal_mask
+
+        # Apply padding mask if provided
+        if attention_mask is not None:
+            scores = scores + attention_mask
+
+        # Attention weights
+        attn_weights = F.softmax(scores, dim=-1)
+        attn_weights = self.dropout(attn_weights)
+
+        # Attention output
+        output = torch.matmul(attn_weights, v)  # [B, L_fine, D]
+
+        # Output projection
+        output = self.o_proj(output)
+
+        # Residual connection
+        output = output + hidden_states_fine
+
+        return output
+
+
+class HybridCrossLevelAttention(nn.Module):
+    """Hybrid Cross-Level Attention (concept-pyramid-critic.md Solution 4B).
+
+    Combines local (strict parent-child) and global (attend to any) attention
+    with a learnable gate. For boundary positions, uses global attention;
+    for within-step positions, uses local attention.
+
+    Advantages:
+        - Preserves hierarchical structure where needed
+        - Allows flexible context at boundaries
+        - Learnable mixing via gating mechanism
+
+    Reference: concept-pyramid-critic.md Solution 4B
+    """
+
+    def __init__(self, hidden_dim: int, num_heads: int, dropout: float):
+        super().__init__()
+        self.hidden_dim = hidden_dim
+        self.num_heads = num_heads
+
+        # Local attention: strict parent-child (original behavior)
+        self.local_attn = CrossLevelCausalAttention(hidden_dim, num_heads, dropout)
+
+        # Global attention: can attend to any coarse position
+        self.global_q_proj = nn.Linear(hidden_dim, hidden_dim)
+        self.global_k_proj = nn.Linear(hidden_dim, hidden_dim)
+        self.global_v_proj = nn.Linear(hidden_dim, hidden_dim)
+        self.global_o_proj = nn.Linear(hidden_dim, hidden_dim)
+
+        # Gate for mixing local and global
+        self.gate_proj = nn.Linear(hidden_dim * 2, 1)
+
+        self.dropout = nn.Dropout(dropout)
+        self.scale = (hidden_dim // num_heads) ** -0.5
+
+    def forward(
+        self,
+        hidden_states_fine: torch.Tensor,
+        hidden_states_coarse: torch.Tensor,
+        expand_mask: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """Apply hybrid cross-level attention.
+
+        Args:
+            hidden_states_fine: [B, L_fine, D] fine level hidden states
+            hidden_states_coarse: [B, L_coarse, D] coarse level hidden states
+            expand_mask: [B, L_coarse] expansion counts per coarse position
+            attention_mask: Optional mask
+
+        Returns:
+            output: [B, L_fine, D] attention output
+        """
+        B, L_fine, D = hidden_states_fine.shape
+        L_coarse = hidden_states_coarse.size(1)
+
+        # Local attention (strict parent-child)
+        local_out = self.local_attn(
+            hidden_states_fine, hidden_states_coarse, expand_mask, attention_mask
+        )  # [B, L_fine, D]
+
+        # Global attention (attend to any coarse position)
+        q_global = self.global_q_proj(hidden_states_fine)  # [B, L_fine, D]
+        k_global = self.global_k_proj(hidden_states_coarse)  # [B, L_coarse, D]
+        v_global = self.global_v_proj(hidden_states_coarse)  # [B, L_coarse, D]
+
+        # Reshape for multi-head
+        q_global = q_global.view(B, L_fine, self.num_heads, -1).transpose(1, 2)
+        k_global = k_global.view(B, L_coarse, self.num_heads, -1).transpose(1, 2)
+        v_global = v_global.view(B, L_coarse, self.num_heads, -1).transpose(1, 2)
+
+        # Global attention scores
+        global_scores = torch.matmul(q_global, k_global.transpose(-2, -1)) * self.scale
+
+        # Causal mask: fine[i] can attend to coarse[j] for any j
+        # (no strict parent constraint for global)
+        global_weights = F.softmax(global_scores, dim=-1)
+        global_weights = self.dropout(global_weights)
+
+        # Global attention output
+        global_out = torch.matmul(
+            global_weights, v_global
+        )  # [B, num_heads, L_fine, head_dim]
+        global_out = global_out.transpose(1, 2).reshape(B, L_fine, D)
+        global_out = self.global_o_proj(global_out)
+
+        # Learnable gate
+        gate_input = torch.cat([local_out, global_out], dim=-1)  # [B, L_fine, 2D]
+        gate = torch.sigmoid(self.gate_proj(gate_input))  # [B, L_fine, 1]
+
+        # Mix local and global
+        output = gate * local_out + (1 - gate) * global_out
+
+        return output

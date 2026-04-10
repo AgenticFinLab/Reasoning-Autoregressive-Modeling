@@ -1,7 +1,42 @@
 """NLCP (Next-Level Concept Pyramid) Base Configurations.
 
 This module defines configuration dataclasses for NLCP architecture.
-Reference: concept-pyramid.md Section 3.1 - Basic Configuration and Tensor Conventions
+
+DESIGN SOURCE:
+    - concept-pyramid.md Section 3.1 - Basic Configuration and Tensor Conventions
+    - concept-pyramid-critic.md - Critical analysis of design choices
+
+CONFIGURATION PARAMETERS (Section 3.1 Table):
+    ┌─────────────────────┬────────────────────────────────┬─────────────┐
+    │ Symbol              │ Meaning                        │ Default     │
+    ├─────────────────────┼────────────────────────────────┼─────────────┤
+    │ d                   │ Hidden dimension               │ 1024        │
+    │ H                   │ Attention heads                │ 16          │
+    │ L_0                 │ Level 0 length                 │ 8           │
+    │ L_k                 │ Dynamic length                 │ [4, 512]    │
+    │ K_max               │ Maximum pyramid depth          │ 4           │
+    │ τ                   │ Depth gate threshold           │ 0.35~0.45   │
+    │ R_target            │ Target expansion ratio         │ 3~5         │
+    │ λ_k                 │ Expansion rate per position    │ [1, 8]      │
+    └─────────────────────┴────────────────────────────────┴─────────────┘
+
+CRITICAL CONSIDERATIONS (from concept-pyramid-critic.md):
+
+    ISSUE 5 - Scaling Law Validation:
+        Current configuration uses fixed d=1024 for all levels.
+        No empirical validation that this is optimal.
+
+        Recommendation: Experiment with heterogeneous widths per level
+        (see critic Improvement 3: Dynamic Width per Level)
+
+        Example configuration:
+            Level 0: d_0 = 512   (coarse concepts need less detail)
+            Level 1: d_1 = 768   (intermediate)
+            Level 2: d_2 = 1024  (fine details need more capacity)
+            Level 3: d_3 = 1024
+
+        With μP learning rate scaling:
+            η_k = η_base * (d_k / d_base)^{-1}
 """
 
 from dataclasses import dataclass
@@ -12,8 +47,71 @@ from typing import Tuple
 class NLCPModelConfig:
     """Configuration for NLCP Model.
 
-    Reference: concept-pyramid.md Section 3.1
-    Basic Configuration and Tensor Conventions table.
+    DESIGN SOURCE - concept-pyramid.md Section 3.1:
+        Basic Configuration and Tensor Conventions table.
+        All parameters directly map to symbols in the design document.
+
+    PARAMETER DETAILS:
+        hidden_dim (d = 1024):
+            Hidden dimension shared across all levels.
+            Standard choice for modern LLMs (LLaMA, Mistral).
+            d_head = d / H = 1024 / 16 = 64 dimensions per head.
+
+        num_heads (H = 16):
+            Number of parallel attention heads.
+            Enables multi-head diversity in representation.
+
+        vocab_size (V = 128000):
+            Aligns with mainstream base models.
+            Supports multilingual and code tokens.
+
+        max_depth (K_max = 4):
+            Maximum pyramid depth from Section 7.3 (risk mitigation).
+            Prevents excessive expansion on complex inputs.
+            Typical reasoning needs 2-3 levels.
+
+        depth_gate_threshold (τ = 0.4):
+            From Section 3.1, recommended range 0.35~0.45.
+            Balances depth vs computational efficiency.
+            Lower τ → deeper pyramids, more computation.
+            Higher τ → shallower pyramids, faster inference.
+
+        l0_length (L_0 = 8):
+            Level 0 initial length for macro intent abstraction.
+            Sufficient to capture problem structure.
+
+        l_max (512):
+            Maximum sequence length per level from Section 3.1.
+            Range L_k ∈ [4, 512] for safety.
+
+        dropout (0.1):
+            Standard regularization.
+            Applied in attention and MLP layers.
+
+        expansion_min (λ_min = 1):
+            Minimum expansion rate from Section 3.3.
+            Every coarse position gets at least 1 fine slot.
+
+        expansion_max (λ_max = 8):
+            Maximum expansion rate from Section 3.3.
+            Prevents excessive expansion of single positions.
+
+    CRITICAL CONSIDERATIONS (from concept-pyramid-critic.md):
+        Heterogeneous Widths (Improvement 3):
+            Current implementation uses fixed hidden_dim for all levels.
+            Consider experimenting with level-specific dimensions:
+
+            Example heterogeneous config:
+                level_dims = [512, 768, 1024, 1024]  # Per level
+
+            Rationale:
+                - Level 0 (coarse): Concepts are abstract, need less capacity
+                - Level 2+ (fine): Details are complex, need more capacity
+
+            Implementation requires:
+                1. Projection layers between levels
+                2. μP learning rate scaling per level
+                3. Careful initialization
 
     Attributes:
         hidden_dim: Hidden dimension d, shared across all levels.
@@ -35,6 +133,23 @@ class NLCPModelConfig:
             Default: 1 (no compression below this)
         expansion_max: Maximum expansion rate.
             Default: 8 (prevent explosion)
+
+        # Component Selection (from concept-pyramid-critic.md solutions)
+        expansion_predictor_type: Type of expansion predictor to use.
+            Options: "floor" (original), "gumbel" (Solution 1A, recommended),
+                     "reinforce" (Solution 1B), "soft" (Solution 1C)
+            Default: "gumbel"
+        depth_gate_type: Type of depth gate to use.
+            Options: "standard" (original, non-causal), "causal" (Solution 3B)
+            Default: "causal"
+        cross_attention_type: Type of cross-level attention to use.
+            Options: "standard" (original, rigid), "relaxed" (Solution 4A),
+                     "hybrid" (Solution 4B)
+            Default: "relaxed"
+        consistency_loss_type: Type of consistency loss to use.
+            Options: "standard" (original, strict L2), "directional" (Solution 2A),
+                     "residual" (Solution 2B), "mi" (Solution 2C)
+            Default: "directional"
     """
 
     hidden_dim: int
@@ -47,6 +162,14 @@ class NLCPModelConfig:
     dropout: float
     expansion_min: int
     expansion_max: int
+
+    # Component selection
+    expansion_predictor_type: str = "gumbel"  # "floor", "gumbel", "reinforce", "soft"
+    depth_gate_type: str = "causal"  # "standard", "causal"
+    cross_attention_type: str = "relaxed"  # "standard", "relaxed", "hybrid"
+    consistency_loss_type: str = (
+        "directional"  # "standard", "directional", "residual", "mi"
+    )
 
 
 @dataclass
@@ -73,6 +196,18 @@ class NLCPTrainingConfig:
             Default: 1.0 (from Section 7.2)
         muP_scale: Output scaling factor for μP.
             Reference: DLCM Eq.21
+
+        # Component-specific hyperparameters (from concept-pyramid-critic.md)
+        gumbel_temperature: Temperature for Gumbel-Softmax (Solution 1A).
+            Default: 0.5 (lower = more discrete)
+        gumbel_hard: Whether to use straight-through estimator.
+            Default: True
+        reinforce_baseline_weight: Weight for baseline loss in REINFORCE.
+            Default: 0.5
+        directional_epsilon: Epsilon for DirectionalConsistencyLoss (Solution 2A).
+            Default: 0.5 (allow deviation up to 0.5 in L2 norm)
+        mi_temperature: Temperature for MutualInformationConsistency (Solution 2C).
+            Default: 0.07
     """
 
     lambda_consist: float
@@ -85,6 +220,13 @@ class NLCPTrainingConfig:
     max_steps: int
     grad_clip_norm: float
     muP_scale: float
+
+    # Component-specific hyperparameters
+    gumbel_temperature: float = 0.5
+    gumbel_hard: bool = True
+    reinforce_baseline_weight: float = 0.5
+    directional_epsilon: float = 0.5
+    mi_temperature: float = 0.07
 
 
 @dataclass

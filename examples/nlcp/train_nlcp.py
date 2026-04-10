@@ -1,20 +1,71 @@
 """NLCP (Next-Level Concept Pyramid) Training Script.
 
 This module implements the training pipeline for NLCP.
-Reference: concept-pyramid.md Section 4.3 - Staged Pretraining Pipeline
 
-Stages:
-    Phase 1: Level 0 intent planning
-        - Train Encoder + Level 0 AR
-        - Establish global structure prior, verify Depth Gate initial response
+DESIGN SOURCE:
+    - concept-pyramid.md Section 4.3 - Staged Pretraining Pipeline
+    - concept-pyramid-critic.md - Critical analysis of training approach
 
-    Phase 2: Next-Level generation alignment
-        - Train Level 1..K Generator + L_consist
-        - Verify cross-level causal flow and consistency gradient
+THREE-PHASE TRAINING STRATEGY (Section 4.3 Table):
+    ┌─────────┬────────────────────────────────┬──────────────────────────────┐
+    │ Phase   │ Goal                           │ Freeze/Train                 │
+    ├─────────┼────────────────────────────────┼──────────────────────────────┤
+    │ Phase 1 │ Level 0 intent planning        │ Train: Encoder + Level 0 AR  │
+    │         │                                │ Freeze: All other modules    │
+    ├─────────┼────────────────────────────────┼──────────────────────────────┤
+    │ Phase 2 │ Next-Level generation alignment│ Train: Level 1..K Generator  │
+    │         │                                │        + L_consist           │
+    │         │                                │ Freeze: Encoder, Level 0     │
+    ├─────────┼────────────────────────────────┼──────────────────────────────┤
+    │ Phase 3 │ Full pyramid joint finetuning  │ Train: Full unfreeze         │
+    │         │                                │        + L_depth + L_CE      │
+    └─────────┴────────────────────────────────┴──────────────────────────────┘
 
-    Phase 3: Full pyramid joint finetuning
-        - Full unfreeze + L_depth + L_CE
-        - End-to-end alignment to tokens, stabilize dynamic depth
+PHASE DETAILS (Section 4.3):
+    Phase 1: Level 0 Intent Planning
+        - Establish stable global structure prior
+        - Verify Depth Gate initial response
+        - Duration: ~25% of total epochs
+        - Loss: L_NTP at Level 0 only
+
+    Phase 2: Next-Level Generation Alignment
+        - Learn expansion and generation
+        - Verify cross-level causal flow
+        - Verify consistency gradient
+        - Duration: ~25% of total epochs
+        - Loss: L_NTP + L_consist
+        - NOTE: Expansion predictor has limited learning due to floor()
+
+    Phase 3: Full Pyramid Joint Finetuning
+        - End-to-end alignment to tokens
+        - Stabilize dynamic depth
+        - Duration: ~50% of total epochs
+        - Loss: L_NTP + L_consist + L_depth + L_CE
+
+HYPERPARAMETERS (Section 4.1):
+    Learning rate: η = 1e-4 (base)
+    μP scaling: η_k = η_base * (d_k / d_base)^{-1} for heterogeneous widths
+    Weight decay: 0.01
+    Warmup: 2000 steps
+    Loss weights: λ_1=0.1, λ_2=0.05, λ_3=1.0 (cosine decay)
+
+CRITICAL CONSIDERATIONS (from concept-pyramid-critic.md):
+
+    ISSUE 1 - Expansion Predictor Learning in Phase 2:
+        Problem: floor() is non-differentiable
+        Impact: Expansion predictor cannot learn from NTP loss directly
+        Current workaround: L_depth regularization provides indirect signal
+        Recommendation: Use Gumbel-Softmax (Solution 1A) before Phase 2
+
+    ISSUE 3 - Depth Gate Causality:
+        Problem: Non-causal pooling during training
+        Impact: Phase 1-3 may overfit to full-sequence context
+        Recommendation: Add causal masking to DepthGate before Phase 1
+
+    ISSUE 2 - Consistency Loss Bottleneck:
+        Problem: Strict L2 forces MeanPool(H_{k+1}) ≈ H_k
+        Impact: Limits fine level expressiveness in Phase 2-3
+        Recommendation: Use DirectionalConsistency (Solution 2A) in Phase 2
 """
 
 import math

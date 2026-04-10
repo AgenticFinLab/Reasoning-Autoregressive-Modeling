@@ -1,0 +1,111 @@
+# =============================================================================
+# NLCP Model Configuration
+# =============================================================================
+# Purpose:
+#   Defines the NLCP (Next-Level Concept Pyramid) model architecture and
+#   component selection. All components are configurable based on
+#   concept-pyramid-critic.md recommendations.
+#
+# Reference:
+#   - concept-pyramid.md Section 3 - Core Mechanisms
+#   - concept-pyramid-critic.md - Critical analysis and solutions
+#
+# Component Selection Guide:
+#   expansion_predictor_type:
+#     - "floor": Original non-differentiable version (for baseline)
+#     - "gumbel": Gumbel-Softmax relaxation (RECOMMENDED - Solution 1A)
+#     - "reinforce": Policy gradient method (Solution 1B)
+#     - "soft": Continuous expansion (Solution 1C)
+#
+#   depth_gate_type:
+#     - "standard": Original non-causal version (has train/test mismatch)
+#     - "causal": Causal pooling (RECOMMENDED - Solution 3B)
+#
+#   cross_attention_type:
+#     - "standard": Rigid parent-child mapping (original)
+#     - "relaxed": Flexible multi-parent attention (RECOMMENDED - Solution 4A)
+#     - "hybrid": Local + Global with gating (Solution 4B)
+#
+#   consistency_loss_type:
+#     - "standard": Strict L2 loss (original, has info bottleneck)
+#     - "directional": Relaxed hinge loss (RECOMMENDED - Solution 2A)
+#     - "residual": Learnable refinement (Solution 2B)
+#     - "mi": Mutual information (Solution 2C)
+# =============================================================================
+
+# =============================================================================
+# Model Identity
+# =============================================================================
+lm_type: "nlcp"  # Custom type for NLCP architecture
+lm_name: "nlcp-base"  # Model identifier
+
+# =============================================================================
+# NLCP Architecture Configuration
+# =============================================================================
+# Reference: concept-pyramid.md Section 3.1
+# =============================================================================
+model_config:
+  # Basic Architecture Parameters
+  hidden_dim: 1024              # d: Hidden dimension (Section 3.1)
+  num_heads: 16                 # H: Attention heads (d_head = 64)
+  vocab_size: 128000            # V: Vocabulary size
+  max_depth: 4                  # K_max: Maximum pyramid depth (Section 7.3)
+  depth_gate_threshold: 0.4     # τ: Depth gate threshold [0.35, 0.45]
+  l0_length: 8                  # L_0: Level 0 length
+  l_max: 512                    # L_k max: Maximum sequence length per level
+  dropout: 0.1                  # Dropout rate
+  expansion_min: 1              # λ_min: Minimum expansion rate
+  expansion_max: 8              # λ_max: Maximum expansion rate
+  
+  # Component Selection (from concept-pyramid-critic.md)
+  expansion_predictor_type: "gumbel"    # Options: floor, gumbel, reinforce, soft
+  depth_gate_type: "causal"             # Options: standard, causal
+  cross_attention_type: "relaxed"       # Options: standard, relaxed, hybrid
+  consistency_loss_type: "directional"  # Options: standard, directional, residual, mi
+
+# =============================================================================
+# Inference Configuration
+# =============================================================================
+inference_config:
+  torch_dtype: "bfloat16"       # Recommended for training stability
+  
+  # Entropy computation for analysis
+  entropy_config:
+    topk_v: inf
+    topk_adaptive: false
+    temperature: 0.0
+
+# =============================================================================
+# Generation Configuration
+# =============================================================================
+# Used during inference for token generation from final level
+# =============================================================================
+generation_config:
+  max_new_tokens: 512
+  temperature: 0.7
+  top_p: 0.9
+  do_sample: true
+
+# =============================================================================
+# Prompt Configuration
+# =============================================================================
+# System and user prompts for the model
+# =============================================================================
+sys_message: "examples.nlcp.prompts:SYS_PROMPT"
+user_message: "examples.nlcp.prompts:USER_PROMPT"
+
+# =============================================================================
+# NLCP-Specific Inference Settings
+# =============================================================================
+# Dynamic depth and expansion during generation
+# =============================================================================
+nlcp_inference:
+  max_depth: 4                  # Maximum generation depth
+  depth_threshold: 0.4          # τ for depth gate
+  expansion_temperature: 0.5    # Temperature for expansion predictor
+  enable_early_exit: true       # Enable early termination
+  
+  # Expansion predictor specific settings
+  gumbel:
+    temperature: 0.5            # Lower = more discrete
+    hard: true                  # Use straight-through estimator
