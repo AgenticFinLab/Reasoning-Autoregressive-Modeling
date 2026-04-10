@@ -92,6 +92,26 @@ LLMs lack this hierarchy—they must **infer high-level structure implicitly** a
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
+### 2.1.1 Core Design: Token Prediction Conditioned on Preceding Concepts
+
+**High-Level Principle**: 
+
+In DLCM, every token is predicted based **only on concepts that precede or contain it**, never on future concepts. This applies to both training (reconstruction) and inference (generation).
+
+```
+Token at position t → can attend to concepts C₁, C₂, ..., C_k
+                      (where C_k is the concept containing position t)
+                      
+Cannot attend to C_{k+1}, C_{k+2}, ... (future concepts)
+```
+
+This design ensures:
+1. **Causal structure**: Token prediction remains autoregressive
+2. **Concept-aware**: Each token leverages relevant semantic context
+3. **Consistent behavior**: Same constraint applies to both training and inference
+
+The following sections detail how training and inference implement this principle.
+
 ### 2.2 Mathematical Formulation
 
 **Equation 1-4 (Core Pipeline)**:

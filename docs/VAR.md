@@ -280,6 +280,110 @@ Total: 1365 tokens (vs 65536 pixels)
 └─────────────────────────────────────────────────────────────┘
 ```
 
+### Training vs Inference: The Fundamental Difference
+
+**Critical Insight**: VAR's training and inference operate on **different principles**:
+
+| Aspect               | Training (VQ-VAE)                      | Inference (Generation)             |
+|----------------------|----------------------------------------|------------------------------------|
+| **Mechanism**        | Residual Decomposition (Analysis)      | Conditional Generation (Synthesis) |
+| **Operation Target** | `f_rest` (remaining error)             | `f_hat` (accumulated state)        |
+| **Process**          | Decompose image into multi-scale codes | Generate image from scratch        |
+| **Supervision**      | Ground truth image z                   | None (autoregressive)              |
+
+#### Training: Learning Multi-Scale Codes via Residual Decomposition
+
+```python
+# Training: With ground truth image z
+f_rest = z.clone()  # Remaining feature to encode
+f_hat = 0           # Accumulated reconstruction
+
+for scale k in [1, 2, 4, 8, 16, 32]:
+    # Extract residual from f_rest
+    f_down = downsample(f_rest, k, k)
+    indices[k] = argmin(||f_down - codebook||²)
+    
+    h_k = codebook[indices[k]]
+    h_up = bicubic_upsample(h_k, H, W)
+    
+    f_hat += h_up      # Accumulate reconstruction
+    f_rest -= h_up     # Subtract encoded part (CRITICAL!)
+
+# f_rest provides SUPERVISION: tells model what to encode at each scale
+# Loss: ||f_hat - z||² ensures f_hat reconstructs the image
+```
+
+**Key Point**: `f_rest` acts as a **teacher signal**—it tells the model what residual information should be encoded at each scale.
+
+#### Inference: Autoregressive Generation via Conditioned Prediction
+
+```python
+# Inference: Generate new image from scratch
+f_hat = 0  # Start from zero
+
+for scale k in [1, 2, 4, 8, 16, 32]:
+    # Use f_hat as CONDITION for next scale
+    x = downsample(f_hat, k, k)
+    x = word_embed(x)
+    
+    # Transformer learns: P(indices[k] | f_hat_{<k}, class_label)
+    logits = Transformer(x, class_label)
+    indices[k] = sample(logits)
+    
+    h_k = codebook[indices[k]]
+    h_up = bicubic_upsample(h_k, H, W)
+    f_hat += h_up  # Accumulate (NO f_rest!)
+
+# f_hat = generated image feature
+```
+
+**Key Point**: No `f_rest` available! Model must learn to predict next scale based only on accumulated `f_hat`.
+
+#### What Does the Model Actually Learn?
+
+1. **Multi-Scale Codebook (VQ-VAE Stage)**:
+   ```
+   - codebook[scale=0]: Global structure patterns (1×1)
+   - codebook[scale=1]: Coarse patterns (2×2)
+   - codebook[scale=2]: Medium patterns (4×4)
+   - ...
+   ```
+
+2. **Cross-Scale Conditional Distribution (Transformer Stage)**:
+   ```
+   P(indices[k] | f_hat_{<k}, class_label)
+   
+   Meaning: Given accumulated features from previous scales,
+            what codebook vectors should be selected for current scale?
+   ```
+
+3. **Why It Works**:
+   - **Training**: `f_rest` teaches the model what each scale should encode
+   - **Inference**: Model learns to infer "given current f_hat, what should come next"
+   - The two-stage training ensures the learned codes are both:
+     - (1) Semantically meaningful (VQ-VAE reconstruction)
+     - (2) Predictable from previous scales (Transformer autoregression)
+
+#### Analogy: Learning to Paint
+
+```
+Training (with reference image):
+- Teacher shows a painting
+- Step 1: Draw outline (f_rest shows remaining: details)
+- Step 2: Add colors (f_rest shows remaining: textures)
+- Step 3: Add textures (f_rest shows remaining: nothing)
+- Model learns: what each step should add
+
+Inference (without reference):
+- Start with blank canvas
+- Step 1: Draw outline (based on class: "dog")
+- Step 2: Add colors (based on outline so far)
+- Step 3: Add textures (based on colors so far)
+- Model generates: based on what it has drawn
+```
+
+**The critical insight**: Training uses `f_rest` as supervision to learn meaningful codes; inference uses `f_hat` as condition to generate new images. The Transformer bridges these two by learning the conditional distribution.
+
 ### CRITICAL: Indices → Embeddings Conversion
 
 ```
@@ -467,6 +571,66 @@ Total: 1365 tokens (vs 65536 pixels)
 │                                                              │
 └─────────────────────────────────────────────────────────────┘
 ```
+
+### Key Insight: Parallel Generation Within Each Scale
+
+**Critical Understanding**: VAR is **scale-by-scale autoregressive**, but **parallel within each scale**.
+
+```
+Traditional AR (e.g., GPT):          VAR (Scale-by-Scale AR):
+Token-by-token sequential            Scale-by-scale sequential
+                                      ↓
+[t1] → [t2] → [t3] → ...            Scale 0 (1 token)
+  ↓      ↓      ↓                      ↓
+Must wait for t1 to generate t2     Scale 1 (4 tokens) ──→ Parallel!
+                                      ↓
+                                    Scale 2 (16 tokens) ──→ Parallel!
+                                      ↓
+                                    Scale 3 (64 tokens) ──→ Parallel!
+```
+
+**Why can VAR parallelize within a scale?**
+
+1. **Continuous Input**: The input to each scale is `f_hat` (continuous VAE features), not discrete tokens
+   ```python
+   # VAR: Input is continuous, can be geometrically upsampled
+   x = downsample(f_hat, pn, pn)  # [B, C, pn, pn] continuous!
+   ```
+
+2. **Geometric Upsampling**: Visual features have spatial structure that can be bicubic upsampled
+   - Scale 0: 1×1 → Scale 1: 2×2 (geometrically 2× upsampling)
+   - Each position corresponds to a spatial region
+   - Positions are independent given the upsampled f_hat
+
+3. **Independent Predictions**: Each position in the scale predicts its own codebook index independently
+   ```python
+   logits = head(x)  # [B, pn*pn, vocab_size]
+   # All pn*pn positions output logits simultaneously!
+   indices = sample(logits)  # [B, pn*pn] - all at once!
+   ```
+
+**Contrast with Text (NLCP)**:
+
+| Aspect                      | VAR (Visual)                              | NLCP (Text)                         |
+|-----------------------------|-------------------------------------------|-------------------------------------|
+| **Input Type**              | Continuous f_hat (VAE space)              | Discrete concepts (hidden space)    |
+| **Spatial Structure**       | 2D grid, geometrically upsamplable        | 1D sequence, no geometric structure |
+| **Within-Scale Generation** | **Parallel** (all positions independent)  | **Autoregressive** (token-by-token) |
+| **Why**                     | Pixel positions are spatially independent | Concepts have semantic dependencies |
+
+**Mathematical Formulation**:
+
+VAR's generation:
+$$
+P(\{z_k^{(i,j)}\}_{i,j=1}^{p_k} \mid z_{<k}) = \prod_{i,j} P(z_k^{(i,j)} \mid \text{Upsample}(\hat{z}_{k-1}))
+$$
+
+Note: The product is over **independent** distributions because each position only depends on the upsampled coarse feature, not on other positions in the same scale.
+
+This is fundamentally different from standard autoregressive:
+$$
+P(x_t \mid x_{<t}) \text{ - each token depends on all previous tokens}
+$$
 
 ### Classifier-Free Guidance (CFG)
 
