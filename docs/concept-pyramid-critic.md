@@ -25,14 +25,18 @@
 
 ### Context: How NLCP Uses Q+CoT for Training
 
-Unlike traditional LLMs that learn `Q → Answer` mappings, NLCP is trained on **Q+CoT (Question + Chain-of-Thought)** pairs where the full reasoning chain is the target:
+Both standard LLMs and NLCP use **Q+CoT (Question + Chain-of-Thought)** for training. The difference lies in how the target CoT is utilized:
 
-```
-Input:  Q = "A train travels 120km at 60km/h..."
-Target: C = "To find average speed, I need... t1 = 120/60 = 2 hours..."
+```python
+# Standard LLM and NLCP share the same training data format
+Input:  Q + C = [q_1, ..., q_m, c_1, c_2, ..., c_T]
+Labels: [-100, ..., -100, c_1, c_2, ..., c_T]  # Q masked, C is target
+
+# Standard LLM: Single forward pass, predict next token at each position
+# NLCP: Hierarchical generation with dynamic pyramid at each level
 ```
 
-**Key Training Challenge**: The target CoT $C$ has fixed length (e.g., 48 tokens), but NLCP generates hierarchical representations with **dynamic lengths** at each level ($L_0=8, L_1=32, L_2=48$). This creates a fundamental alignment problem.
+**Key Training Challenge**: The target CoT $C$ has fixed length (e.g., 48 tokens), but NLCP generates hierarchical representations with **dynamic lengths** at each level ($L_0=8, L_1=32, L_2=48$). This creates a fundamental alignment problem: how to train intermediate pyramid layers when only the final CoT is available.
 
 ### The Alignment Problem
 
