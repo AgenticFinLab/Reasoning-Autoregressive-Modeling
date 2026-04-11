@@ -1,0 +1,129 @@
+# =============================================================================
+# NLCP Training Configuration
+# =============================================================================
+# Purpose:
+#   Training hyperparameters and settings for NLCP experiments.
+#
+# DESIGN SOURCE:
+#   Reference: docs/concept-pyramid-V1.md
+#   - Section 4: Pretraining Strategy and Objective Functions
+#
+# Separation of Concerns:
+#   - model.yml:     Inference settings (model identity, generation, architecture)
+#   - training.yml:  Training settings (batch/epoch, trainability, lora, lr)
+#   - main.yml:      Experiment orchestration (data, environment, log)
+# =============================================================================
+
+# =============================================================================
+# General Training Settings
+# =============================================================================
+# batch_size: Number of samples per gradient update
+#   - Used in: train_nlcp.py -> DataLoader(batch_size=...)
+#   - For gradient accumulation: effective_batch = batch_size * accumulation_steps
+batch_size: 1
+
+# num_epochs: Number of passes over the entire dataset
+#   - Used in: train_nlcp.py -> trainer.train(num_epochs=...)
+num_epochs: 1
+
+gradient:
+  # max_grad_norm: Maximum gradient norm for clipping
+  #   - Used in: train_nlcp.py -> NLCPTrainingConfig.grad_clip_norm
+  #   - Reference: concept-pyramid-V1.md Section 7.2 recommends 1.0
+  max_grad_norm: 1.0
+
+# =============================================================================
+# Optimizer Settings
+# =============================================================================
+# learning_rate: Base learning rate (symbol: eta_base)
+#   - Used in: train_nlcp.py -> NLCPTrainingConfig.learning_rate
+#   - Reference: concept-pyramid-V1.md Section 4.1 recommends 1e-4
+learning_rate: 1.0e-5
+
+# weight_decay: Weight decay for AdamW optimizer
+#   - Used in: train_nlcp.py -> NLCPTrainingConfig.weight_decay
+#   - Reference: concept-pyramid-V1.md Section 4.1 recommends 0.01
+weight_decay: 0.01
+
+# max_steps: Total training steps
+#   - Used in: train_nlcp.py -> NLCPTrainingConfig.max_steps
+#   - Overrides num_epochs if both are set
+max_steps: 10000
+
+# =============================================================================
+# NLCP Training Settings
+# =============================================================================
+# Reference: concept-pyramid-V1.md Section 4.3 Three-Phase Training Strategy
+# =============================================================================
+nlcp_training:
+  # ===========================================================================
+  # Loss Weights (Section 4.1)
+  # ===========================================================================
+  # ntp_weight: Weight for next-token prediction loss (symbol: lambda_3)
+  #   - Used in: train_nlcp.py -> NLCPTrainingConfig.lambda_ce
+  #   - Final cross-entropy alignment to target tokens
+  #   - Reference: Section 4.1 default 1.0
+  ntp_weight: 1.0
+
+  # depth_loss_weight: Weight for depth regularization (symbol: lambda_2)
+  #   - Used in: train_nlcp.py -> NLCPTrainingConfig.lambda_depth
+  #   - Regularizes expansion rates toward target ratio
+  #   - Reference: Section 4.1 recommends 0.05
+  depth_loss_weight: 0.05
+
+  # consistency_weight: Weight for cross-level consistency (symbol: lambda_1)
+  #   - Used in: train_nlcp.py -> NLCPTrainingConfig.lambda_consist
+  #   - Enforces ||MeanPool(H_{k+1}) - H_k||² constraint
+  #   - Reference: Section 4.1 recommends 0.1
+  consistency_weight: 0.1
+
+  # warmup_steps: Number of warmup steps for learning rate
+  #   - Used in: train_nlcp.py -> NLCPTrainingConfig.warmup_steps
+  #   - Reference: Section 4.1 recommends 2000
+  warmup_steps: 1000
+
+# =============================================================================
+# NOTES ON UNUSED PARAMETERS (FOR FUTURE EXTENSION)
+# =============================================================================
+# The following parameters are defined in ModelLearn template but not used
+# in current NLCP training:
+#
+# trainable: Whether model parameters are updated
+#   - Not used: NLCP uses phase-based freezing instead
+#
+# use_value_head: Attach value head for RL methods
+#   - Not used: NLCP uses supervised learning, not RL
+#
+# lora: LoRA fine-tuning configuration
+#   - Not used: NLCP trains full model by default
+#
+# gradient.accumulation_steps: Gradient accumulation
+#   - Not used: Can be added if memory constraints require
+#
+# phase: Training phase (phase1/phase2/phase3)
+#   - Not used: Phase is determined by epoch count in trainer
+#
+# expansion_loss_weight: Weight for expansion prediction loss
+#   - Not used: Expansion learning via L_depth regularization
+#
+# consistency_enabled: Enable/disable consistency loss
+#   - Not used: Always enabled in current implementation
+#
+# consistency_type: Type of consistency loss
+#   - Not used: Hardcoded to "directional" (recommended)
+#
+# reconstruction_eval: Enable reconstruction evaluation
+#   - Not used: For future extension
+#
+# reconstruction_eval_interval: Evaluation interval
+#   - Not used: For future extension
+#
+# curriculum_enabled: Enable curriculum learning
+#   - Not used: For future extension
+#
+# curriculum_start_level: Starting level for curriculum
+#   - Not used: For future extension
+#
+# curriculum_level_interval: Steps between curriculum updates
+#   - Not used: For future extension
+# =============================================================================

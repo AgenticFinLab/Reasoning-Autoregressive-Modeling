@@ -1,7 +1,16 @@
 """NLCP (Next-Level Concept Pyramid) Inference Pipeline.
 
 This module implements the inference pipeline for NLCP.
-Reference: concept-pyramid.md Section 5 - Inference Pipeline and Causal Guarantees
+
+DESIGN SOURCE:
+    Reference: docs/concept-pyramid-V1.md
+    - Section 5: Inference Pipeline and Causal Guarantees
+    - Section 5.1: Blocking Generation Algorithm
+    - Section 5.2: Inference Flow Step-by-Step
+    - Section 5.3: Causal Strictness Proof
+    - Section 5.4: Inference Optimization Strategies
+
+    Additional reference: docs/concept-pyramid-critic.md (solutions for V1 issues)
 """
 
 import torch

@@ -3,21 +3,39 @@
 This module implements all loss functions for NLCP training.
 
 DESIGN SOURCE:
-    - concept-pyramid.md Section 4 - Pretraining Strategy and Objective Functions
-    - concept-pyramid-critic.md - Critical analysis of loss design
+    Reference: docs/concept-pyramid-V1.md
+    - Section 4.1: Complete Loss Function and Training Data Format
+    - Section 4.1.2: Why Intermediate Layers Have No Text Supervision
+    - Section 3.5: Cross-Level Consistency Regularization
 
-COMPLETE LOSS FUNCTION (Section 4.1):
-    L_total = Σ_k L_NTP(H_k | H_{<k}, Q)    (hierarchical autoregressive)
-            + λ_1 * L_consist               (cross-scale consistency)
-            + λ_2 * L_depth                 (expansion rate regularization)
-            + λ_3 * L_CE(Tokens | H_K)      (final alignment)
+    Additional reference: docs/concept-pyramid-critic.md (solutions for V1 issues)
+
+COMPLETE LOSS FUNCTION (Section 4.1.2):
+    L_total = L_NTP(H_K -> C)           (Only final layer has text supervision)
+            + lambda_1 * L_consist       (Cross-level consistency)
+            + lambda_2 * L_depth         (Expansion rate regularization)
+
+    Where:
+    - L_NTP: Next-token prediction at final level (ONLY level with text supervision)
+    - L_consist: ||MeanPool(H_{k+1}) - H_k||^2 (pseudo-residual signal)
+    - L_depth: (L_{k+1}/L_k - R_target)^2 (prevent collapse/explosion)
+
+KEY INSIGHT FROM V1 (Section 4.1.2):
+    Unlike VAR (f_rest provides per-layer supervision) or DLCM (Concept = Token Pool),
+    NLCP intermediate layers H_0, H_1, ..., H_{K-1} have NO direct text supervision.
+
+    They are shaped through:
+    1. Gradient backpropagation: L_NTP -> dL/dH_K -> ... -> dL/dH_0
+    2. Consistency constraints: Provide "pseudo-residual" signal
+    3. Conditional generation dependency: H_{k+1} depends on H_k via Cross-Attn
 
     Weight initialization (Section 4.1):
-        λ_1 = 0.1, λ_2 = 0.05, λ_3 = 1.0
+        lambda_1 = 0.1, lambda_2 = 0.05, lambda_3 = 1.0
         (cosine decay during training)
 
-CRITICAL ISSUES:
-    - CrossScaleConsistencyLoss: Too strict L2 constraint (critic Problem 2)
+CRITICAL ISSUES (from concept-pyramid-critic.md):
+    - CrossScaleConsistencyLoss: Too strict L2 constraint (Problem 2)
+      Solutions: DirectionalConsistencyLoss, ResidualConsistencyLoss, MutualInformationConsistencyLoss
     - ExpansionRateRegularization: Only batch-level, not per-sample
 """
 
@@ -235,7 +253,7 @@ class CrossScaleConsistencyLoss(nn.Module):
         coarse_hidden_states: torch.Tensor,
         expand_mask: torch.Tensor,
     ) -> torch.Tensor:
-        """Compute cross-scale consistency loss.
+        """Compute cross-level consistency loss.
 
         Dimension Flow:
             H_{k+1}: [B, L_{k+1}, D] fine level states
@@ -491,13 +509,13 @@ class NLCPLossComputer(nn.Module):
     Complete Loss Function formula:
 
     L_total = Σ_k L_NTP(H_k | H_{<k}, Q)    (hierarchical autoregressive)
-            + λ_1 * L_consist               (cross-scale consistency)
+            + λ_1 * L_consist               (cross-level consistency)
             + λ_2 * L_depth                 (expansion rate regularization)
             + λ_3 * L_CE(Tokens | H_K)      (final alignment)
 
     Attributes:
         ntp_loss: Next token prediction loss
-        consist_loss: Cross-scale consistency loss
+        consist_loss: Cross-level consistency loss
         depth_loss: Expansion rate regularization
         ce_loss: Final token alignment loss
         lambda_consist: Weight for consistency loss
@@ -532,6 +550,7 @@ class NLCPLossComputer(nn.Module):
             )
         elif consistency_loss_type == "residual":
             self.consist_loss = ResidualConsistencyLoss(
+                hidden_dim=hidden_dim,
                 use_info_nce=use_info_nce,
                 info_nce_weight=info_nce_weight,
             )

@@ -1,0 +1,210 @@
+# =============================================================================
+# NLCP Model Configuration
+# =============================================================================
+# Purpose:
+#   Defines the model and its inference settings for NLCP experiments.
+#   Contains ONLY INFERENCE-related settings.
+#
+# DESIGN SOURCE:
+#   Reference: docs/concept-pyramid-V1.md
+#   - Section 3: Core Mechanisms Detailed Design
+#   - Section 5: Inference Pipeline
+#
+# Separation of Concerns:
+#   - model.yml:     Inference settings (model identity, generation, architecture)
+#   - training.yml:  Training settings (trainable, lora, lr, epochs)
+# =============================================================================
+
+# =============================================================================
+# Model Identity
+# =============================================================================
+# lm_type: Model loading backend
+#   - Used in: Not directly used in current NLCP training (for future extension)
+#   - Options: "huggingface", "api", "vllm", "none"
+lm_type: "huggingface"
+
+# lm_name: HuggingFace model identifier or local path
+#   - Used in: train_nlcp.py -> AutoTokenizer.from_pretrained(model_cfg["lm_name"])
+#   - Determines tokenizer and model weights
+lm_name: "Qwen/Qwen2.5-0.5B-Instruct"
+
+# =============================================================================
+# Inference Configuration
+# =============================================================================
+# Settings for model inference (not used during training, reserved for eval)
+# =============================================================================
+inference_config:
+  # torch_dtype: Data type for model weights
+  #   - Used in: Model loading (future use)
+  torch_dtype: "auto"
+
+# =============================================================================
+# Generation Configuration
+# =============================================================================
+# Parameters for text generation during inference/evaluation
+# =============================================================================
+generation_config:
+  # max_new_tokens: Maximum tokens to generate
+  #   - Used in: Inference/evaluation phase
+  max_new_tokens: 512
+
+  # temperature: Sampling temperature
+  #   - Used in: Inference/evaluation phase
+  temperature: 0.7
+
+  # top_p: Nucleus sampling threshold
+  #   - Used in: Inference/evaluation phase
+  top_p: 0.9
+
+  # do_sample: Enable sampling (false = greedy decoding)
+  #   - Used in: Inference/evaluation phase
+  do_sample: true
+
+# =============================================================================
+# Prompt Configuration
+# =============================================================================
+# References to prompt templates for inference
+# Format: "module.path:VARIABLE_NAME"
+# =============================================================================
+sys_message: "nlcp.prompts:SYS_PROMPT"
+user_message: "nlcp.prompts:USER_PROMPT"
+
+# =============================================================================
+# NLCP Architecture Configuration
+# =============================================================================
+# Reference: concept-pyramid-V1.md Section 3.1 Configuration Parameters
+# =============================================================================
+nlcp_config:
+  # ===========================================================================
+  # Level Configuration
+  # ===========================================================================
+  # level_num_concepts: Number of concepts per pyramid level (from coarse to fine)
+  #   - Used in: train_nlcp.py -> NLCPModelConfig.l0_length, l_max
+  #   - l0_length = level_num_concepts[0] (first element)
+  #   - l_max = max(level_num_concepts) (maximum element)
+  #   - Example: [1, 4, 16, 64] means 4 levels with 1, 4, 16, 64 concepts
+  #   - Reference: concept-pyramid-V1.md uses L_0, L_1, ..., L_K for level lengths
+  level_num_concepts: [1, 4, 16, 64]
+
+  # ===========================================================================
+  # Embedding Dimensions
+  # ===========================================================================
+  # hidden_dim: Hidden dimension for concept embeddings (symbol: d)
+  #   - Used in: train_nlcp.py -> NLCPModelConfig.hidden_dim
+  #   - Shared across all pyramid levels
+  #   - Reference: concept-pyramid-V1.md Section 3.1 default 1024
+  hidden_dim: 768
+
+  # num_heads: Number of attention heads (symbol: H)
+  #   - Used in: train_nlcp.py -> NLCPModelConfig.num_heads
+  #   - d_head = hidden_dim / num_heads = 64 (standard)
+  num_heads: 12
+
+  # dropout: Dropout rate for regularization
+  #   - Used in: train_nlcp.py -> NLCPModelConfig.dropout
+  #   - Applied in attention layers and MLP blocks
+  dropout: 0.1
+
+  # ===========================================================================
+  # Transformer Architecture
+  # ===========================================================================
+  # num_encoder_layers: Number of transformer layers in encoder
+  #   - Used in: train_nlcp.py -> build_nlcp_model(num_encoder_layers=...)
+  num_encoder_layers: 4
+
+  # num_generator_layers: Number of transformer layers per level generator
+  #   - Used in: train_nlcp.py -> build_nlcp_model(num_generator_layers=...)
+  num_generator_layers: 2
+
+  # ===========================================================================
+  # Depth Prediction (Section 3.2)
+  # ===========================================================================
+  # max_depth: Maximum pyramid depth K_max
+  #   - Used in: train_nlcp.py -> NLCPModelConfig.max_depth
+  #   - Prevents excessive expansion on complex inputs
+  #   - Reference: concept-pyramid-V1.md Section 7.3 recommends 4
+  max_depth: 4
+
+  # depth_threshold: Threshold for depth gate early stopping (symbol: tau)
+  #   - Used in: train_nlcp.py -> NLCPModelConfig.depth_gate_threshold
+  #   - Range: 0.35-0.45 from Section 3.1
+  #   - Lower = deeper pyramids (more computation)
+  #   - Higher = shallower pyramids (faster inference)
+  depth_threshold: 0.4
+
+  # depth_gate_enabled: Enable depth gate for early stopping
+  #   - Used in: train_nlcp.py -> determines depth_gate_type
+  #   - true -> "causal", false -> "standard"
+  depth_gate_enabled: true
+
+  # ===========================================================================
+  # Expansion Prediction (Section 3.3)
+  # ===========================================================================
+  # expansion_mode: How expansion factor is determined
+  #   - Used in: train_nlcp.py -> determines expansion_predictor_type
+  #   - "predict": Model predicts expansion -> uses "gumbel" predictor
+  #   - "fixed": Use level_num_concepts -> uses "floor" predictor
+  expansion_mode: "predict"
+
+  # max_expansion_factor: Maximum expansion rate per position (symbol: lambda_max)
+  #   - Used in: train_nlcp.py -> NLCPModelConfig.expansion_max
+  #   - Reference: concept-pyramid-V1.md Section 3.3 recommends 8
+  max_expansion_factor: 4
+
+  # ===========================================================================
+  # Inference Mode (Section 5)
+  # ===========================================================================
+  # inference_mode: How concepts are generated
+  #   - Used in: Inference engine (not training)
+  #   - "autoregressive": Generate sequentially (slower, more coherent)
+  #   - "parallel": Generate all at once (faster, may lose coherence)
+  inference_mode: "autoregressive"
+
+# =============================================================================
+# NOTES ON DERIVED PARAMETERS (NOT SET MANUALLY)
+# =============================================================================
+# The following parameters are derived at runtime, NOT set in config:
+#
+# vocab_size:
+#   - Derived from tokenizer at runtime
+#   - Code: tokenizer = AutoTokenizer.from_pretrained(lm_name)
+#   - Code: vocab_size = tokenizer.vocab_size
+#
+# l0_length:
+#   - Derived from level_num_concepts[0]
+#   - Code: l0_length = level_num_concepts[0]
+#
+# l_max:
+#   - Derived from max(level_num_concepts)
+#   - Code: l_max = max(level_num_concepts)
+#
+# expansion_min:
+#   - Hardcoded to 1 in code
+#   - Every position gets at least 1 slot
+#
+# depth_gate_type:
+#   - Derived from depth_gate_enabled
+#   - true -> "causal", false -> "standard"
+#
+# expansion_predictor_type:
+#   - Derived from expansion_mode
+#   - "predict" -> "gumbel", "fixed" -> "floor"
+#
+# cross_attention_type:
+#   - Hardcoded to "relaxed" (recommended from concept-pyramid-critic.md)
+#
+# consistency_loss_type:
+#   - Hardcoded to "directional" (recommended from concept-pyramid-critic.md)
+#
+# padding_id:
+#   - Hardcoded to 0 in build_nlcp_model()
+#
+# muP_scale:
+#   - Hardcoded to 1.0 in NLCPTrainingConfig
+#
+# use_info_nce:
+#   - Hardcoded to True in build_nlcp_model()
+#
+# info_nce_weight:
+#   - Hardcoded to 0.1 in build_nlcp_model()
+# =============================================================================

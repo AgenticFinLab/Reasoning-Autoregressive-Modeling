@@ -3,20 +3,36 @@
 This module implements the core components of NLCP architecture.
 
 DESIGN SOURCE:
-    - concept-pyramid.md Section 3 - Core Mechanisms Detailed Design
-    - concept-pyramid-critic.md - Critical analysis and proposed solutions
+    Reference: docs/concept-pyramid-V1.md
+    - Section 3.2: Dynamic Depth Gate (p_cont formula, threshold logic)
+    - Section 3.3: Content-Adaptive Expansion (lambda_k, expand_mask)
+    - Section 3.4: Cross-Level Causal Attention (repeat_interleave, Q/K/V)
+    - Section 3.5: Cross-Level Consistency Regularization
 
-IMPLEMENTATION NOTES:
-    Each class includes detailed references to:
-    1. Original design specification from concept-pyramid.md
-    2. Critical issues identified in concept-pyramid-critic.md
-    3. Implementation choices and trade-offs
-    4. Recommended improvements from critic analysis
+    Additional reference: docs/concept-pyramid-critic.md (solutions for V1 issues)
 
-CRITICAL IMPLEMENTATION GAPS:
-    - ExpansionPredictor: Uses non-differentiable floor() (see critic Problem 1)
-    - DepthGate: Uses full attention instead of causal (see critic Problem 3)
-    - CrossLevelCausalAttention: Rigid parent-child mapping (see critic Problem 4)
+KEY INSIGHT FROM V1 (Section 1.2-1.4):
+    NLCP differs from VAR and DLCM in how it ensures "layer-wise approximation to CoT":
+
+    - VAR: Uses f_rest (residual) to tell model "what to encode" at each scale
+           Formula: f_rest = z_target - f_hat (residual = what remains to encode)
+           Guarantee: Each scale has explicit supervision via residual decomposition
+
+    - DLCM: Concept = Token Pool, naturally contains reconstruction information
+            Formula: Concept_k = MeanPool(Tokens in Segment_k)
+            Guarantee: Concepts are directly extracted from ground truth CoT
+
+    - NLCP: Uses implicit learning via gradient backprop + consistency constraints
+            Formula: L_consist = ||MeanPool(H_{k+1}) - H_k||^2
+            Guarantee: Gradient flow from final layer shapes intermediate layers
+
+CRITICAL IMPLEMENTATION GAPS (from concept-pyramid-critic.md):
+    - ExpansionPredictor: Uses non-differentiable floor() (Problem 1)
+      Solution: GumbelSoftmaxExpansionPredictor, REINFORCEExpansionPredictor, SoftExpansionPredictor
+    - DepthGate: Uses full attention instead of causal (Problem 3)
+      Solution: CausalDepthGate
+    - CrossLevelCausalAttention: Rigid parent-child mapping (Problem 4)
+      Solution: RelaxedCrossLevelAttention, HybridCrossLevelAttention
 """
 
 import math
@@ -24,6 +40,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from typing import Dict, List, Optional, Tuple
+
+from transformers import AutoModel, AutoTokenizer
 
 from examples.nlcp.base import NLCPModelConfig
 
@@ -38,7 +56,7 @@ class RMSNorm(nn.Module):
     and works well for stabilizing attention across different levels.
     """
 
-    def __init__(self, hidden_dim: int, eps: float = 1e-6):
+    def __init__(self, hidden_dim: int, eps: float):
         super().__init__()
         self.weight = nn.Parameter(torch.ones(hidden_dim))
         self.eps = eps
@@ -1584,3 +1602,169 @@ class HybridCrossLevelAttention(nn.Module):
         output = gate * local_out + (1 - gate) * global_out
 
         return output
+
+
+# =============================================================================
+# HuggingFace-based Causal Transformer Encoder
+# =============================================================================
+
+
+class HFCausalEncoder(nn.Module):
+    """HuggingFace-based Causal Transformer Encoder.
+
+    Reference: concept-pyramid-V1.md Section 2.3.1
+    "Encoder: Standard Causal Transformer（与 DLCM 完全一致）"
+
+    Design Principles:
+        1. Reuse HuggingFace transformers framework
+        2. Reuse pretrained open-source LLM weights
+        3. Load pretrained model and use only first N layers as encoder
+
+    Key Distinction:
+        Use Model class (e.g., Qwen2Model), NOT ForCausalLM class:
+        - Qwen2ForCausalLM: includes lm_head for token prediction
+        - Qwen2Model: pure Transformer backbone for feature extraction
+
+    Supported Models:
+        | Architecture | HF Model Class  | Features              |
+        |--------------|-----------------|----------------------|
+        | GPT-2        | GPT2Model       | Standard Causal      |
+        | Llama        | LlamaModel      | RoPE + RMSNorm       |
+        | Qwen         | Qwen2Model      | RoPE + RMSNorm + SwiGLU |
+
+    Attributes:
+        model: HuggingFace model (e.g., Qwen2Model)
+        tokenizer: Associated tokenizer
+        pool_to_l0: Adaptive pooling to L_0 length
+        l0_proj: Optional projection layer
+    """
+
+    def __init__(
+        self,
+        model_name: str,
+        num_layers: Optional[int],
+        l0_length: int,
+        freeze_encoder: bool,
+        **kwargs,
+    ):
+        """Initialize HuggingFace-based Encoder.
+
+        Args:
+            model_name: HuggingFace model identifier (e.g., "Qwen/Qwen2.5-0.5B")
+            num_layers: Number of layers to use (None = use all layers)
+            l0_length: Target length for Level 0 concepts
+            freeze_encoder: Whether to freeze encoder weights
+            **kwargs: Additional arguments passed to from_pretrained
+        """
+        super().__init__()
+
+        # Load model (Model class, not ForCausalLM)
+        # AutoModel automatically selects the correct Model class
+        self.model = AutoModel.from_pretrained(model_name, **kwargs)
+        self.tokenizer = AutoTokenizer.from_pretrained(model_name, **kwargs)
+
+        # Get hidden dimension from model config
+        self.hidden_dim = self.model.config.hidden_size
+        self.l0_length = l0_length
+
+        # Optional: truncate to fewer layers (DLCM-style lightweight encoder)
+        if num_layers is not None:
+            self._truncate_layers(num_layers)
+
+        # Freeze encoder weights if requested
+        if freeze_encoder:
+            self._freeze_encoder()
+
+        # Pool & Project (must be trained from scratch)
+        self.pool_to_l0 = nn.AdaptiveAvgPool1d(l0_length)
+        self.l0_proj = nn.Linear(self.hidden_dim, self.hidden_dim)
+
+    def _truncate_layers(self, num_layers: int):
+        """Truncate model to use only first N layers.
+
+        DLCM Encoder is typically lightweight (4-6 layers).
+        This method keeps only the first N layers of the pretrained model.
+
+        Args:
+            num_layers: Number of layers to keep
+        """
+        # Handle different model architectures
+        if hasattr(self.model, "layers"):
+            # Qwen2, Llama style
+            original_layers = self.model.layers
+            self.model.layers = original_layers[:num_layers]
+        elif hasattr(self.model, "h"):
+            # GPT-2 style architecture
+            original_layers = self.model.h
+            self.model.h = original_layers[:num_layers]
+        elif hasattr(self.model, "encoder") and hasattr(self.model.encoder, "layer"):
+            # BERT style architecture (not causal, handle gracefully)
+            original_layers = self.model.encoder.layer
+            self.model.encoder.layer = original_layers[:num_layers]
+        else:
+            raise ValueError(
+                f"Unknown model architecture: {type(self.model)}. "
+                "Cannot truncate layers."
+            )
+
+    def _freeze_encoder(self):
+        """Freeze encoder weights to save computation."""
+        for param in self.model.parameters():
+            param.requires_grad = False
+
+    def unfreeze_encoder(self):
+        """Unfreeze encoder weights for fine-tuning."""
+        for param in self.model.parameters():
+            param.requires_grad = True
+
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """Encode input tokens to Level 0 hidden states.
+
+        Dimension Flow:
+            input_ids: [B, L_q] token IDs
+                ↓
+            HF Model (Causal Transformer): [B, L_q, D]
+                ↓
+            Pool to L_0: [B, D, L_q] → [B, D, L_0] → [B, L_0, D]
+                ↓
+            Project: [B, L_0, D]
+                ↓
+            H_0: [B, L_0, D] Level 0 hidden representations
+
+        Args:
+            input_ids: [B, L_q] input token IDs
+            attention_mask: Optional attention mask
+
+        Returns:
+            H_0: [B, L_0, D] Level 0 hidden representations
+        """
+        # HF Model forward pass (automatic causal mask)
+        outputs = self.model(input_ids=input_ids, attention_mask=attention_mask)
+
+        # Get last hidden state: [B, L_q, D]
+        hidden_states = outputs.last_hidden_state
+
+        # Pool to Level 0 length
+        # [B, L_q, D] -> [B, D, L_q] -> pool -> [B, D, L_0] -> [B, L_0, D]
+        hidden_states = hidden_states.transpose(1, 2)
+        hidden_states = self.pool_to_l0(hidden_states)
+        hidden_states = hidden_states.transpose(1, 2)
+
+        # Project
+        hidden_states = self.l0_proj(hidden_states)
+
+        return hidden_states
+
+    @property
+    def device(self):
+        """Get model device."""
+        return next(self.model.parameters()).device
+
+    def to(self, *args, **kwargs):
+        """Move model to device."""
+        self.model = self.model.to(*args, **kwargs)
+        return super().to(*args, **kwargs)

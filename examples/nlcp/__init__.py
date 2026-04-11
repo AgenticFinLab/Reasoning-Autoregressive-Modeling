@@ -53,6 +53,8 @@ from examples.nlcp.modules import (
     CausalDepthGate,  # Solution 3B (RECOMMENDED)
     RelaxedCrossLevelAttention,  # Solution 4A (RECOMMENDED)
     HybridCrossLevelAttention,  # Solution 4B
+    # HuggingFace-based Encoder (DLCM-aligned)
+    HFCausalEncoder,
 )
 from examples.nlcp.losses import (
     # Original losses
@@ -94,6 +96,8 @@ __all__ = [
     "CausalDepthGate",
     "RelaxedCrossLevelAttention",
     "HybridCrossLevelAttention",
+    # HuggingFace-based Encoder (DLCM-aligned)
+    "HFCausalEncoder",
     # Original Losses
     "NextTokenPredictionLoss",
     "CrossScaleConsistencyLoss",

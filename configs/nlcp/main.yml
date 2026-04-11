@@ -1,0 +1,151 @@
+# =============================================================================
+# NLCP Main Configuration
+# =============================================================================
+# Purpose:
+#   Master configuration for NLCP (Next-Level Concept Pyramid) experiments.
+#   This configuration follows the ModelLearn template structure.
+#
+# DESIGN SOURCE:
+#   Reference: docs/concept-pyramid-V1.md
+#   - Section 2: Architecture Overview (data flow, module tasks)
+#   - Section 3: Core Mechanisms Detailed Design
+#   - Section 4: Pretraining Strategy and Objective Functions
+#   - Section 5: Inference Pipeline and Causal Guarantees
+#
+# KEY INSIGHT FROM V1 (Section 1.2-1.4):
+#   NLCP differs from VAR and DLCM in how it ensures "layer-wise approximation":
+#   - VAR: Uses f_rest (residual) for explicit per-layer supervision
+#   - DLCM: Concept = Token Pool, naturally contains reconstruction info
+#   - NLCP: Uses implicit learning + consistency constraints
+# =============================================================================
+# !!! ARCHITECTURAL CONSTRAINT - READ CAREFULLY !!!
+# =============================================================================
+# DO NOT add additional top-level blocks to this configuration.
+# The template provides exactly 6 blocks - no more, no less:
+#   data, environment, model, training, log, evaluation
+#
+# If you need additional configuration:
+#   - Add fields INSIDE existing blocks (e.g., add custom fields under 'data')
+#   - Extend included files (e.g., add fields in model.yml, training.yml)
+# =============================================================================
+
+# =============================================================================
+# BLOCK 1: Data Configuration
+# =============================================================================
+# Reference: docs/lmbase-usage.md Section 3.2 Dataset Registry
+# GSM8K available via lmbase.dataset.registry
+# =============================================================================
+data:
+  # data_name: Dataset identifier
+  #   - Used in: train_nlcp.py -> registry.get(data_cfg, split=...)
+  #   - Must match registry key in lmbase/dataset/registry.py
+  #   - Examples: "GSM8K", "MATH", "HotpotQA", "stark"
+  data_name: "GSM8K"
+
+  # data_path: Local path for dataset cache
+  #   - Used in: Dataset loading for caching
+  #   - Convention: "EXPERIMENT/data/{dataset_name}"
+  data_path: "EXPERIMENT/data/GSM8K"
+
+  # split: Dataset split to use for training
+  #   - Used in: train_nlcp.py -> registry.get(..., split=data_cfg["split"])
+  #   - Common values: "train", "test", "validation"
+  split: "train"
+
+  # subset: Subset configuration (optional)
+  #   - Used in: Dataset loading for multi-configuration datasets
+  #   - Required for: hotpotqa ("distractor"/"fullwiki"), stark ("amazon"/"mag"/"prime")
+  #   - GSM8K does not require subset
+  subset: ""
+
+# =============================================================================
+# BLOCK 2: Environment Configuration
+# =============================================================================
+environment:
+  # dotenv_path: Path to environment variables file
+  #   - Used in: Loading API keys and other secrets
+  dotenv_path: ".env"
+
+  # seed: Random seed for reproducibility
+  #   - Used in: train_nlcp.py -> setup_environment({"seed": env_cfg["seed"]})
+  #   - Affects: torch, numpy, random
+  seed: 42
+
+  # dataloader_num_workers: Number of workers for data loading
+  #   - Used in: train_nlcp.py -> DataLoader(num_workers=...)
+  #   - Set to 0 for debugging, >0 for faster loading
+  dataloader_num_workers: 0
+
+  # device_map: Device assignment for model components
+  #   - Used in: train_nlcp.py -> assign_model_devices(model_devices_cfg)
+  #   - Priority: Lower number = higher priority = better GPU
+  #   - "auto" selects GPU with most free memory
+  device_map:
+    model:
+      device: "auto"
+      priority: 1
+
+# =============================================================================
+# BLOCK 3: Model Configuration
+# =============================================================================
+# Model definition and inference settings are in model.yml for modularity.
+# =============================================================================
+model: !include "model.yml"
+
+# =============================================================================
+# BLOCK 4: Training Configuration
+# =============================================================================
+# Training settings: batch/epoch, optimizer, NLCP-specific.
+# =============================================================================
+training: !include "training.yml"
+
+# =============================================================================
+# BLOCK 5: Log Configuration
+# =============================================================================
+log:
+  # save_folder: Output directory for experiment results
+  #   - Used in: Checkpoint and log organization
+  save_folder: "EXPERIMENT/nlcp/nlcp_v1"
+
+  # checkpoint_path: Directory for model checkpoints
+  #   - Used in: train_nlcp.py -> Path(log_cfg["checkpoint_path"])
+  checkpoint_path: "EXPERIMENT/nlcp/nlcp_v1/checkpoints"
+
+  # log_path: Directory for training logs
+  #   - Used in: train_nlcp.py -> Path(log_cfg["log_path"])
+  log_path: "EXPERIMENT/nlcp/nlcp_v1/logs"
+
+  # log_level: Logging verbosity
+  #   - Options: "DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"
+  log_level: "INFO"
+
+  # checkpoint_step_interval: Checkpoint save interval (in training steps)
+  #   - Used in: Checkpoint saving logic
+  checkpoint_step_interval: 100
+
+  # log_step_interval: Metrics logging interval (in training steps)
+  #   - Used in: train_nlcp.py -> log_interval
+  log_step_interval: 10
+
+# =============================================================================
+# BLOCK 6: Evaluation Configuration
+# =============================================================================
+evaluation:
+  # enabled: Enable/disable periodic evaluation
+  enabled: true
+
+  # eval_step_interval: Evaluation interval (in training steps)
+  #   - Used in: train_nlcp.py -> eval_interval
+  eval_step_interval: 100
+
+  # datasets: Evaluation dataset configuration
+  datasets:
+    - name: "GSM8K_test"
+      path: "EXPERIMENT/data/GSM8K"
+      split: "test"
+      num_samples: 100
+
+  # metrics: Metrics to compute during evaluation
+  metrics:
+    - "accuracy"
+    - "format_correctness"

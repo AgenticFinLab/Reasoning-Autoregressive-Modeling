@@ -1,25 +1,139 @@
 """NLCP (Next-Level Concept Pyramid) Training Script.
 
-This module implements the training pipeline for NLCP.
+Usage:
+    python examples/nlcp/train_nlcp.py -c configs/nlcp/main.yml
 
 DESIGN SOURCE:
-    - concept-pyramid.md Section 4.3 - Staged Pretraining Pipeline
-    - concept-pyramid-critic.md - Critical analysis of training approach
+    Reference: docs/concept-pyramid-V1.md
+    - Section 4.1: Complete Loss Function and Training Data Format
+    - Section 4.1.2: Why Intermediate Layers Have No Text Supervision
+    - Section 4.2: Decoupled muP Adaptation
+    - Section 4.3: Staged Pretraining Pipeline
 
-THREE-PHASE TRAINING STRATEGY (Section 4.3 Table):
-    ┌─────────┬────────────────────────────────┬──────────────────────────────┐
-    │ Phase   │ Goal                           │ Freeze/Train                 │
-    ├─────────┼────────────────────────────────┼──────────────────────────────┤
-    │ Phase 1 │ Level 0 intent planning        │ Train: Encoder + Level 0 AR  │
-    │         │                                │ Freeze: All other modules    │
-    ├─────────┼────────────────────────────────┼──────────────────────────────┤
-    │ Phase 2 │ Next-Level generation alignment│ Train: Level 1..K Generator  │
-    │         │                                │        + L_consist           │
-    │         │                                │ Freeze: Encoder, Level 0     │
-    ├─────────┼────────────────────────────────┼──────────────────────────────┤
-    │ Phase 3 │ Full pyramid joint finetuning  │ Train: Full unfreeze         │
-    │         │                                │        + L_depth + L_CE      │
-    └─────────┴────────────────────────────────┴──────────────────────────────┘
+    Additional reference: docs/concept-pyramid-critic.md (solutions for V1 issues)
+
+================================================================================
+TRAINABLE MODULES OVERVIEW
+================================================================================
+
+Based on concept-pyramid-V1.md Section 2.2 (Module Tasks and Connection Logic)
+and the actual model architecture in model.py, NLCP has 6 trainable modules:
+
++----+----------------------+------------------------------------------+------------------+
+| #  | Module               | Function                                 | Parameters       |
++----+----------------------+------------------------------------------+------------------+
+| 1  | encoder              | Q → H_0 (problem abstraction)            | Embedding + N    |
+|    | (LightweightEncoder) | - Token embedding                        | Transformer layers|
+|    |                      | - N_enc transformer layers               |                  |
+|    |                      | - Pool & project to L_0 concepts         |                  |
++----+----------------------+------------------------------------------+------------------+
+| 2  | l0_proj              | Pool encoder output to L_0 concepts      | Linear(d, d)     |
+|    | (nn.Linear)          | Shape: [B, L_q, d] → [B, L_0, d]         |                  |
++----+----------------------+------------------------------------------+------------------+
+| 3  | depth_gate           | H_k → p_cont ∈ [0,1]                     | Pool + MLP       |
+|    | (DepthGate)          | Decide whether to continue expansion     |                  |
+|    |                      | - AttentionPool/ MeanPool                |                  |
+|    |                      | - 2-layer MLP with sigmoid               |                  |
++----+----------------------+------------------------------------------+------------------+
+| 4  | expansion_predictor  | H_k → expand_mask ∈ [1, λ_max]^{L_k}     | MLP + Softplus   |
+|    | (ExpansionPredictor) | Predict per-position expansion rate       |                  |
+|    |                      | - Determines L_{k+1} = sum(expand_mask)  |                  |
++----+----------------------+------------------------------------------+------------------+
+| 5  | level_generators     | H_k → H_{k+1} (next level generation)    | M Transformer    |
+|    | (NextLevelGenerator) | - Cross-Level Causal Attention            | layers per level |
+|    |                      | - Self-Attention with causal mask        |                  |
+|    |                      | - FFN + LayerNorm                        |                  |
+|    |                      | - One generator per level transition     |                  |
++----+----------------------+------------------------------------------+------------------+
+| 6  | token_decoder        | H_K → Logits ∈ R^{L_K × V}               | Linear(d, V)     |
+|    | (TokenDecoder)       | Final vocabulary projection              | + μP scaling     |
++----+----------------------+------------------------------------------+------------------+
+
+Total Parameters:
+    - encoder: N_enc × (d² × 4 + 2d) ≈ N_enc × 4d²
+    - l0_proj: d²
+    - depth_gate: d × 256 + 256 × 1 ≈ 256d
+    - expansion_predictor: d × 512 + 512 × 1 ≈ 512d
+    - level_generators: (K-1) × M × 4d² ≈ K × M × 4d²
+    - token_decoder: d × V
+
+    Where:
+        d = hidden_dim (e.g., 768)
+        N_enc = num_encoder_layers (e.g., 4)
+        M = num_generator_layers (e.g., 2)
+        K = max_depth (e.g., 4)
+        V = vocab_size (e.g., 128000)
+
+================================================================================
+AVAILABLE LOSSES (from losses.py)
+================================================================================
+
+Based on concept-pyramid-V1.md Section 4.1.2:
+
+L_total = L_NTP(H_K → C)                (ONLY final layer has text supervision)
+        + λ_1 × L_consist                (cross-level consistency)
+        + λ_2 × L_depth                  (expansion rate regularization)
+
++----+----------------------+------------------------------------------+------------------+
+| #  | Loss                 | Formula                                  | Module(s) Affected|
++----+----------------------+------------------------------------------+------------------+
+| 1  | L_NTP                | -Σ log P(c_t | H_K, c_{<t})              | token_decoder,   |
+|    | (NextTokenPrediction)| Cross-entropy at final level only        | level_generators,|
+|    |                      |                                          | encoder          |
++----+----------------------+------------------------------------------+------------------+
+| 2  | L_consist            | Σ_k ||MeanPool(H_{k+1}) - H_k||²        | level_generators |
+|    | (CrossLevelConsist.)  | + optional InfoNCE                       |                  |
+|    |                      | Enforces: fine level aggregated ≈ coarse |                  |
+|    |                      | Types: standard, directional, residual,mi|                  |
++----+----------------------+------------------------------------------+------------------+
+| 3  | L_depth              | Σ_k (L_{k+1}/L_k - R_target)²           | expansion_predictor|
+|    | (ExpansionReg.)       | Prevents expansion collapse/explosion    |                  |
++----+----------------------+------------------------------------------+------------------+
+| 4  | L_CE                 | CE(H_K @ W_unemb, target_tokens)         | token_decoder    |
+|    | (FinalAlignment)      | Final alignment to vocabulary            |                  |
++----+----------------------+------------------------------------------+------------------+
+| 5  | InfoNCE              | Contrastive loss on H_k vs H_{k+1}       | level_generators |
+|    | (Optional)           | Enhances cross-level dependency          |                  |
++----+----------------------+------------------------------------------+------------------+
+
+Loss Weights (Section 4.1 defaults):
+    λ_1 (consist) = 0.1
+    λ_2 (depth)   = 0.05
+    λ_3 (ce)      = 1.0
+    (cosine decay during training)
+
+KEY INSIGHT - WHY ONLY FINAL LAYER HAS TEXT SUPERVISION (Section 4.1.2):
+
+    Unlike VAR (f_rest provides per-layer supervision) or
+    DLCM (Concept = Token Pool, naturally contains information),
+    NLCP intermediate layers H_0, H_1, ..., H_{K-1} have NO direct text supervision.
+
+    They are shaped through:
+    1. Gradient backpropagation: L_NTP → ∂L/∂H_K → ... → ∂L/∂H_0
+    2. Consistency constraints: Provide "pseudo-residual" signal
+    3. Conditional generation: H_{k+1} depends on H_k via Cross-Attn
+
+================================================================================
+THREE-PHASE TRAINING STRATEGY (Section 4.3 Table)
+================================================================================
+
++---------+----------------------------------+----------------------------+------------------+
+| Phase   | Goal                             | Freeze/Train               | Active Losses    |
++---------+----------------------------------+----------------------------+------------------+
+| Phase 1 | Level 0 intent planning          | Train: encoder, l0_proj    | L_NTP (Level 0)  |
+|         |                                  | Freeze: All other modules  |                  |
+|         | Duration: 25% epochs             |                            |                  |
++---------+----------------------------------+----------------------------+------------------+
+| Phase 2 | Next-Level generation alignment  | Train: level_generators,   | L_NTP, L_consist |
+|         |                                  |        expansion_predictor,|                  |
+|         |                                  |        depth_gate           |                  |
+|         |                                  | Freeze: encoder, l0_proj   |                  |
+|         | Duration: 25% epochs             |                            |                  |
++---------+----------------------------------+----------------------------+------------------+
+| Phase 3 | Full pyramid joint finetuning    | Train: All modules         | L_NTP, L_consist,|
+|         |                                  |        (full unfreeze)     | L_depth, L_CE    |
+|         | Duration: 50% epochs             |                            |                  |
++---------+----------------------------------+----------------------------+------------------+
 
 PHASE DETAILS (Section 4.3):
     Phase 1: Level 0 Intent Planning
@@ -43,11 +157,11 @@ PHASE DETAILS (Section 4.3):
         - Loss: L_NTP + L_consist + L_depth + L_CE
 
 HYPERPARAMETERS (Section 4.1):
-    Learning rate: η = 1e-4 (base)
-    μP scaling: η_k = η_base * (d_k / d_base)^{-1} for heterogeneous widths
+    Learning rate: eta = 1e-4 (base)
+    muP scaling: eta_k = eta_base * (d_k / d_base)^{-1} for heterogeneous widths
     Weight decay: 0.01
     Warmup: 2000 steps
-    Loss weights: λ_1=0.1, λ_2=0.05, λ_3=1.0 (cosine decay)
+    Loss weights: lambda_1=0.1, lambda_2=0.05, lambda_3=1.0 (cosine decay)
 
 CRITICAL CONSIDERATIONS (from concept-pyramid-critic.md):
 
@@ -68,29 +182,33 @@ CRITICAL CONSIDERATIONS (from concept-pyramid-critic.md):
         Recommendation: Use DirectionalConsistency (Solution 2A) in Phase 2
 """
 
-import math
+import argparse
 import os
 import sys
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from pathlib import Path
+from typing import Dict
 
 import torch
-import torch.nn as nn
+from lmbase.dataset import registry
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader
+from transformers import AutoTokenizer
 
 # Local imports - use relative imports for module resolution
 sys.path.insert(
     0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 )
 
-from examples.nlcp.base import (
-    NLCPModelConfig,
-    NLCPTrainingConfig,
-    LevelState,
-)
+from examples.nlcp.base import NLCPModelConfig, NLCPTrainingConfig
 from examples.nlcp.model import NLCPModel, build_nlcp_model
+from ram.utils import (
+    assign_model_devices,
+    collate_fn_text,
+    load_config,
+    setup_environment,
+)
 
 
 @dataclass
@@ -108,26 +226,6 @@ class TrainingState:
     epoch: int
     best_loss: float
     phase: int
-
-
-class DummyDataset(Dataset):
-    """Dummy dataset for demonstration.
-
-    In real usage, replace with actual tokenized dataset.
-    """
-
-    def __init__(self, vocab_size: int, seq_length: int, num_samples: int):
-        self.vocab_size = vocab_size
-        self.seq_length = seq_length
-        self.num_samples = num_samples
-
-    def __len__(self) -> int:
-        return self.num_samples
-
-    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
-        input_ids = torch.randint(0, self.vocab_size, (self.seq_length,))
-        labels = input_ids.clone()
-        return {"input_ids": input_ids, "labels": labels}
 
 
 class NLCPTrainer:
@@ -164,14 +262,16 @@ class NLCPTrainer:
         # Reference: Section 4.2 "η_k = η_base * (d_k / d_base)^{-1}"
         self.optimizer = self._build_optimizer()
 
-        # Initialize scheduler
+        # Initialize scheduler with cosine annealing
+        # T_max: Total steps for cosine decay
+        # eta_min: Minimum learning rate (1% of base)
         self.scheduler = CosineAnnealingLR(
             self.optimizer,
             T_max=train_config.max_steps,
             eta_min=train_config.learning_rate * 0.01,
         )
 
-        # Training state
+        # Initialize training state with default values
         self.training_state = TrainingState(
             global_step=0,
             epoch=0,
@@ -187,14 +287,17 @@ class NLCPTrainer:
         η_k = η_base * (d_k / d_base)^{-1}"
 
         This applies different learning rates to modules with different widths.
+
+        Returns:
+            AdamW optimizer with parameter groups for each module
         """
         base_lr = self.train_config.learning_rate
-        base_dim = self.model_config.hidden_dim
 
         # Group parameters by module for different learning rates
         param_groups = []
 
         # Encoder parameters (standard learning rate)
+        # Shape: All encoder weights and biases
         encoder_params = list(self.model.encoder.parameters())
         if encoder_params:
             param_groups.append(
@@ -205,7 +308,7 @@ class NLCPTrainer:
                 }
             )
 
-        # Depth gate parameters
+        # Depth gate parameters for early stopping prediction
         gate_params = list(self.model.depth_gate.parameters())
         if gate_params:
             param_groups.append(
@@ -216,7 +319,7 @@ class NLCPTrainer:
                 }
             )
 
-        # Expansion predictor parameters
+        # Expansion predictor parameters for level expansion
         predictor_params = list(self.model.expansion_predictor.parameters())
         if predictor_params:
             param_groups.append(
@@ -228,6 +331,7 @@ class NLCPTrainer:
             )
 
         # Level generators (each might have different effective width)
+        # Flow: Iterate through all level generators and add their parameters
         for i, generator in enumerate(self.model.level_generators):
             gen_params = list(generator.parameters())
             if gen_params:
@@ -241,10 +345,10 @@ class NLCPTrainer:
                     }
                 )
 
-        # Token decoder parameters
+        # Token decoder parameters for final vocabulary prediction
+        # Output layer scaling per DLCM Eq.21
         decoder_params = list(self.model.token_decoder.parameters())
         if decoder_params:
-            # Output layer scaling per DLCM Eq.21
             param_groups.append(
                 {
                     "params": decoder_params,
@@ -329,7 +433,8 @@ class NLCPTrainer:
         input_ids = batch["input_ids"].to(self.device)
         labels = batch["labels"].to(self.device)
 
-        # Forward pass
+        # Forward pass through NLCP model
+        # Input shape: [B, L] -> Output: NLCPOutput with logits and losses
         output = self.model(
             input_ids=input_ids,
             target_ids=labels,
@@ -337,11 +442,11 @@ class NLCPTrainer:
             compute_loss=True,
         )
 
-        # Backward pass
+        # Backward pass with gradient accumulation
         loss = output.total_loss
         loss.backward()
 
-        # Gradient clipping
+        # Gradient clipping to prevent exploding gradients
         # Reference: Section 7.2 "L_consist gradient may be large, recommend grad_clip_norm = 1.0"
         torch.nn.utils.clip_grad_norm_(
             self.model.parameters(),
@@ -402,6 +507,8 @@ class NLCPTrainer:
             total_ce += output.ce_loss
             num_batches += 1
 
+        # Compute average losses across all batches
+        # Use max(num_batches, 1) to avoid division by zero
         return {
             "val_loss": total_loss / max(num_batches, 1),
             "val_ntp_loss": total_ntp / max(num_batches, 1),
@@ -439,7 +546,7 @@ class NLCPTrainer:
         """
         os.makedirs(checkpoint_dir, exist_ok=True)
 
-        # Phase 1: Intent planning
+        # Phase 1: Intent planning (25% of epochs)
         phase1_epochs = num_epochs // 4
         self.set_training_phase(1)
 
@@ -456,7 +563,7 @@ class NLCPTrainer:
                     val_dict = self.validate(val_loader)
                     self._log_losses(val_dict, prefix="val")
 
-        # Phase 2: Next-Level generation alignment
+        # Phase 2: Next-Level generation alignment (25% of epochs)
         phase2_epochs = num_epochs // 4
         self.set_training_phase(2)
 
@@ -473,7 +580,7 @@ class NLCPTrainer:
                     val_dict = self.validate(val_loader)
                     self._log_losses(val_dict, prefix="val")
 
-        # Phase 3: Full pyramid joint finetuning
+        # Phase 3: Full pyramid joint finetuning (50% of epochs)
         self.set_training_phase(3)
 
         for epoch in range(phase1_epochs + phase2_epochs, num_epochs):
@@ -489,7 +596,7 @@ class NLCPTrainer:
                     val_dict = self.validate(val_loader)
                     self._log_losses(val_dict, prefix="val")
 
-                    # Save best checkpoint
+                    # Save best checkpoint based on validation loss
                     if val_dict["val_loss"] < self.training_state.best_loss:
                         self.training_state.best_loss = val_dict["val_loss"]
                         self._save_checkpoint(checkpoint_dir, "best")
@@ -530,81 +637,170 @@ class NLCPTrainer:
         print(f"Saved checkpoint to {checkpoint_path}")
 
 
-def main():
-    """Main training entry point.
+def train_nlcp(config: dict):
+    """Train NLCP model with config-driven setup.
 
-    Reference: concept-pyramid.md Section 8
+    Reference: concept-pyramid-V1.md Section 8
     Recommended Experimental Path:
         "MVP Validation: Fix K=2, run L = L_NTP + L_consist + L_CE pipeline,
         verify tensor flow and gradient closure"
-    """
-    # Device setup
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # Model configuration
-    # Reference: Section 3.1 Basic Configuration
+    Args:
+        config: Configuration dictionary loaded from YAML
+    """
+    # =================================================================
+    # Extract config sections
+    # All parameters must be defined in config files (no defaults)
+    # =================================================================
+    model_cfg = config["model"]
+    train_cfg = config["training"]
+    data_cfg = config["data"]
+    env_cfg = config["environment"]
+    log_cfg = config["log"]
+    eval_cfg = config["evaluation"]
+
+    # Extract nlcp-specific config
+    nlcp_cfg = model_cfg["nlcp_config"]
+    nlcp_train_cfg = train_cfg["nlcp_training"]
+
+    # Training hyperparameters from config
+    batch_size = train_cfg["batch_size"]
+    learning_rate = train_cfg["learning_rate"]
+    num_epochs = train_cfg["num_epochs"]
+    gradient_clip = train_cfg["gradient"]["max_grad_norm"]
+    weight_decay = train_cfg["weight_decay"]
+    max_steps = train_cfg["max_steps"]
+
+    # Model device config
+    model_devices_cfg = env_cfg["device_map"]
+
+    # Logging settings
+    checkpoint_dir = Path(log_cfg["checkpoint_path"])
+    log_dir = Path(log_cfg["log_path"])
+    log_interval = log_cfg["log_step_interval"]
+
+    # Evaluation settings
+    eval_interval = eval_cfg["eval_step_interval"]
+
+    # Dataloader settings
+    dataloader_num_workers = env_cfg["dataloader_num_workers"]
+
+    # Create output directories
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    log_dir.mkdir(parents=True, exist_ok=True)
+
+    # =================================================================
+    # Setup environment
+    # =================================================================
+    setup_environment({"seed": env_cfg["seed"], "device": "cpu"})
+
+    # Assign device using priority-based allocation
+    model_devices = assign_model_devices(model_devices_cfg)
+    device = model_devices["model"]
+    if isinstance(device, str):
+        device = torch.device(device)
+
+    print(f"[1] Using device: {device}")
+
+    # =================================================================
+    # Load tokenizer and get vocab_size
+    # Vocab size is derived from tokenizer, not hardcoded
+    # =================================================================
+    print("[2] Loading tokenizer...")
+    tokenizer = AutoTokenizer.from_pretrained(model_cfg["lm_name"])
+    vocab_size = tokenizer.vocab_size
+    print(f"    Tokenizer: {model_cfg['lm_name']}, vocab_size={vocab_size}")
+
+    # =================================================================
+    # Build model config from YAML
+    # All parameters from config, no defaults in code
+    # =================================================================
+    print("[3] Building model config...")
+
+    # Extract number of concepts per level for l0_length and l_max derivation
+    level_num_concepts = nlcp_cfg["level_num_concepts"]
+
     model_config = NLCPModelConfig(
-        hidden_dim=512,  # Reduced for MVP
-        num_heads=8,
-        vocab_size=32000,
-        max_depth=2,  # Fixed K=2 for MVP per Section 8
-        depth_gate_threshold=0.4,
-        l0_length=8,
-        l_max=256,
-        dropout=0.1,
+        hidden_dim=nlcp_cfg["hidden_dim"],
+        num_heads=nlcp_cfg["num_heads"],
+        vocab_size=vocab_size,
+        max_depth=nlcp_cfg["max_depth"],
+        depth_gate_threshold=nlcp_cfg["depth_threshold"],
+        l0_length=level_num_concepts[0],
+        l_max=max(level_num_concepts),
+        dropout=nlcp_cfg["dropout"],
         expansion_min=1,
-        expansion_max=4,
+        expansion_max=nlcp_cfg["max_expansion_factor"],
+        depth_gate_type="causal" if nlcp_cfg["depth_gate_enabled"] else "standard",
+        expansion_predictor_type=(
+            "gumbel" if nlcp_cfg["expansion_mode"] == "predict" else "floor"
+        ),
+        cross_attention_type="relaxed",
+        consistency_loss_type="directional",
     )
 
-    # Training configuration
-    # Reference: Section 4.1 Loss weights
+    # Training config from YAML
     train_config = NLCPTrainingConfig(
-        lambda_consist=0.1,
-        lambda_depth=0.05,
-        lambda_ce=1.0,
-        target_expansion_ratio=4.0,
-        learning_rate=1e-4,
-        weight_decay=0.01,
-        warmup_steps=1000,
-        max_steps=10000,
-        grad_clip_norm=1.0,
+        lambda_consist=nlcp_train_cfg["consistency_weight"],
+        lambda_depth=nlcp_train_cfg["depth_loss_weight"],
+        lambda_ce=nlcp_train_cfg["ntp_weight"],
+        target_expansion_ratio=nlcp_cfg["max_expansion_factor"],
+        learning_rate=learning_rate,
+        weight_decay=weight_decay,
+        warmup_steps=nlcp_train_cfg["warmup_steps"],
+        max_steps=max_steps,
+        grad_clip_norm=gradient_clip,
         muP_scale=1.0,
     )
 
+    # =================================================================
     # Build model
+    # =================================================================
+    print("[4] Building NLCP model...")
     model = build_nlcp_model(
         config=model_config,
         padding_id=0,
-        num_encoder_layers=4,
-        num_generator_layers=2,
+        num_encoder_layers=nlcp_cfg["num_encoder_layers"],
+        num_generator_layers=nlcp_cfg["num_generator_layers"],
         use_info_nce=True,
         info_nce_weight=0.1,
     )
     model = model.to(device)
+    print(f"    Model built with hidden_dim={model_config.hidden_dim}")
 
-    # Create datasets
-    train_dataset = DummyDataset(
-        vocab_size=model_config.vocab_size,
-        seq_length=128,
-        num_samples=1000,
-    )
-    val_dataset = DummyDataset(
-        vocab_size=model_config.vocab_size,
-        seq_length=128,
-        num_samples=100,
-    )
+    # =================================================================
+    # Load dataset using lmbase registry
+    # =================================================================
+    print("[5] Loading dataset...")
+    train_dataset = registry.get(data_cfg, split=data_cfg["split"])
+    print(f"    Dataset: {data_cfg['data_name']}, {len(train_dataset)} samples")
 
+    # Create dataloader with collate_fn_text from ram.utils
     train_loader = DataLoader(
         train_dataset,
-        batch_size=8,
+        batch_size=batch_size,
         shuffle=True,
+        collate_fn=collate_fn_text,
+        drop_last=True,
+        num_workers=dataloader_num_workers,
     )
+    print(f"    Batches per epoch: {len(train_loader)}")
+
+    # Validation loader using test split
+    val_dataset = registry.get(data_cfg, split="test")
     val_loader = DataLoader(
         val_dataset,
-        batch_size=8,
+        batch_size=batch_size,
+        shuffle=False,
+        collate_fn=collate_fn_text,
+        drop_last=False,
+        num_workers=dataloader_num_workers,
     )
 
-    # Create trainer
+    # =================================================================
+    # Create trainer and run training
+    # =================================================================
+    print("[6] Creating trainer...")
     trainer = NLCPTrainer(
         model=model,
         model_config=model_config,
@@ -613,16 +809,29 @@ def main():
         padding_id=0,
     )
 
-    # Run training
+    print("[7] Starting training...")
     trainer.train(
         train_loader=train_loader,
         val_loader=val_loader,
-        num_epochs=10,
-        checkpoint_dir="checkpoints/nlcp",
-        log_interval=10,
-        eval_interval=100,
+        num_epochs=num_epochs,
+        checkpoint_dir=str(checkpoint_dir),
+        log_interval=log_interval,
+        eval_interval=eval_interval,
     )
+
+    print("Training completed!")
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description="NLCP Training")
+    parser.add_argument(
+        "-c",
+        "--config",
+        type=str,
+        required=True,
+        help="Path to config file (e.g., configs/nlcp/main.yml)",
+    )
+    args = parser.parse_args()
+
+    config = load_config(args.config)
+    train_nlcp(config)

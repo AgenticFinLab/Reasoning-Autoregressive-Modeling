@@ -3,34 +3,50 @@
 This module implements the complete NLCP architecture.
 
 DESIGN SOURCE:
-    - concept-pyramid.md Section 2 - Architecture Overview
-    - concept-pyramid.md Section 3 - Core Mechanisms
-    - concept-pyramid-critic.md - Critical analysis and gaps
+    Reference: docs/concept-pyramid-V1.md
+    - Section 2.1: High-Level Data Flow (Encoder -> Pyramid -> Token Decoder)
+    - Section 2.2: Module Tasks and Connection Logic Table
+    - Section 3: Core Mechanisms Detailed Design
+    - Section 5: Inference Pipeline and Causal Guarantees
+
+    Additional reference: docs/concept-pyramid-critic.md (solutions for V1 issues)
 
 ARCHITECTURE DATA FLOW (Section 2.1):
     Input: Question Q (Token IDs)
        ↓ [Lightweight Encoder]
-    H₀ ∈ ℝ^{L₀ × d}          (Level 0: Global Intent / Problem Abstraction)
-       ↓ [Depth Gate] p_cont^(0) > τ ? ──No──→ Terminate
+    H_0 ∈ R^{L_0 × d}          (Level 0: Global Intent / Problem Abstraction)
+       ↓ [Depth Gate] p_cont^(0) > tau ? --No--> Terminate
        ↓ Yes
-    [Expansion Predictor] λ₀ → L₁
+    [Expansion Predictor] lambda_0 → L_1
        ↓ [Next-Level Generator (Causal Cross-Attn + Self-Attn)]
-    H₁ ∈ ℝ^{L₁ × d}          (Level 1: Logical Skeleton / High-Level Steps)
-       ↓ [Depth Gate] p_cont^(1) > τ ? ──No──→ Terminate
+    H_1 ∈ R^{L_1 × d}          (Level 1: Logical Skeleton / High-Level Steps)
+       ↓ [Depth Gate] p_cont^(1) > tau ? --No--> Terminate
        ↓ Yes
-    [Expansion Predictor] λ₁ → L₂
+    [Expansion Predictor] lambda_1 → L_2
        ↓ [Next-Level Generator]
-    H₂ ∈ ℝ^{L₂ × d}          (Level 2: Intermediate Reasoning / Constraints)
+    H_2 ∈ R^{L_2 × d}          (Level 2: Intermediate Reasoning / Constraints)
        ↓ ... (dynamic loop to Level K)
        ↓ Terminate Condition Met
-    [Token Projection Head] → Logits ∈ ℝ^{L_out × V} → Autoregressive Decoding
+    [Token Projection Head] → Logits ∈ R^{L_out × V} → Autoregressive Decoding
 
 MODULE TASKS (Section 2.2 Table):
     Encoder:       x ∈ [1, L_q] → H_0 ∈ [1, L_0, d]
     Depth Gate:    H_k ∈ [1, L_k, d] → p_cont ∈ [0,1]
-    Expansion:     H_k → expand_mask ∈ [1, L_k] → L_{k+1} = Σλ
+    Expansion:     H_k → expand_mask ∈ [1, L_k] → L_{k+1} = Sum(lambda)
     Generator:     H_k, Q → H_{k+1} ∈ [1, L_{k+1}, d]
     Token Decoder: H_K → Logits ∈ [1, L_K, V]
+
+KEY INSIGHT FROM V1 (Section 1.2-1.4):
+    NLCP differs from VAR and DLCM in how it ensures "layer-wise approximation to CoT":
+
+    - VAR: Uses f_rest (residual) to tell model "what to encode" at each scale
+           Guarantee: Each scale has explicit supervision via residual decomposition
+
+    - DLCM: Concept = Token Pool, naturally contains reconstruction information
+            Guarantee: Concepts are directly extracted from ground truth CoT
+
+    - NLCP: Uses implicit learning via gradient backprop + consistency constraints
+            Guarantee: Gradient flow from final layer shapes intermediate layers
 
 KNOWN IMPLEMENTATION GAPS (from concept-pyramid-critic.md):
     1. ExpansionPredictor uses non-differentiable floor()
@@ -64,6 +80,8 @@ from examples.nlcp.modules import (
     CausalDepthGate,
     RelaxedCrossLevelAttention,
     HybridCrossLevelAttention,
+    # HuggingFace-based Encoder (DLCM-aligned)
+    HFCausalEncoder,
 )
 from examples.nlcp.losses import NLCPLossComputer
 
