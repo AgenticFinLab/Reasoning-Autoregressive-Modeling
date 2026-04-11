@@ -22,10 +22,9 @@ and the actual model architecture in model.py, NLCP has 6 trainable modules:
 +----+----------------------+------------------------------------------+------------------+
 | #  | Module               | Function                                 | Parameters       |
 +----+----------------------+------------------------------------------+------------------+
-| 1  | encoder              | Q → H_0 (problem abstraction)            | Embedding + N    |
-|    | (LightweightEncoder) | - Token embedding                        | Transformer layers|
-|    |                      | - N_enc transformer layers               |                  |
-|    |                      | - Pool & project to L_0 concepts         |                  |
+| 1  | encoder              | Q → H_0 (problem abstraction)            | HF pretrained    |
+|    | (HFCausalEncoder)    | - HuggingFace pretrained model           | + Pool & Project |
+|    |                      | - Pool & project to L_0 concepts         | (trainable)      |
 +----+----------------------+------------------------------------------+------------------+
 | 2  | l0_proj              | Pool encoder output to L_0 concepts      | Linear(d, d)     |
 |    | (nn.Linear)          | Shape: [B, L_q, d] → [B, L_0, d]         |                  |

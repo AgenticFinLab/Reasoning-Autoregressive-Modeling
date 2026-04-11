@@ -150,7 +150,7 @@ class DepthGate(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.Tensor],
     ) -> torch.Tensor:
         """Compute continuation probability.
 
@@ -331,7 +331,7 @@ class ExpansionPredictor(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        temperature: float = 1.0,
+        temperature: float,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Predict expansion rates for each position.
 
@@ -412,8 +412,8 @@ class GumbelSoftmaxExpansionPredictor(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        temperature: float = 0.5,
-        hard: bool = True,
+        temperature: float,
+        hard: bool,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Predict expansion rates using Gumbel-Softmax.
 
@@ -504,7 +504,7 @@ class REINFORCEExpansionPredictor(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        sample: bool = True,
+        sample: bool,
     ) -> Tuple[torch.Tensor, torch.distributions.Categorical, torch.Tensor]:
         """Sample expansion rates using policy.
 
@@ -618,7 +618,7 @@ class SoftExpansionPredictor(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        temperature: float = 1.0,
+        temperature: float,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Predict continuous expansion rates.
 
@@ -669,7 +669,7 @@ class CausalDepthGate(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.Tensor],
     ) -> torch.Tensor:
         """Compute continuation probability with causal pooling.
 
@@ -837,7 +837,9 @@ class CrossLevelCausalAttention(nn.Module):
         k_norm: RMSNorm for key stabilization (DLCM Eq.16)
     """
 
-    def __init__(self, hidden_dim: int, num_heads: int, dropout: float):
+    def __init__(
+        self, hidden_dim: int, num_heads: int, dropout: float, rms_norm_eps: float
+    ):
         super().__init__()
         self.hidden_dim = hidden_dim
         self.num_heads = num_heads
@@ -851,8 +853,8 @@ class CrossLevelCausalAttention(nn.Module):
         self.o_proj = nn.Linear(hidden_dim, hidden_dim)
 
         # RMSNorm for QK normalization (DLCM Eq.16)
-        self.q_norm = RMSNorm(hidden_dim)
-        self.k_norm = RMSNorm(hidden_dim)
+        self.q_norm = RMSNorm(hidden_dim, rms_norm_eps)
+        self.k_norm = RMSNorm(hidden_dim, rms_norm_eps)
 
         self.dropout = nn.Dropout(dropout)
 
@@ -910,7 +912,7 @@ class CrossLevelCausalAttention(nn.Module):
         hidden_states_fine: torch.Tensor,
         hidden_states_coarse: torch.Tensor,
         expand_mask: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.Tensor],
     ) -> torch.Tensor:
         """Apply cross-level causal attention.
 
@@ -1012,7 +1014,9 @@ class SelfAttentionBlock(nn.Module):
         mlp: Feed-forward network
     """
 
-    def __init__(self, hidden_dim: int, num_heads: int, dropout: float):
+    def __init__(
+        self, hidden_dim: int, num_heads: int, dropout: float, rms_norm_eps: float
+    ):
         super().__init__()
         self.hidden_dim = hidden_dim
         self.num_heads = num_heads
@@ -1026,8 +1030,8 @@ class SelfAttentionBlock(nn.Module):
         self.o_proj = nn.Linear(hidden_dim, hidden_dim)
 
         # RMSNorm
-        self.q_norm = RMSNorm(hidden_dim)
-        self.k_norm = RMSNorm(hidden_dim)
+        self.q_norm = RMSNorm(hidden_dim, rms_norm_eps)
+        self.k_norm = RMSNorm(hidden_dim, rms_norm_eps)
         self.attn_dropout = nn.Dropout(dropout)
 
         # MLP (standard 4x expansion)
@@ -1040,14 +1044,14 @@ class SelfAttentionBlock(nn.Module):
         )
 
         # Layer norms
-        self.ln1 = RMSNorm(hidden_dim)
-        self.ln2 = RMSNorm(hidden_dim)
+        self.ln1 = RMSNorm(hidden_dim, rms_norm_eps)
+        self.ln2 = RMSNorm(hidden_dim, rms_norm_eps)
 
     def forward(
         self,
         hidden_states: torch.Tensor,
-        kv_cache: Optional[List[torch.Tensor]] = None,
-        use_cache: bool = False,
+        kv_cache: Optional[List[torch.Tensor]],
+        use_cache: bool,
     ) -> Tuple[torch.Tensor, Optional[List[torch.Tensor]]]:
         """Apply causal self-attention.
 
@@ -1164,32 +1168,39 @@ class NextLevelGenerator(nn.Module):
         num_heads: int,
         num_layers: int,
         dropout: float,
-        cross_attn_type: str = "standard",
+        rms_norm_eps: float,
+        cross_attn_type: str,
     ):
         super().__init__()
         # Select cross-attention type based on config (critic.md Solutions 4A-4B)
         if cross_attn_type == "relaxed":
-            self.cross_attn = RelaxedCrossLevelAttention(hidden_dim, num_heads, dropout)
+            self.cross_attn = RelaxedCrossLevelAttention(
+                hidden_dim, num_heads, dropout, rms_norm_eps
+            )
         elif cross_attn_type == "hybrid":
-            self.cross_attn = HybridCrossLevelAttention(hidden_dim, num_heads, dropout)
+            self.cross_attn = HybridCrossLevelAttention(
+                hidden_dim, num_heads, dropout, rms_norm_eps
+            )
         else:  # "standard"
-            self.cross_attn = CrossLevelCausalAttention(hidden_dim, num_heads, dropout)
+            self.cross_attn = CrossLevelCausalAttention(
+                hidden_dim, num_heads, dropout, rms_norm_eps
+            )
 
         self.self_attn_layers = nn.ModuleList(
             [
-                SelfAttentionBlock(hidden_dim, num_heads, dropout)
+                SelfAttentionBlock(hidden_dim, num_heads, dropout, rms_norm_eps)
                 for _ in range(num_layers)
             ]
         )
-        self.ln = RMSNorm(hidden_dim)
+        self.ln = RMSNorm(hidden_dim, rms_norm_eps)
 
     def forward(
         self,
         hidden_states: torch.Tensor,
         coarse_hidden_states: torch.Tensor,
         expand_mask: torch.Tensor,
-        kv_cache: Optional[List[List[torch.Tensor]]] = None,
-        use_cache: bool = False,
+        kv_cache: Optional[List[List[torch.Tensor]]],
+        use_cache: bool,
     ) -> Tuple[torch.Tensor, Optional[List[List[torch.Tensor]]]]:
         """Generate next level hidden states.
 
@@ -1288,102 +1299,6 @@ class TokenDecoder(nn.Module):
         return logits
 
 
-class LightweightEncoder(nn.Module):
-    """Lightweight Encoder for initial token encoding.
-
-    Reference: concept-pyramid.md Section 2.1
-    "Input: Question Q (Token IDs) ↓ [Lightweight Encoder]"
-
-    Reference: concept-pyramid.md Section 2.2 Table
-    "Encoder: Input x ∈ [1, L_q] → Output H_0 ∈ [1, L_0, D]"
-    "Extract fine-grained local representations, initialize global intent"
-
-    This encoder processes input tokens and produces the initial
-    Level 0 hidden representations.
-
-    Attributes:
-        token_embedding: Token embedding layer
-        pos_embedding: Positional embeddings
-        encoder_layers: Transformer encoder layers
-        ln: Final layer norm
-        proj_to_l0: Projection to Level 0 length
-    """
-
-    def __init__(
-        self,
-        vocab_size: int,
-        hidden_dim: int,
-        num_heads: int,
-        num_layers: int,
-        max_seq_len: int,
-        l0_length: int,
-        dropout: float,
-    ):
-        super().__init__()
-        self.token_embedding = nn.Embedding(vocab_size, hidden_dim)
-        self.pos_embedding = nn.Embedding(max_seq_len, hidden_dim)
-        self.l0_length = l0_length
-
-        # Encoder layers
-        self.encoder_layers = nn.ModuleList(
-            [
-                SelfAttentionBlock(hidden_dim, num_heads, dropout)
-                for _ in range(num_layers)
-            ]
-        )
-        self.ln = RMSNorm(hidden_dim)
-
-        # Pooling to L_0 length
-        self.pool_to_l0 = nn.AdaptiveAvgPool1d(l0_length)
-
-    def forward(
-        self,
-        input_ids: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        """Encode input tokens to Level 0 hidden states.
-
-        Dimension Flow:
-            input_ids: [B, L_q] token IDs
-                ↓
-            Token embedding: [B, L_q, D]
-                ↓
-            + Position embedding: [B, L_q, D]
-                ↓
-            Encoder layers: [B, L_q, D]
-                ↓
-            Pool to L_0: [B, D, L_q] → [B, D, L_0] → [B, L_0, D]
-                ↓
-            H_0: [B, L_0, D] Level 0 hidden states
-
-        Args:
-            input_ids: [B, L_q] input token IDs
-            attention_mask: Optional attention mask
-
-        Returns:
-            H_0: [B, L_0, D] Level 0 hidden representations
-        """
-        B, L = input_ids.shape
-
-        # Token + position embeddings
-        positions = torch.arange(L, device=input_ids.device).unsqueeze(0).expand(B, -1)
-        hidden_states = self.token_embedding(input_ids) + self.pos_embedding(positions)
-
-        # Encoder layers
-        for layer in self.encoder_layers:
-            hidden_states, _ = layer(hidden_states)
-
-        hidden_states = self.ln(hidden_states)
-
-        # Pool to Level 0 length
-        # [B, L_q, D] -> [B, D, L_q] -> pool -> [B, D, L_0] -> [B, L_0, D]
-        hidden_states = hidden_states.transpose(1, 2)
-        hidden_states = self.pool_to_l0(hidden_states)
-        hidden_states = hidden_states.transpose(1, 2)
-
-        return hidden_states
-
-
 class RelaxedCrossLevelAttention(nn.Module):
     """Relaxed Cross-Level Attention (concept-pyramid-critic.md Solution 4A).
 
@@ -1398,7 +1313,9 @@ class RelaxedCrossLevelAttention(nn.Module):
     Reference: concept-pyramid-critic.md Solution 4A
     """
 
-    def __init__(self, hidden_dim: int, num_heads: int, dropout: float):
+    def __init__(
+        self, hidden_dim: int, num_heads: int, dropout: float, rms_norm_eps: float
+    ):
         super().__init__()
         self.hidden_dim = hidden_dim
         self.num_heads = num_heads
@@ -1412,8 +1329,8 @@ class RelaxedCrossLevelAttention(nn.Module):
         self.o_proj = nn.Linear(hidden_dim, hidden_dim)
 
         # RMSNorm
-        self.q_norm = RMSNorm(hidden_dim)
-        self.k_norm = RMSNorm(hidden_dim)
+        self.q_norm = RMSNorm(hidden_dim, rms_norm_eps)
+        self.k_norm = RMSNorm(hidden_dim, rms_norm_eps)
 
         self.dropout = nn.Dropout(dropout)
 
@@ -1453,7 +1370,7 @@ class RelaxedCrossLevelAttention(nn.Module):
         hidden_states_fine: torch.Tensor,
         hidden_states_coarse: torch.Tensor,
         expand_mask: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.Tensor],
     ) -> torch.Tensor:
         """Apply relaxed cross-level attention.
 
@@ -1523,13 +1440,17 @@ class HybridCrossLevelAttention(nn.Module):
     Reference: concept-pyramid-critic.md Solution 4B
     """
 
-    def __init__(self, hidden_dim: int, num_heads: int, dropout: float):
+    def __init__(
+        self, hidden_dim: int, num_heads: int, dropout: float, rms_norm_eps: float
+    ):
         super().__init__()
         self.hidden_dim = hidden_dim
         self.num_heads = num_heads
 
         # Local attention: strict parent-child (original behavior)
-        self.local_attn = CrossLevelCausalAttention(hidden_dim, num_heads, dropout)
+        self.local_attn = CrossLevelCausalAttention(
+            hidden_dim, num_heads, dropout, rms_norm_eps
+        )
 
         # Global attention: can attend to any coarse position
         self.global_q_proj = nn.Linear(hidden_dim, hidden_dim)
@@ -1548,7 +1469,7 @@ class HybridCrossLevelAttention(nn.Module):
         hidden_states_fine: torch.Tensor,
         hidden_states_coarse: torch.Tensor,
         expand_mask: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.Tensor],
     ) -> torch.Tensor:
         """Apply hybrid cross-level attention.
 
@@ -1720,7 +1641,7 @@ class HFCausalEncoder(nn.Module):
     def forward(
         self,
         input_ids: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.Tensor],
     ) -> torch.Tensor:
         """Encode input tokens to Level 0 hidden states.
 

@@ -134,6 +134,9 @@ class NLCPModelConfig:
         expansion_predictor_type: Type of expansion predictor ("floor", "gumbel", "reinforce", "soft").
         cross_attention_type: Type of cross-level attention ("standard", "relaxed", "hybrid").
         consistency_loss_type: Type of consistency loss ("standard", "directional", "residual", "mi").
+        encoder_model_name: HuggingFace model name for encoder (e.g., "Qwen/Qwen2.5-0.5B").
+        encoder_num_layers: Number of encoder layers to use (None = use all).
+        encoder_freeze: Whether to freeze encoder weights.
     """
 
     hidden_dim: int
@@ -150,6 +153,9 @@ class NLCPModelConfig:
     expansion_predictor_type: str
     cross_attention_type: str
     consistency_loss_type: str
+    encoder_model_name: str
+    encoder_num_layers: Optional[int]
+    encoder_freeze: bool
 
 
 @dataclass

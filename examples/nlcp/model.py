@@ -13,7 +13,7 @@ DESIGN SOURCE:
 
 ARCHITECTURE DATA FLOW (Section 2.1):
     Input: Question Q (Token IDs)
-       ↓ [Lightweight Encoder]
+       ↓ [HFCausalEncoder]
     H_0 ∈ R^{L_0 × d}          (Level 0: Global Intent / Problem Abstraction)
        ↓ [Depth Gate] p_cont^(0) > tau ? --No--> Terminate
        ↓ Yes
@@ -71,7 +71,6 @@ from examples.nlcp.modules import (
     CrossLevelCausalAttention,
     NextLevelGenerator,
     TokenDecoder,
-    LightweightEncoder,
     RMSNorm,
     # Critic.md solution components
     GumbelSoftmaxExpansionPredictor,
@@ -92,7 +91,7 @@ class NLCPModel(nn.Module):
     DESIGN SOURCE - concept-pyramid.md Section 2.1:
         High-level data flow:
             Input: Question Q (Token IDs)
-               ↓ [Lightweight Encoder]
+               ↓ [HFCausalEncoder]
             H₀ ∈ ℝ^{L₀ × d}          (Level 0: Global Intent / Problem Abstraction)
                ↓ [Depth Gate] p_cont^(0) > τ ? ──No──→ Terminate
                ↓ Yes
@@ -151,7 +150,7 @@ class NLCPModel(nn.Module):
 
     FORWARD PASS ALGORITHM:
         1. Encode input to Level 0 (H_0)
-           - Uses LightweightEncoder
+           - Uses HFCausalEncoder (HuggingFace pretrained model)
            - Projects to hidden_dim via l0_proj
            - Applies RMSNorm for stability
 
@@ -176,7 +175,7 @@ class NLCPModel(nn.Module):
 
     Attributes:
         config: NLCPModelConfig with all hyperparameters
-        encoder: LightweightEncoder for initial token encoding
+        encoder: HFCausalEncoder for initial token encoding (HuggingFace-based)
         depth_gate: DepthGate for dynamic depth control (see critic Problem 3)
         expansion_predictor: ExpansionPredictor for λ_k prediction (see critic Problem 1)
         level_generators: List of NextLevelGenerator for each level (see critic Problem 4)
@@ -199,16 +198,14 @@ class NLCPModel(nn.Module):
         super().__init__()
         self.config = config
 
-        # Lightweight Encoder
-        # Reference: Section 2.1 "Input: Question Q (Token IDs) ↓ [Lightweight Encoder]"
-        self.encoder = LightweightEncoder(
-            vocab_size=config.vocab_size,
-            hidden_dim=config.hidden_dim,
-            num_heads=config.num_heads,
-            num_layers=num_encoder_layers,
-            max_seq_len=config.l_max * 4,
+        # HuggingFace-based Causal Encoder
+        # Reference: Section 2.1 "Input: Question Q (Token IDs) ↓ [Encoder]"
+        # Reference: Section 3.1 "Reuse HuggingFace pretrained model weights"
+        self.encoder = HFCausalEncoder(
+            model_name=config.encoder_model_name,
+            num_layers=config.encoder_num_layers,
             l0_length=config.l0_length,
-            dropout=config.dropout,
+            freeze_encoder=config.encoder_freeze,
         )
 
         # Dynamic Depth Gate

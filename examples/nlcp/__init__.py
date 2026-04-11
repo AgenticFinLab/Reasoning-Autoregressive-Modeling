@@ -44,7 +44,6 @@ from examples.nlcp.modules import (
     CrossLevelCausalAttention,
     NextLevelGenerator,
     TokenDecoder,
-    LightweightEncoder,
     RMSNorm,
     # Critic.md solution implementations
     GumbelSoftmaxExpansionPredictor,  # Solution 1A (RECOMMENDED)
@@ -87,7 +86,6 @@ __all__ = [
     "CrossLevelCausalAttention",
     "NextLevelGenerator",
     "TokenDecoder",
-    "LightweightEncoder",
     "RMSNorm",
     # Critic.md Solution Modules (RECOMMENDED)
     "GumbelSoftmaxExpansionPredictor",
