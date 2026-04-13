@@ -515,6 +515,25 @@ logits = logits / s_μP    # μP 输出缩放
 - W_unemb 通常与 Encoder 的 Embedding 权重绑定或共享
 - s_μP 是 Decoupled µP 的输出缩放因子
 - 自回归解码支持贪婪、采样、Beam Search 等策略
+- **概念到 Token 的映射**：每个概念位置可生成多个 tokens（类似 DLCM 的 Concept Replication），最终 CoT 长度 T 可以大于 L_K
+
+**概念到 Token 的生成机制**：
+
+```
+每个概念位置生成一个或多个 tokens:
+─────────────────────────────────────────────────────────────────
+H_K[0] → 生成 tokens c_1, c_2, ..., c_{n_0}
+H_K[1] → 生成 tokens c_{n_0+1}, ..., c_{n_0+n_1}
+...
+H_K[L_K-1] → 生成 tokens c_{T-n_{L_K-1}+1}, ..., c_T
+
+其中 Σ n_k = T（总 token 数）
+
+具体实现:
+  - 方案 A: 每个概念位置独立做自回归解码，直到生成 <EOS> 或达到最大长度
+  - 方案 B: 预测每个概念的 token 数量，然后分配生成
+  - 方案 C: 所有概念共享一个自回归解码器，概念作为 KV Cache 的初始状态
+```
 
 **贡献**：Token Decoder 是 NLCP V2 与标准 LLM 接口的桥梁，确保输出格式兼容性。
 
@@ -951,11 +970,17 @@ $$
 $$
 
 其中：
-- $H_k$ 是 Concept Transformer 的预测输出
-- $C_k$ 是 Attentive Pooling 提取的概念目标
+- $H_k$ 是 Concept Transformer 的预测输出（$k \geq 1$）
+- $C_k$ 是 Attentive Pooling 提取的概念目标（$k \geq 1$）
 - $\lambda_k$ 是各层的权重系数（通常粗层权重更大）
 
 **作用**：让 Concept Transformer 学习预测各层概念。
+
+**为什么从 k=1 开始？**：
+- $H_0$ 由 `Pool&Project(H)` 直接获取，不需要预测
+- 训练时：Encoder 编码完整的 Q+CoT 得到 H，然后 Pool&Project 将 H 压缩为 H_0
+- 推理时：Encoder 只编码 Q 得到 H_enc，然后 Pool&Project 将 H_enc 压缩为 H_0
+- H_0 的学习通过反向传播从 L_NTP 和 L_concept 间接获得
 
 **权重设计建议**：
 ```
@@ -1080,17 +1105,29 @@ Stage 3: 端到端微调
   
   期望: 与基线 LLM 可比或更好
 
+5. H_0 与 C_0 一致性
+───────────────────────────────────────────────────────────────────────────
+  ||Pool&Project(H) - C_0||²
+  
+  期望: 较小（非零是正常的，因为 Pool&Project 和 Attentive Pooling 是不同的操作）
+  
+  说明:
+    - C_0 是 Attentive Pooling 从 H 提取的 Level 0 概念
+    - H_0 = Pool&Project(H) 是训练时使用的初始概念
+    - 两者不需要完全相同，但应该有一定的相关性
+    - 这个指标可用于诊断 Pool&Project 的学习情况
+
 ═══════════════════════════════════════════════════════════════════════════
 ```
 
 #### 3.4.2 潜在问题与解决方案
 
-| 问题             | 症状           | 解决方案                            |
-|:-----------------|:---------------|:------------------------------------|
-| 残差分解不收敛   | L_recon 不下降 | 检查 Q_k 初始化，增加正则化         |
-| 某层编码全部信息 |                |                                     |
-| 概念预测不准     | L_concept 高   | 检查 Concept Transformer 容量       |
-| NTP 性能差       | Perplexity 高  | 检查 Token Decoder，增加 L_NTP 权重 |
+| 问题             | 症状                       | 解决方案                            |
+|:-----------------|:---------------------------|:------------------------------------|
+| 残差分解不收敛   | L_recon 不下降             | 检查 Q_k 初始化，增加正则化         |
+| 某层编码全部信息 | 粗层贡献过大，细层贡献极小 | 添加正则化鼓励每层编码不同信息      |
+| 概念预测不准     | L_concept 高               | 检查 Concept Transformer 容量       |
+| NTP 性能差       | Perplexity 高              | 检查 Token Decoder，增加 L_NTP 权重 |
 
 ### 3.5 设计合理性总结
 
@@ -1439,7 +1476,11 @@ Q_1 可学习的查询向量: [16, D]
 3. Token 预测损失
 ───────────────────────────────────────────────────────────────────────────
   H_2 [64, D] → W_unemb → logits [64, V]
-  L_NTP = CrossEntropy(logits, CoT_tokens)
+  
+  每个 logits[i] 对应第 i 个概念位置的词表分布
+  通过自回归解码生成约 60 个 CoT tokens
+  
+  L_NTP = CrossEntropy(generated_tokens, CoT_tokens)
   
   期望: 与标准 LLM 可比
 
