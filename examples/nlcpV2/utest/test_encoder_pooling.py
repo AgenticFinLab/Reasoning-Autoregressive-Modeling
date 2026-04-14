@@ -1,9 +1,12 @@
-"""End-to-end test: Q+CoT → Hierarchical Concepts.
+"""End-to-end test: GSM8K Batch → Hierarchical Concepts.
 
 USAGE:
     # Run from project root with config file:
     python examples/nlcpV2/utest/test_encoder_pooling.py -c configs/nlcpV2/utest/test_encoder_pooling.yml
 
+    # Or with cd:
+    cd /path/to/Reasoning-Autoregressive-Modeling
+    python examples/nlcpV2/utest/test_encoder_pooling.py -c configs/nlcpV2/utest/test_encoder_pooling.yml
 
 DESIGN SOURCE:
     Reference: docs/concept-pyramid-V2.md
@@ -11,31 +14,36 @@ DESIGN SOURCE:
     - Section 2.2.1: Encoder
     - Section 2.2.2: Attentive Pooling
 
+    Reference: docs/lmbase-usage.md
+    - Section 3.2: Dataset Registry (GSM8K loading)
+
 PURPOSE:
-    Validate the complete flow from raw text input to hierarchical concept extraction:
-        Q+CoT text → Tokenization → Encoder → Attentive Pooling → C_0, C_1, ..., C_K
+    Validate the complete flow from GSM8K dataset (batch) to hierarchical concept extraction:
+        GSM8K (Q+CoT) [B] → Tokenization → Encoder → Attentive Pooling → C_0, C_1, ..., C_K
 
     This integration test ensures:
-    1. Encoder correctly processes Q+CoT text
-    2. Attentive Pooling extracts hierarchical concepts
-    3. Concept shapes match configuration
-    4. Reconstruction mechanism works
-    5. Batch processing handles multiple samples
+    1. GSM8K dataset loads correctly via lmbase.dataset.registry
+    2. Batch processing with configurable batch_size from YAML
+    3. Encoder correctly processes Q+CoT text from GSM8K samples
+    4. Attentive Pooling extracts hierarchical concepts
+    5. Concept shapes match configuration
+    6. Reconstruction mechanism works
 
 TEST COVERAGE:
-    - Single sample processing
-    - Batch processing (multiple samples)
+    - GSM8K dataset loading via lmbase registry
+    - Batch processing with config-specified batch size
     - Dimension alignment between encoder and concept transformer
     - Concept hierarchy expansion (L_0 → L_1 → ... → L_K)
 """
 
+import argparse
 from pathlib import Path
 import sys
+import traceback
 
 import torch
 from transformers import AutoTokenizer
 
-# Compute project paths relative to this file
 # This file: examples/nlcpV2/utest/test_encoder_pooling.py
 # Project root: 3 levels up
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -44,99 +52,148 @@ EXAMPLES_DIR = PROJECT_ROOT / "examples"
 sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(EXAMPLES_DIR))
 
+from lmbase.dataset import registry
 from nlcpV2.config import NLCPV2Config
 from nlcpV2.encoder import NLCPV2Encoder
 from nlcpV2.attentive_pooling import ResidualAttentivePooling
+from ram.utils import load_config
 
 
-def test_q_cot_to_hierarchical_concepts():
-    """Test complete flow: Q+CoT → Hierarchical Concepts.
+def build_nlcpV2_config(config: dict) -> NLCPV2Config:
+    """Build NLCPV2Config from YAML configuration.
+
+    Args:
+        config: Configuration dictionary from YAML file
+
+    Returns:
+        NLCPV2Config instance
+    """
+    model_cfg = config["model"]
+    encoder_cfg = model_cfg["encoder"]
+    pyramid_cfg = model_cfg["pyramid"]
+    decoder_cfg = model_cfg["decoder"]
+    loss_cfg = model_cfg["loss_weights"]
+
+    return NLCPV2Config(
+        hidden_dim=pyramid_cfg["hidden_dim"],
+        num_heads=pyramid_cfg["num_heads"],
+        vocab_size=decoder_cfg["vocab_size"],
+        num_levels=pyramid_cfg["num_levels"],
+        level_lengths=pyramid_cfg["level_lengths"],
+        max_seq_len=pyramid_cfg["max_seq_len"],
+        dropout=decoder_cfg["dropout"],
+        rms_norm_eps=decoder_cfg["rms_norm_eps"],
+        encoder_model_name=encoder_cfg["encoder_model_name"],
+        encoder_num_layers=encoder_cfg["encoder_num_layers"],
+        encoder_freeze=encoder_cfg["encoder_freeze"],
+        ntp_loss_weight=loss_cfg["ntp_loss_weight"],
+        concept_loss_weight=loss_cfg["concept_loss_weight"],
+        recon_loss_weight=loss_cfg["recon_loss_weight"],
+        muP_scale=decoder_cfg["muP_scale"],
+    )
+
+
+def test_batch_processing(config: dict):
+    """Test with batch samples from GSM8K.
 
     PURPOSE:
-        Validate end-to-end pipeline from text to hierarchical concepts.
+        Validate end-to-end pipeline from GSM8K dataset (batch) to hierarchical concepts.
 
     TEST FLOW:
-        1. Prepare Q+CoT text sample
-        2. Tokenize to input_ids [B, L]
-        3. Encode with NLCPV2Encoder → H [B, L, D_encoder]
-        4. Apply ResidualAttentivePooling → C_0, C_1, ..., C_K
-        5. Verify concept shapes and reconstruction
+        1. Load GSM8K dataset via lmbase registry
+        2. Create batch with batch_size from config (training.batch_size)
+        3. Tokenize batch → [B, L]
+        4. Encode batch → H [B, L, D_encoder]
+        5. Apply Attentive Pooling → C_0, C_1, ..., C_K
+        6. Verify concept shapes and reconstruction
 
     DIMENSION FLOW:
-        Text: string
+        GSM8K samples: List of B strings (B = config.training.batch_size)
             ↓
-        Tokenization: [B=1, L=512] (with padding)
+        Tokenization: [B, L=512] (batch with padding)
             ↓
-        Encoder: [B=1, L=512, D_encoder=896] (Qwen hidden dim)
+        Encoder: [B, L=512, D_encoder=896] (Qwen hidden dim)
             ↓
         Attentive Pooling:
-            - C_0: [1, 4, 256]
-            - C_1: [1, 16, 256]
-            - C_2: [1, 64, 256]
-            - C_3: [1, 256, 256]
-            - H_hat: [1, 512, 256]
-            - H_rest: [1, 512, 256]
+            - C_0: [B, 1, 256]
+            - C_1: [B, 2, 256]
+            - C_2: [B, 4, 256]
+            - C_3: [B, 8, 256]
+            - C_4: [B, 16, 256]
+            - C_5: [B, 32, 256]
+            - H_hat: [B, 512, 256]
+            - H_rest: [B, 512, 256]
 
     VERIFICATION:
-        - Concept counts match config.level_lengths
-        - Hidden dimensions match config.hidden_dim
-        - Reconstruction shapes are valid
+        - GSM8K loads via lmbase.dataset.registry
+        - Batch dimension B matches config.training.batch_size
+        - Concept counts match config.model.pyramid.level_lengths
+        - Hidden dimensions match config.model.pyramid.hidden_dim
+        - Reconstruction mechanism works
     """
     print("=" * 70)
-    print("TEST: Q+CoT → Hierarchical Concepts")
+    print("TEST: GSM8K Batch → Hierarchical Concepts")
     print("=" * 70)
 
-    config = NLCPV2Config(
-        hidden_dim=256,
-        num_heads=8,
-        vocab_size=32000,
-        num_levels=4,
-        level_lengths=[4, 16, 64, 256],
-        max_seq_len=512,
-        dropout=0.1,
-        rms_norm_eps=1e-6,
-        encoder_model_name="Qwen/Qwen2.5-0.5B",
-        encoder_num_layers=4,
-        encoder_freeze=True,
-        ntp_loss_weight=1.0,
-        concept_loss_weight=0.1,
-        recon_loss_weight=0.05,
-        muP_scale=1.0,
-    )
+    # Build NLCP config from YAML
+    nlcp_config = build_nlcpV2_config(config)
+
+    # Get batch_size from config
+    batch_size = config["training"]["batch_size"]
 
     print(f"\nConfiguration:")
-    print(f"  Hidden dim: {config.hidden_dim}")
-    print(f"  Num levels: {config.num_levels}")
-    print(f"  Level lengths: {config.level_lengths}")
-    print(f"  Head dim: {config.head_dim}")
+    print(f"  Batch size: {batch_size} (from config.training.batch_size)")
+    print(f"  Hidden dim: {nlcp_config.hidden_dim}")
+    print(f"  Num levels: {nlcp_config.num_levels}")
+    print(f"  Level lengths: {nlcp_config.level_lengths}")
+    print(f"  Head dim: {nlcp_config.head_dim}")
 
-    sample_q_cot = {
-        "question": "If a train travels at 60 km/h and needs to cover 240 km, how long will it take?",
-        "cot": "To find the time, I need to use the formula: time = distance / speed. "
-        "The distance is 240 km and the speed is 60 km/h. "
-        "So time = 240 / 60 = 4 hours. "
-        "Therefore, the train will take 4 hours.",
-    }
-
-    full_text = (
-        f"Question: {sample_q_cot['question']}\nReasoning: {sample_q_cot['cot']}"
-    )
-    print(f"\nSample Q+CoT:")
-    print(f"  Length: {len(full_text)} chars")
-    print(f"  Preview: {full_text[:100]}...")
-
+    # Load GSM8K dataset via lmbase
     print("\n" + "-" * 70)
-    print("STEP 1: Tokenization")
+    print("STEP 1: Load GSM8K from lmbase.dataset.registry")
     print("-" * 70)
 
-    tokenizer = AutoTokenizer.from_pretrained(config.encoder_model_name)
+    data_cfg = config["data"]
+    dataset = registry.get(data_cfg, split=data_cfg["split"])
+    print(f"  Dataset: {data_cfg['data_name']}")
+    print(f"  Split: {data_cfg['split']}")
+    print(f"  Total samples: {len(dataset)}")
+
+    # Get batch_size samples and extract Q+CoT texts
+    print(f"\n  Loading {batch_size} samples for batch processing...")
+    texts = []
+    for i in range(min(batch_size, len(dataset))):
+        sample = dataset[i]
+        if hasattr(sample, "question") and hasattr(sample, "cot_answer"):
+            question = sample.question
+            cot = sample.cot_answer
+        elif isinstance(sample, dict):
+            question = sample["question"]
+            cot = sample["cot_answer"]
+        else:
+            question = str(sample)
+            cot = ""
+        full_text = f"Question: {question}\nReasoning: {cot}"
+        texts.append(full_text)
+
+    # Pad with empty strings if dataset has fewer samples than batch_size
+    while len(texts) < batch_size:
+        texts.append("")
+
+    print(f"  ✓ Loaded {len(texts)} texts for batch")
+
+    print("\n" + "-" * 70)
+    print("STEP 2: Tokenization")
+    print("-" * 70)
+
+    tokenizer = AutoTokenizer.from_pretrained(nlcp_config.encoder_model_name)
 
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
     encoded = tokenizer(
-        full_text,
-        max_length=config.max_seq_len,
+        texts,
+        max_length=nlcp_config.max_seq_len,
         padding="max_length",
         truncation=True,
         return_tensors="pt",
@@ -145,16 +202,21 @@ def test_q_cot_to_hierarchical_concepts():
     input_ids = encoded["input_ids"]
     attention_mask = encoded["attention_mask"]
 
-    seq_len = attention_mask.sum().item()
-    print(f"  Tokenized length: {seq_len} tokens (padded to {input_ids.size(1)})")
+    actual_batch_size = input_ids.shape[0]
+    seq_len = attention_mask.sum(dim=1)  # Per-sample actual lengths
+    print(f"  Batch size: {actual_batch_size}")
+    print(f"  Max sequence length: {input_ids.size(1)} tokens")
     print(f"  Input IDs shape: {list(input_ids.shape)}")
     print(f"  Attention mask shape: {list(attention_mask.shape)}")
+    print(
+        f"  Actual token lengths: min={seq_len.min().item()}, max={seq_len.max().item()}"
+    )
 
     print("\n" + "-" * 70)
-    print("STEP 2: Encoding (Q+CoT → H)")
+    print("STEP 3: Encoding (Q+CoT → H)")
     print("-" * 70)
 
-    encoder = NLCPV2Encoder(config)
+    encoder = NLCPV2Encoder(nlcp_config)
     encoder.eval()
 
     with torch.no_grad():
@@ -162,46 +224,53 @@ def test_q_cot_to_hierarchical_concepts():
 
     print(f"  Encoder output H shape: {list(H.shape)}")
     print(f"  Note: Encoder uses pretrained model's hidden dim, not config.hidden_dim")
-    print(f"  Encoder hidden dim: {H.shape[2]}, Config hidden dim: {config.hidden_dim}")
+    print(
+        f"  Encoder hidden dim: {H.shape[2]}, Config hidden dim: {nlcp_config.hidden_dim}"
+    )
 
-    assert H.shape[0] == input_ids.size(0), "Batch size mismatch"
-    print("  ✓ Encoder output shape correct (hidden dim from pretrained model)")
+    assert H.shape[0] == actual_batch_size, "Batch size mismatch"
+    print("  ✓ Encoder output shape correct")
 
     print("\n" + "-" * 70)
-    print("STEP 3: Attentive Pooling (H → C_0, C_1, ..., C_K)")
+    print("STEP 4: Attentive Pooling (H → C_0, C_1, ..., C_K)")
     print("-" * 70)
 
     encoder_hidden_dim = H.shape[2]
-    pooling = ResidualAttentivePooling(config, encoder_hidden_dim=encoder_hidden_dim)
+    pooling = ResidualAttentivePooling(
+        nlcp_config, encoder_hidden_dim=encoder_hidden_dim
+    )
     pooling.eval()
 
     with torch.no_grad():
         concepts, H_hat, H_rest = pooling(H)
 
     print(f"  Number of concept levels: {len(concepts)}")
-    print(f"  Expected: {config.num_levels} levels")
+    print(f"  Expected: {nlcp_config.num_levels} levels")
 
     print(f"\n  Concept shapes:")
     for k, C_k in enumerate(concepts):
-        expected_L = config.level_lengths[k]
+        expected_L = nlcp_config.level_lengths[k]
         print(
-            f"    C_{k}: {list(C_k.shape)} (expected: [B, L_{k}={expected_L}, D={config.hidden_dim}])"
+            f"    C_{k}: {list(C_k.shape)} (expected: [B={actual_batch_size}, L_{k}={expected_L}, D={nlcp_config.hidden_dim}])"
         )
+        assert C_k.shape[0] == actual_batch_size, f"Level {k} batch size mismatch"
         assert C_k.shape[1] == expected_L, f"Level {k} length mismatch"
-        assert C_k.shape[2] == config.hidden_dim, f"Level {k} hidden dim mismatch"
+        assert C_k.shape[2] == nlcp_config.hidden_dim, f"Level {k} hidden dim mismatch"
 
     print(f"\n  Reconstruction shapes:")
     print(f"    H_hat: {list(H_hat.shape)} (accumulated reconstruction)")
     print(f"    H_rest: {list(H_rest.shape)} (final residual)")
     print(
-        f"    Note: H_hat/H_rest are in concept dim ({config.hidden_dim}), not encoder dim ({encoder_hidden_dim})"
+        f"    Note: H_hat/H_rest are in concept dim ({nlcp_config.hidden_dim}), not encoder dim ({encoder_hidden_dim})"
     )
 
-    assert H_hat.shape[2] == config.hidden_dim, "H_hat hidden dim mismatch"
-    assert H_rest.shape[2] == config.hidden_dim, "H_rest hidden dim mismatch"
+    assert H_hat.shape[0] == actual_batch_size, "H_hat batch size mismatch"
+    assert H_rest.shape[0] == actual_batch_size, "H_rest batch size mismatch"
+    assert H_hat.shape[2] == nlcp_config.hidden_dim, "H_hat hidden dim mismatch"
+    assert H_rest.shape[2] == nlcp_config.hidden_dim, "H_rest hidden dim mismatch"
 
     print("\n" + "-" * 70)
-    print("STEP 4: Verification")
+    print("STEP 5: Verification")
     print("-" * 70)
 
     H_proj = pooling.input_proj(H)
@@ -212,14 +281,15 @@ def test_q_cot_to_hierarchical_concepts():
     print(f"  Reconstruction MSE: {reconstruction_error:.6f}")
     print(f"  Residual energy: {residual_norm:.6f}")
     print(f"  Original energy (projected): {total_energy:.6f}")
-    print(f"  Reconstruction ratio: {reconstruction_error / total_energy:.2%}")
+    if total_energy > 0:
+        print(f"  Reconstruction ratio: {reconstruction_error / total_energy:.2%}")
     print(f"  Note: High reconstruction error is expected before training")
 
     assert H_hat.shape == H_rest.shape, "Shape mismatch"
     print("  ✓ Reconstruction mechanism working (needs training)")
 
     print("\n" + "-" * 70)
-    print("STEP 5: Concept Hierarchy Analysis")
+    print("STEP 6: Concept Hierarchy Analysis")
     print("-" * 70)
 
     for k in range(len(concepts) - 1):
@@ -231,7 +301,7 @@ def test_q_cot_to_hierarchical_concepts():
         )
 
     print("\n" + "=" * 70)
-    print("TEST PASSED: Q+CoT → Hierarchical Concepts")
+    print("TEST PASSED: GSM8K Batch → Hierarchical Concepts")
     print("=" * 70)
 
     return {
@@ -240,117 +310,27 @@ def test_q_cot_to_hierarchical_concepts():
         "concepts": concepts,
         "H_hat": H_hat,
         "H_rest": H_rest,
-        "config": config,
+        "config": nlcp_config,
     }
 
 
-def test_batch_processing():
-    """Test with multiple samples in batch.
-
-    PURPOSE:
-        Verify that the pipeline handles batch processing correctly.
-
-    TEST FLOW:
-        1. Create batch of 4 different Q+CoT samples
-        2. Tokenize with padding
-        3. Encode batch → H [B, L, D_encoder]
-        4. Apply Attentive Pooling → concepts [B, L_k, D]
-        5. Verify batch dimension preserved
-
-    DIMENSION FLOW:
-        Texts: List of 4 strings
-            ↓
-        Tokenization: [B=4, L=256] (batch with padding)
-            ↓
-        Encoder: [B=4, L=256, D_encoder=896]
-            ↓
-        Attentive Pooling:
-            - C_0: [4, 4, 128]
-            - C_1: [4, 8, 128]
-            - C_2: [4, 32, 128]
-
-    VERIFICATION:
-        - Batch dimension B=4 preserved through all operations
-        - Each concept tensor has correct batch size
-    """
-    print("\n" + "=" * 70)
-    print("TEST: Batch Processing")
-    print("=" * 70)
-
-    config = NLCPV2Config(
-        hidden_dim=128,
-        num_heads=4,
-        vocab_size=32000,
-        num_levels=3,
-        level_lengths=[4, 8, 32],
-        max_seq_len=256,
-        dropout=0.1,
-        rms_norm_eps=1e-6,
-        encoder_model_name="Qwen/Qwen2.5-0.5B",
-        encoder_num_layers=2,
-        encoder_freeze=True,
-        ntp_loss_weight=1.0,
-        concept_loss_weight=0.1,
-        recon_loss_weight=0.05,
-        muP_scale=1.0,
-    )
-
-    batch_size = 4
-    print(f"\nBatch size: {batch_size}")
-
-    tokenizer = AutoTokenizer.from_pretrained(config.encoder_model_name)
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-
-    texts = [
-        "What is 2+2? Let's think: 2+2 equals 4.",
-        "How many days in a week? There are 7 days.",
-        "What is the capital of France? Paris is the capital.",
-        "If x=3 and y=4, what is x+y? x+y = 3+4 = 7.",
-    ]
-
-    encoded = tokenizer(
-        texts,
-        max_length=config.max_seq_len,
-        padding="max_length",
-        truncation=True,
-        return_tensors="pt",
-    )
-
-    input_ids = encoded["input_ids"]
-    attention_mask = encoded["attention_mask"]
-
-    print(f"Input shape: {list(input_ids.shape)}")
-
-    encoder = NLCPV2Encoder(config)
-
-    with torch.no_grad():
-        H = encoder.forward_training(input_ids, attention_mask)
-
-    encoder_hidden_dim = H.shape[2]
-    pooling = ResidualAttentivePooling(config, encoder_hidden_dim=encoder_hidden_dim)
-
-    with torch.no_grad():
-        concepts, H_hat, H_rest = pooling(H)
-
-    print(f"\nEncoder output: {list(H.shape)}")
-    print(f"Batch dimension: {H.shape[0]} (expected: {batch_size})")
-
-    for k, C_k in enumerate(concepts):
-        print(f"  C_{k}: {list(C_k.shape)}")
-        assert C_k.shape[0] == batch_size, f"Batch size mismatch at level {k}"
-
-    print("\n✓ Batch processing test passed")
-
-
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(
+        description="NLCP V2: Encoder + Attentive Pooling Batch Test"
+    )
+    parser.add_argument(
+        "-c", "--config", type=str, required=True, help="Path to config file"
+    )
+    args = parser.parse_args()
+
+    config = load_config(args.config)
+
     print("\n" + "=" * 70)
     print("NLCP V2: Encoder + Attentive Pooling Integration Test")
     print("=" * 70)
 
     try:
-        result = test_q_cot_to_hierarchical_concepts()
-        test_batch_processing()
+        result = test_batch_processing(config)
 
         print("\n" + "=" * 70)
         print("ALL TESTS PASSED")
@@ -358,7 +338,5 @@ if __name__ == "__main__":
 
     except Exception as e:
         print(f"\n❌ TEST FAILED: {e}")
-        import traceback
-
         traceback.print_exc()
         sys.exit(1)
