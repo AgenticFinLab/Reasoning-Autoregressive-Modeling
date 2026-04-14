@@ -1,5 +1,10 @@
 """End-to-end test: Q+CoT → Hierarchical Concepts.
 
+USAGE:
+    # Run from project root with config file:
+    python examples/nlcpV2/utest/test_encoder_pooling.py -c configs/nlcpV2/utest/test_encoder_pooling.yml
+
+
 DESIGN SOURCE:
     Reference: docs/concept-pyramid-V2.md
     - Section 2.1.3: Training Data Flow (Stage 1 & 2)
