@@ -1,0 +1,78 @@
+# =============================================================================
+# NLCP V2 Unit Test Configuration
+# =============================================================================
+# Purpose: Minimal configuration for unit testing encoder + attentive pooling
+# Usage: python examples/nlcpV2/utest/test_encoder_pooling.py -c configs/nlcpV2/utest/test.yml
+# =============================================================================
+
+# Data configuration (minimal for testing)
+data:
+  data_name: "GSM8K"
+  data_path: "EXPERIMENT/data/GSM8K"
+  split: "train"
+  subset: ""
+
+# Environment configuration
+environment:
+  dotenv_path: ".env"
+  seed: 42
+  dataloader_num_workers: 0
+  device_map:
+    model:
+      device: "auto"
+      priority: 1
+
+# Model configuration (inline, matching nlcpV2 code structure)
+model:
+  encoder:
+    encoder_model_name: "Qwen/Qwen2.5-0.5B"
+    encoder_num_layers: 4
+    encoder_freeze: true
+
+  pyramid:
+    hidden_dim: 256
+    num_heads: 8
+    num_levels: 6
+    level_lengths: [1, 2, 4, 8, 16, 32]
+    max_seq_len: 512
+
+  decoder:
+    vocab_size: 151936
+    dropout: 0.1
+    rms_norm_eps: 1.0e-6
+    muP_scale: 1.0
+
+  loss_weights:
+    ntp_loss_weight: 1.0
+    concept_loss_weight: 0.1
+    recon_loss_weight: 0.05
+
+# Training configuration (minimal for testing)
+training:
+  batch_size: 4
+  num_epochs: 1
+  learning_rate: 1.0e-4
+  weight_decay: 0.01
+  scheduler_type: "cosine"
+  warmup_steps: 10
+  gradient:
+    max_grad_norm: 1.0
+    checkpointing: false
+  bf16: true
+  resume: null
+
+# Log configuration
+log:
+  save_folder: "EXPERIMENT/nlcpV2/utest"
+  checkpoint_path: "EXPERIMENT/nlcpV2/utest/checkpoints"
+  log_path: "EXPERIMENT/nlcpV2/utest/logs"
+  log_level: "INFO"
+  checkpoint_step_interval: 100
+  log_step_interval: 10
+
+# Evaluation configuration (disabled for testing)
+evaluation:
+  enabled: false
+  eval_step_interval: 100
+  datasets: []
+  metrics: []
