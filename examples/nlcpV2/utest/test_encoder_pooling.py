@@ -4,9 +4,6 @@ USAGE:
     # Run from project root with config file:
     python examples/nlcpV2/utest/test_encoder_pooling.py -c configs/nlcpV2/utest/test_encoder_pooling.yml
 
-    # Or with cd:
-    cd /path/to/Reasoning-Autoregressive-Modeling
-    python examples/nlcpV2/utest/test_encoder_pooling.py -c configs/nlcpV2/utest/test_encoder_pooling.yml
 
 DESIGN SOURCE:
     Reference: docs/concept-pyramid-V2.md
