@@ -1,10 +1,25 @@
 """NLCP V3: Implicit Reasoning via Hierarchical Concept Compression.
 
 USAGE:
-    from nlcpV3 import NLCPV3Config, NLCPV3Model
+    from nlcpV3 import NLCPV3Config, NLCPV3Model, ConceptGenerator
 
-    config = NLCPV3Config()
-    model = NLCPV3Model(config)
+    # Unified interface
+    config = NLCPV3Config(...)
+    generator = ConceptGenerator(config, encoder_hidden_dim=896)
+    concepts, aux = generator.forward_training(H_cot, method='residual_pooling')
+    concepts = generator.forward_inference(H_q)
+
+    # Individual extractors (for standalone use)
+    from nlcpV3 import (
+        ResidualAttentivePooling,
+        PositionConstrainedExtractor,
+        HardOrderedMaskExtractor,
+        RecursiveOrderedExtractor,
+        OrderConstrainedTraining,
+        AutoregressiveGenerator,
+    )
+    extractor = ResidualAttentivePooling(config, encoder_hidden_dim)
+    concepts, aux = extractor(H_cot)
 
 DESIGN SOURCE:
     Reference: docs/concept-pyramid-V3.md
@@ -12,23 +27,16 @@ DESIGN SOURCE:
     - Section 3: Training
     - Section 4: Inference
 
-PURPOSE:
-    NLCP V3 shifts the paradigm from explicit CoT generation to implicit
-    reasoning via hierarchical concept compression. During training, CoT
-    is compressed into hierarchical concepts; during inference, concepts
-    are generated directly from Q and decoded to solution (NO CoT generation).
+    Inspired by: docs/VAR.md
+    - VAR uses same codebook/φ for both training (VQ-VAE) and inference
+    - NLCP V3 unifies concept extraction and generation in one module
 
 MODULE STRUCTURE:
     - config: NLCPV3Config dataclass for all hyperparameters
     - encoder: Qwen2.5-based encoder for Q+CoT (train) / Q (inference)
-    - attentive_pooling: Training-only concept extraction from CoT
-    - ordered_concept_extractors: 5 schemes for ordered concept extraction
-        * PositionConstrainedExtractor (Scheme 1)
-        * HardOrderedMaskExtractor (Scheme 2)
-        * RecursiveOrderedExtractor (Scheme 3)
-        * OrderConstrainedTraining (Scheme 4)
-        * RobustOrderedExtractor (Recommended combination)
-    - concept_generator: Inference-only concept generation from Q
+    - concept_generator: Training & inference methods
+        * Individual extractors (standalone, trainable classes)
+        * ConceptGenerator (unified interface)
     - concept_transformer: VAR-style transformer with level-level causality
     - token_decoder: Decodes concepts directly to solution (NOT CoT!)
     - model: NLCPV3Model integrating all components
@@ -40,33 +48,53 @@ KEY DIFFERENCE FROM V2:
 
 from nlcpV3.config import NLCPV3Config
 from nlcpV3.encoder import NLCPV3Encoder
-from nlcpV3.attentive_pooling import ResidualAttentivePooling
-from nlcpV3.ordered_concept_extractors import (
-    PositionConstrainedExtractor,
-    HardOrderedMaskExtractor,
-    RecursiveOrderedExtractor,
-    OrderConstrainedTraining,
-    RobustOrderedExtractor,
-    visualize_concept_attention,
-    check_concept_ordering,
+from nlcpV3.concept_generator import (
+    ConceptGenerator,
+    BaseConceptGenerator,
+    # Basic training extractors
+    ResidualAttentivePoolingConceptGenerator,
+    PositionConstrainedConceptGenerator,
+    HardOrderedMaskConceptGenerator,
+    RecursiveOrderedConceptGenerator,
+    OrderConstrainedTrainingConceptGenerator,
+    RobustOrderedConceptGenerator,
+    # Advanced causal training extractors
+    MonotonicSoftAssignmentConceptGenerator,
+    CausalSequentialRefinementConceptGenerator,
+    ContinuousCausalKernelConceptGenerator,
+    AutoregressiveSoftBoundaryConceptGenerator,
+    CausalSoftPoolingConceptGenerator,
+    # Inference generator
+    AutoregressiveConceptGenerator,
 )
-from nlcpV3.concept_generator import ConceptGenerator
 from nlcpV3.concept_transformer import ConceptTransformer
 from nlcpV3.token_decoder import SolutionDecoder
 from nlcpV3.model import NLCPV3Model
 
 __all__ = [
+    # Core components
     "NLCPV3Config",
     "NLCPV3Encoder",
-    "ResidualAttentivePooling",
-    "PositionConstrainedExtractor",
-    "HardOrderedMaskExtractor",
-    "RecursiveOrderedExtractor",
-    "OrderConstrainedTraining",
-    "RobustOrderedExtractor",
-    "visualize_concept_attention",
-    "check_concept_ordering",
+    # Unified concept generator
     "ConceptGenerator",
+    # Base class
+    "BaseConceptGenerator",
+    # Basic training extractors (standalone use)
+    "ResidualAttentivePoolingConceptGenerator",
+    "PositionConstrainedConceptGenerator",
+    "HardOrderedMaskConceptGenerator",
+    "RecursiveOrderedConceptGenerator",
+    "OrderConstrainedTrainingConceptGenerator",
+    "RobustOrderedConceptGenerator",
+    # Advanced causal training extractors
+    "MonotonicSoftAssignmentConceptGenerator",
+    "CausalSequentialRefinementConceptGenerator",
+    "ContinuousCausalKernelConceptGenerator",
+    "AutoregressiveSoftBoundaryConceptGenerator",
+    "CausalSoftPoolingConceptGenerator",
+    # Inference generator
+    "AutoregressiveConceptGenerator",
+    # Other components
     "ConceptTransformer",
     "SolutionDecoder",
     "NLCPV3Model",

@@ -25,23 +25,21 @@ PURPOSE:
     NLCP V3 Model integrates all components for implicit reasoning:
 
     Training Path:
-        Q+CoT → Encoder → AttentivePooling → Concepts → ConceptTransformer
-              → SolutionDecoder → Solution
+        Q+CoT → Encoder → ConceptGenerator (training mode) → Concepts
+              → ConceptTransformer → SolutionDecoder → Solution
 
     Inference Path:
-        Q → Encoder → ConceptGenerator → Concepts → ConceptTransformer
-          → SolutionDecoder → Solution
+        Q → Encoder → ConceptGenerator (inference mode) → Concepts
+          → ConceptTransformer → SolutionDecoder → Solution
 
     Key Difference from V2:
     - V2: Decoder outputs CoT tokens
     - V3: Decoder outputs Solution tokens directly (no CoT!)
 
-COMPONENTS:
-    - encoder: NLCPV3Encoder (Qwen2.5-based)
-    - attentive_pooling: Training-only concept extraction
-    - concept_generator: Inference-only concept generation
-    - concept_transformer: VAR-style concept refinement
-    - solution_decoder: Direct solution decoding (NOT CoT!)
+    Key Design (inspired by VAR):
+    - ConceptGenerator shares parameters between training and inference
+    - Training: Extracts concepts from CoT using various strategies
+    - Inference: Generates concepts from Q using shared queries
 """
 
 import torch
@@ -50,8 +48,10 @@ from typing import Optional
 
 from nlcpV3.config import NLCPV3Config
 from nlcpV3.encoder import NLCPV3Encoder
-from nlcpV3.attentive_pooling import ResidualAttentivePooling
-from nlcpV3.concept_generator import ConceptGenerator
+from nlcpV3.concept_generator import (
+    ConceptGenerator,
+    ResidualAttentivePoolingConceptGenerator,
+)
 from nlcpV3.concept_transformer import ConceptTransformer
 from nlcpV3.token_decoder import SolutionDecoder
 
@@ -61,13 +61,13 @@ class NLCPV3Model(nn.Module):
 
     PURPOSE:
         Complete model for V3 architecture. Handles both training
-        (with CoT) and inference (without CoT) modes.
+        (with CoT) and inference (without CoT) modes using unified
+        ConceptGenerator that shares parameters between modes.
 
     ATTRIBUTES:
         config: NLCPV3Config instance
         encoder: Text encoder (Qwen2.5-based)
-        attentive_pooling: Training-only concept extraction
-        concept_generator: Inference-only concept generation
+        concept_generator: Unified concept extraction/generation
         concept_transformer: Concept refinement with level-level causality
         solution_decoder: Direct solution decoder (key difference from V2!)
 
@@ -95,10 +95,8 @@ class NLCPV3Model(nn.Module):
         self.encoder = NLCPV3Encoder(config)
         encoder_hidden_dim = self.encoder.get_encoder_hidden_dim()
 
-        # Concept extraction (training only)
-        self.attentive_pooling = ResidualAttentivePooling(config, encoder_hidden_dim)
-
-        # Concept generation (inference only)
+        # Unified Concept Generator (training & inference)
+        # Shares concept_queries between training extraction and inference generation
         self.concept_generator = ConceptGenerator(config, encoder_hidden_dim)
 
         # Concept transformer (shared)
@@ -150,9 +148,12 @@ class NLCPV3Model(nn.Module):
             q_cot_input_ids, q_cot_attention_mask
         )  # [B, L, D_encoder]
 
-        # Step 2: Extract concepts from CoT (training only)
-        concepts, H_hat, H_rest = self.attentive_pooling(H)
+        # Step 2: Extract concepts from CoT (training mode)
+        concepts, aux = self.concept_generator.forward_training(
+            H, mode="residual_pooling"
+        )
         # concepts = [C_0, C_1, ..., C_K]
+        # aux contains H_hat, H_rest (like VAR's f_hat, f_rest)
 
         # Step 3: Refine concepts
         refined_concepts = self.concept_transformer(concepts)
@@ -167,8 +168,8 @@ class NLCPV3Model(nn.Module):
             "logits": logits,
             "concepts": concepts,
             "refined_concepts": refined_concepts,
-            "H_hat": H_hat,
-            "H_rest": H_rest,
+            "H_hat": aux.get("H_hat"),
+            "H_rest": aux.get("H_rest"),
         }
 
     def forward_inference(
@@ -182,7 +183,7 @@ class NLCPV3Model(nn.Module):
 
         PURPOSE:
             Inference forward pass with Q only (no CoT!).
-            Uses ConceptGenerator to generate concepts from Q.
+            Uses ConceptGenerator (inference mode) to generate concepts from Q.
 
         DIMENSION FLOW:
             Input:
@@ -212,8 +213,8 @@ class NLCPV3Model(nn.Module):
             q_input_ids, q_attention_mask
         )  # [B, L', D_encoder]
 
-        # Step 2: Generate concepts from Q (inference only)
-        concepts = self.concept_generator(H)
+        # Step 2: Generate concepts from Q (inference mode)
+        concepts = self.concept_generator.inference_generator(H)
         # concepts = [C_0, C_1, ..., C_K]
 
         # Step 3: Refine concepts
