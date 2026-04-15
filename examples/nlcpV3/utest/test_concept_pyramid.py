@@ -2,7 +2,7 @@
 
 USAGE:
     # Run from project root with config file:
-    python examples/nlcpV3/utest/test_concept_pyramid.py -c configs/nlcpV3/utest/test_encoder_pooling.yml
+    python examples/nlcpV3/utest/test_concept_pyramid.py -c configs/nlcpV2/utest/test_concept_pyramid.yml
 
 DESIGN SOURCE:
     Reference: docs/concept-pyramid-V3.md
@@ -34,10 +34,15 @@ PURPOSE:
 TEST COVERAGE:
     - All generators produce correct output shapes
     - forward(encoder_hidden_states) for all levels (training mode)
-    - forward(encoder_hidden_states, target_level_index=k) for single level (inference mode)
-    - forward_next_level() for step-by-step generation
+    - forward(encoder_hidden_states, target_level_index=k, previous_level_concepts=[...])
+      for single level (inference mode, only for generators with forward_next_level implemented)
+    - forward_next_level() for step-by-step generation (only for implemented generators)
     - Dimension flow: [B, L, D_encoder] -> [B, L_k, D] for each level
     - GSM8K real data integration
+
+NOTE:
+    Generators without forward_next_level() implementation are skipped for single-level tests.
+    Only ResidualAttentivePoolingConceptGenerator currently implements the full next-level interface.
 """
 
 import argparse
