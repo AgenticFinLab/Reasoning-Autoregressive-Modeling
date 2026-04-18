@@ -1,7 +1,7 @@
 # =============================================================================
 # NLCP V3 Hybrid Concept Generator Test Configuration
 # =============================================================================
-# Purpose: Configuration for testing HybridConceptGenerator
+# Purpose: Dedicated configuration for test_hybrid_generator.py unit tests
 # Usage: python examples/nlcpV3/utest/test_hybrid_generator.py -c configs/nlcpV3/utest/test_hybrid_generator.yml
 #
 # Hybrid Generator Design:
@@ -9,9 +9,12 @@
 #   1. ResidualAttentivePooling - VAR-style residual decomposition (backbone)
 #   2. MonotonicSoftAssignment - Cross-attention context accumulation (bridge)
 #   3. AutoregressiveSoftBoundary - Boundary ordering constraint (auxiliary)
+#
+# Test Output:
+#   Terminal output is saved to: log.log_path/terminal_out.txt
 # =============================================================================
 
-# Data configuration (minimal for testing)
+# Data configuration for GSM8K integration tests
 data:
   data_name: "GSM8K"
   data_path: "EXPERIMENT/data/GSM8K"
@@ -28,7 +31,7 @@ environment:
       device: "auto"
       priority: 1
 
-# NLCP V3 Configuration (used by test_hybrid_generator.py)
+# NLCP V3 Configuration - strictly for HybridConceptGenerator testing
 nlcpV3:
   # Concept space dimensions
   hidden_dim: 256
@@ -55,6 +58,27 @@ nlcpV3:
   recon_loss_weight: 0.1
   muP_scale: 1.0
 
+# Hybrid Concept Generator specific parameters
+hybrid_generator:
+  # Encoder hidden dimension (from Qwen2.5-0.5B)
+  encoder_hidden_dim: 896
+  # Ordering loss weight (lambda_order)
+  order_loss_weight: 0.1
+  # Ordering constraint margin
+  order_margin: 1.0
+
+# Test configuration
+test:
+  # Batch sizes for different test scenarios
+  default_batch_size: 2
+  default_seq_len: 128
+  # GSM8K integration test samples
+  gsm8k_max_samples: 3
+  # Edge case test parameters
+  edge_cases:
+    batch_sizes: [1, 2]
+    seq_lens: [16, 64, 128, 256]
+
 # Training configuration (minimal for testing)
 training:
   batch_size: 4
@@ -69,11 +93,11 @@ training:
   bf16: true
   resume: null
 
-# Log configuration
+# Log configuration - terminal output saved to log_path/terminal_out.txt
 log:
-  save_folder: "EXPERIMENT/nlcpV3/utest"
-  checkpoint_path: "EXPERIMENT/nlcpV3/utest/checkpoints"
-  log_path: "EXPERIMENT/nlcpV3/utest/logs"
+  save_folder: "EXPERIMENT/nlcpV3/utest/hybrid_generator"
+  checkpoint_path: "EXPERIMENT/nlcpV3/utest/hybrid_generator/checkpoints"
+  log_path: "EXPERIMENT/nlcpV3/utest/hybrid_generator/logs"
   log_level: "INFO"
   checkpoint_step_interval: 100
   log_step_interval: 10

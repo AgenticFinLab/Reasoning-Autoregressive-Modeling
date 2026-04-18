@@ -2,7 +2,7 @@
 
 USAGE:
     # Run from project root:
-    python examples/nlcpV3/utest/test_hybrid_generator.py -c configs/nlcpV2/utest/test_concept_pyramid.yml
+    python examples/nlcpV3/utest/test_hybrid_generator.py -c configs/nlcpV3/utest/test_hybrid_generator.yml
 
     # Run specific test:
     python examples/nlcpV3/utest/test_hybrid_generator.py -c <config> --test training
@@ -36,6 +36,9 @@ DIMENSION SPECIFICATIONS:
         A_k:           [B, L_k, L]        (attention weights)
         C_k:           [B, L_k, D]        (extracted concepts)
         H_recon_k:     [B, L, D]          (reconstruction from C_k)
+
+LOG OUTPUT:
+    Terminal output is saved to: log.log_path/terminal_out.txt
 """
 
 import argparse
@@ -61,6 +64,79 @@ from nlcpV3.config import NLCPV3Config
 from nlcpV3.encoder import NLCPV3Encoder
 from nlcpV3.concept_generator_hybrid import HybridConceptGenerator
 from ram.utils import load_config
+
+
+# =============================================================================
+# Terminal Output Logger
+# =============================================================================
+
+
+class TerminalLogger:
+    """Capture and save terminal output to file.
+
+    PURPOSE:
+        Redirect all stdout to both terminal and file for persistent logging.
+        Creates log_path/terminal_out.txt with complete test output.
+
+    USAGE:
+        with TerminalLogger(log_path):
+            run_tests()
+
+    ATTRIBUTES:
+        log_path: Directory where terminal_out.txt is saved
+        terminal: Original stdout for terminal display
+        log_file: File handle for writing output
+    """
+
+    def __init__(self, log_path: Path):
+        """Initialize terminal logger.
+
+        Args:
+            log_path: Directory path for saving terminal_out.txt
+        """
+        self.log_path = log_path
+        self.terminal = sys.stdout
+        self.log_file = None
+
+    def __enter__(self):
+        """Enter context manager: create log directory and open file."""
+        # Create log directory if it does not exist
+        self.log_path.mkdir(parents=True, exist_ok=True)
+
+        # Open terminal output file
+        log_file_path = self.log_path / "terminal_out.txt"
+        self.log_file = open(log_file_path, "w", encoding="utf-8")
+
+        # Redirect stdout to this logger
+        sys.stdout = self
+
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Exit context manager: restore stdout and close file."""
+        sys.stdout = self.terminal
+
+        if self.log_file:
+            self.log_file.close()
+
+        # Print summary of log file location
+        log_file_path = self.log_path / "terminal_out.txt"
+        print(f"\nTerminal output saved to: {log_file_path}")
+
+    def write(self, message: str):
+        """Write message to both terminal and log file."""
+        self.terminal.write(message)
+
+        if self.log_file:
+            self.log_file.write(message)
+            self.log_file.flush()
+
+    def flush(self):
+        """Flush both terminal and log file buffers."""
+        self.terminal.flush()
+
+        if self.log_file:
+            self.log_file.flush()
 
 
 # =============================================================================
@@ -109,26 +185,80 @@ class TestResults:
 
 
 def build_nlcpV3_config(config: dict) -> NLCPV3Config:
-    """Build NLCPV3Config from YAML configuration."""
-    nlcp_config = config.get("nlcpV3", {})
+    """Build NLCPV3Config from YAML configuration.
+
+    Args:
+        config: Configuration dictionary from YAML file
+
+    Returns:
+        NLCPV3Config instance with all parameters explicitly set
+    """
+    nlcp_config = config["nlcpV3"]
 
     return NLCPV3Config(
-        hidden_dim=nlcp_config.get("hidden_dim", 256),
-        num_heads=nlcp_config.get("num_heads", 8),
-        vocab_size=nlcp_config.get("vocab_size", 151936),
-        num_levels=nlcp_config.get("num_levels", 6),
-        level_lengths=nlcp_config.get("level_lengths", [1, 2, 4, 8, 16, 32]),
-        max_seq_len=nlcp_config.get("max_seq_len", 512),
-        dropout=nlcp_config.get("dropout", 0.1),
-        rms_norm_eps=nlcp_config.get("rms_norm_eps", 1e-6),
-        encoder_model_name=nlcp_config.get("encoder_model_name", "Qwen/Qwen2.5-0.5B"),
-        encoder_num_layers=nlcp_config.get("encoder_num_layers", 4),
-        encoder_freeze=nlcp_config.get("encoder_freeze", True),
-        ntp_loss_weight=nlcp_config.get("ntp_loss_weight", 1.0),
-        concept_loss_weight=nlcp_config.get("concept_loss_weight", 0.1),
-        recon_loss_weight=nlcp_config.get("recon_loss_weight", 0.1),
-        muP_scale=nlcp_config.get("muP_scale", 1.0),
+        hidden_dim=nlcp_config["hidden_dim"],
+        num_heads=nlcp_config["num_heads"],
+        vocab_size=nlcp_config["vocab_size"],
+        num_levels=nlcp_config["num_levels"],
+        level_lengths=nlcp_config["level_lengths"],
+        max_seq_len=nlcp_config["max_seq_len"],
+        dropout=nlcp_config["dropout"],
+        rms_norm_eps=nlcp_config["rms_norm_eps"],
+        encoder_model_name=nlcp_config["encoder_model_name"],
+        encoder_num_layers=nlcp_config["encoder_num_layers"],
+        encoder_freeze=nlcp_config["encoder_freeze"],
+        ntp_loss_weight=nlcp_config["ntp_loss_weight"],
+        concept_loss_weight=nlcp_config["concept_loss_weight"],
+        recon_loss_weight=nlcp_config["recon_loss_weight"],
+        muP_scale=nlcp_config["muP_scale"],
     )
+
+
+def get_hybrid_generator_params(config: dict) -> dict:
+    """Extract HybridConceptGenerator parameters from config.
+
+    Args:
+        config: Configuration dictionary from YAML file
+
+    Returns:
+        Dictionary with encoder_hidden_dim, order_loss_weight, order_margin
+    """
+    hybrid_config = config["hybrid_generator"]
+    return {
+        "encoder_hidden_dim": hybrid_config["encoder_hidden_dim"],
+        "order_loss_weight": hybrid_config["order_loss_weight"],
+        "order_margin": hybrid_config["order_margin"],
+    }
+
+
+def get_test_params(config: dict) -> dict:
+    """Extract test parameters from config.
+
+    Args:
+        config: Configuration dictionary from YAML file
+
+    Returns:
+        Dictionary with test configuration parameters
+    """
+    test_config = config["test"]
+    return {
+        "default_batch_size": test_config["default_batch_size"],
+        "default_seq_len": test_config["default_seq_len"],
+        "gsm8k_max_samples": test_config["gsm8k_max_samples"],
+    }
+
+
+def get_log_path(config: dict) -> Path:
+    """Get log path from config.
+
+    Args:
+        config: Configuration dictionary from YAML file
+
+    Returns:
+        Path object for log directory
+    """
+    log_config = config["log"]
+    return Path(log_config["log_path"])
 
 
 # =============================================================================
@@ -137,14 +267,30 @@ def build_nlcpV3_config(config: dict) -> NLCPV3Config:
 
 
 def test_constructor(
-    config: NLCPV3Config, results: TestResults
+    config: NLCPV3Config,
+    hybrid_params: dict,
+    results: TestResults,
 ) -> HybridConceptGenerator:
-    """Test HybridConceptGenerator constructor and parameter initialization."""
+    """Test HybridConceptGenerator constructor and parameter initialization.
+
+    Args:
+        config: NLCPV3Config instance
+        hybrid_params: Dictionary with encoder_hidden_dim, order_loss_weight, order_margin
+        results: TestResults tracker
+
+    Returns:
+        Initialized HybridConceptGenerator
+    """
     print("\n--- Test: Constructor ---")
 
     try:
-        encoder_hidden_dim = 896
-        generator = HybridConceptGenerator(config, encoder_hidden_dim, 0.1, 1.0)
+        encoder_hidden_dim = hybrid_params["encoder_hidden_dim"]
+        order_loss_weight = hybrid_params["order_loss_weight"]
+        order_margin = hybrid_params["order_margin"]
+
+        generator = HybridConceptGenerator(
+            config, encoder_hidden_dim, order_loss_weight, order_margin
+        )
 
         # Check attributes
         assert generator.config == config, "Config mismatch"
@@ -564,7 +710,9 @@ def test_gsm8k_integration(
                 )
             else:
                 question = sample["question"]
-                cot = sample.get("cot_answer", sample.get("answer", ""))
+                cot = (
+                    sample["cot_answer"] if "cot_answer" in sample else sample["answer"]
+                )
 
             # Tokenize
             text = f"Question: {question}\nCoT: {cot}"
@@ -605,71 +753,96 @@ def test_gsm8k_integration(
 
 
 def run_all_tests(config_path: str, specific_test: Optional[str]):
-    """Run all tests or a specific test."""
-    print("=" * 60)
-    print("HybridConceptGenerator Comprehensive Test Suite")
-    print("=" * 60)
+    """Run all tests or a specific test with terminal logging.
 
-    # Load configuration
+    Args:
+        config_path: Path to YAML configuration file
+        specific_test: Specific test to run, or None for all tests
+
+    Returns:
+        True if all tests passed, False otherwise
+    """
+    # Load configuration first (before logging starts)
     config_dict = load_config(config_path)
     config = build_nlcpV3_config(config_dict)
 
-    print(f"\nConfiguration:")
-    print(f"  hidden_dim: {config.hidden_dim}")
-    print(f"  num_levels: {config.num_levels}")
-    print(f"  level_lengths: {config.level_lengths}")
-    print(f"  encoder_model: {config.encoder_model_name}")
+    # Get log path and initialize terminal logger
+    log_path = get_log_path(config_dict)
 
-    results = TestResults()
+    # Run tests with terminal output captured to file
+    with TerminalLogger(log_path):
+        print("=" * 60)
+        print("HybridConceptGenerator Comprehensive Test Suite")
+        print("=" * 60)
 
-    try:
-        # Test constructor
-        if specific_test is None or specific_test == "constructor":
-            generator = test_constructor(config, results)
+        print(f"\nConfiguration:")
+        print(f"  hidden_dim: {config.hidden_dim}")
+        print(f"  num_levels: {config.num_levels}")
+        print(f"  level_lengths: {config.level_lengths}")
+        print(f"  encoder_model: {config.encoder_model_name}")
 
-        # Skip other tests if only testing constructor
-        if specific_test == "constructor":
-            print(results.summary())
-            return len(results.failed) == 0
+        # Get hybrid generator parameters from config
+        hybrid_params = get_hybrid_generator_params(config_dict)
+        print(f"  encoder_hidden_dim: {hybrid_params['encoder_hidden_dim']}")
+        print(f"  order_loss_weight: {hybrid_params['order_loss_weight']}")
+        print(f"  order_margin: {hybrid_params['order_margin']}")
 
-        # Re-create generator for other tests
-        generator = HybridConceptGenerator(
-            config, encoder_hidden_dim=896, order_loss_weight=0.1, order_margin=1.0
-        )
+        results = TestResults()
 
-        # Test training mode
-        if specific_test is None or specific_test == "training":
-            test_training_mode(generator, config, results)
+        try:
+            # Test constructor
+            if specific_test is None or specific_test == "constructor":
+                generator = test_constructor(config, hybrid_params, results)
 
-        # Test inference mode
-        if specific_test is None or specific_test == "inference":
-            test_inference_mode(generator, config, results)
+            # Skip other tests if only testing constructor
+            if specific_test == "constructor":
+                print(results.summary())
+                return len(results.failed) == 0
 
-        # Test forward_next_level
-        if specific_test is None or specific_test == "next_level":
-            test_forward_next_level(generator, config, results)
+            # Re-create generator for other tests using config parameters
+            generator = HybridConceptGenerator(
+                config,
+                hybrid_params["encoder_hidden_dim"],
+                hybrid_params["order_loss_weight"],
+                hybrid_params["order_margin"],
+            )
 
-        # Test gradient flow
-        if specific_test is None or specific_test == "gradient":
-            test_gradient_flow(generator, config, results)
+            # Test training mode
+            if specific_test is None or specific_test == "training":
+                test_training_mode(generator, config, results)
 
-        # Test edge cases
-        if specific_test is None or specific_test == "edge":
-            test_edge_cases(generator, config, results)
+            # Test inference mode
+            if specific_test is None or specific_test == "inference":
+                test_inference_mode(generator, config, results)
 
-        # Test GSM8K integration
-        if specific_test is None or specific_test == "gsm8k":
-            test_gsm8k_integration(config, config_dict, results, 3)
+            # Test forward_next_level
+            if specific_test is None or specific_test == "next_level":
+                test_forward_next_level(generator, config, results)
 
-    except Exception as e:
-        print(f"\nFatal error: {e}")
-        traceback.print_exc()
-        return False
+            # Test gradient flow
+            if specific_test is None or specific_test == "gradient":
+                test_gradient_flow(generator, config, results)
 
-    # Print summary
-    print(results.summary())
+            # Test edge cases
+            if specific_test is None or specific_test == "edge":
+                test_edge_cases(generator, config, results)
 
-    return len(results.failed) == 0
+            # Test GSM8K integration
+            if specific_test is None or specific_test == "gsm8k":
+                test_params = get_test_params(config_dict)
+                test_gsm8k_integration(
+                    config, config_dict, results, test_params["gsm8k_max_samples"]
+                )
+
+        except Exception as e:
+            print(f"\nFatal error: {e}")
+            traceback.print_exc()
+            return False
+
+        # Print summary
+        print(results.summary())
+
+        return len(results.failed) == 0
 
 
 # =============================================================================
