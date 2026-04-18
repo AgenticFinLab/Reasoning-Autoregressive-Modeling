@@ -1,24 +1,20 @@
 """NLCP V3: Implicit Reasoning via Hierarchical Concept Compression.
 
 USAGE:
-    from nlcpV3 import NLCPV3Config, NLCPV3Model, ConceptGenerator
-
-    # Unified interface
-    config = NLCPV3Config(...)
-    generator = ConceptGenerator(config, encoder_hidden_dim=896)
-    concepts, aux = generator.forward_training(H_cot, method='residual_pooling')
-    concepts = generator.forward_inference(H_q)
+    from nlcpV3 import NLCPV3Config, NLCPV3Model
 
     # Individual extractors (for standalone use)
     from nlcpV3 import (
-        ResidualAttentivePooling,
-        PositionConstrainedExtractor,
-        HardOrderedMaskExtractor,
-        RecursiveOrderedExtractor,
-        OrderConstrainedTraining,
-        AutoregressiveGenerator,
+        ResidualAttentivePoolingConceptGenerator,
+        PositionConstrainedConceptGenerator,
+        HardOrderedMaskConceptGenerator,
+        RecursiveOrderedConceptGenerator,
+        OrderConstrainedTrainingConceptGenerator,
+        RobustOrderedConceptGenerator,
+        AutoregressiveConceptGenerator,
     )
-    extractor = ResidualAttentivePooling(config, encoder_hidden_dim)
+    config = NLCPV3Config(...)
+    extractor = ResidualAttentivePoolingConceptGenerator(config, encoder_hidden_dim)
     concepts, aux = extractor(H_cot)
 
 DESIGN SOURCE:
@@ -36,7 +32,6 @@ MODULE STRUCTURE:
     - encoder: Qwen2.5-based encoder for Q+CoT (train) / Q (inference)
     - concept_generator: Training & inference methods
         * Individual extractors (standalone, trainable classes)
-        * ConceptGenerator (unified interface)
     - concept_transformer: VAR-style transformer with level-level causality
     - token_decoder: Decodes concepts directly to solution (NOT CoT!)
     - model: NLCPV3Model integrating all components
@@ -49,7 +44,6 @@ KEY DIFFERENCE FROM V2:
 from nlcpV3.config import NLCPV3Config
 from nlcpV3.encoder import NLCPV3Encoder
 from nlcpV3.concept_generator import (
-    ConceptGenerator,
     BaseConceptGenerator,
     # Basic training extractors
     ResidualAttentivePoolingConceptGenerator,
@@ -75,8 +69,6 @@ __all__ = [
     # Core components
     "NLCPV3Config",
     "NLCPV3Encoder",
-    # Unified concept generator
-    "ConceptGenerator",
     # Base class
     "BaseConceptGenerator",
     # Basic training extractors (standalone use)

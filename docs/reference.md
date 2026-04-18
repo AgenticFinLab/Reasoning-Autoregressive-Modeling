@@ -53,6 +53,8 @@ with Fused Information in Latent Tokens
 - Latent Thinking Optimization: Your Latent Reasoning Language Model Secretly Encodes Reward Signals in Its Latent Thoughts
 
 
+- Rethinking LLM Reasoning: From Explicit Trajectories to Latent Representations
+
 
 scp -r sjia@10.123.4.30:/home/sjia/projects/Reasoning-Autoregressive-Modeling/EXPERIMENT/uTEST-ed_train/logs ./EXPERIMENT/uTEST-ed_train/logs
 

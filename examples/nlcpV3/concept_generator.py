@@ -524,29 +524,100 @@ class PositionConstrainedConceptGenerator(BaseConceptGenerator):
         centers, _ = torch.sort(centers)
         return centers
 
-    def forward(self, H: torch.Tensor) -> Tuple[List[torch.Tensor], Dict[str, Any]]:
+    def forward_next_level(
+        self,
+        encoder_hidden_states: torch.Tensor,
+        previous_level_concepts: Optional[List[torch.Tensor]],
+        target_level_index: int,
+    ) -> torch.Tensor:
+        """Generate concepts for next level with position constraints.
+
+        DIMENSION FLOW:
+            Input:
+                encoder_hidden_states: [B, L, D_encoder]
+                previous_level_concepts: Not used for this method (independent per level)
+                target_level_index: Target level to generate
+
+            Output:
+                level_concepts: [B, L_k, D]
+        """
+        batch_size, seq_len, _ = encoder_hidden_states.shape
+        projected_hidden = self.input_proj(encoder_hidden_states)  # [B, L, D]
+
+        centers = self._get_sorted_centers(seq_len)
+        positions = torch.arange(
+            seq_len, device=encoder_hidden_states.device, dtype=torch.float32
+        )
+
+        # Get queries for target level
+        level_queries = self.concept_queries[target_level_index]
+        num_concepts = level_queries.shape[0]
+
+        # Expand queries
+        expanded_queries = level_queries.unsqueeze(0).expand(
+            batch_size, -1, -1
+        )  # [B, L_k, D]
+
+        # Base scores
+        attention_scores = torch.bmm(expanded_queries, projected_hidden.transpose(1, 2))
+        attention_scores = attention_scores / math.sqrt(self.config.hidden_dim)
+
+        # Position prior
+        center = centers[target_level_index]
+        distance = torch.abs(positions - center)
+        log_prior = -distance / self.temperature
+
+        # Combine
+        biased_scores = attention_scores + log_prior.view(1, 1, seq_len)
+        level_attention = F.softmax(biased_scores, dim=-1)
+
+        # Extract concepts
+        level_concepts = torch.bmm(level_attention, projected_hidden)
+
+        return level_concepts
+
+    def forward(
+        self,
+        encoder_hidden_states: torch.Tensor,
+        target_level_index: Optional[int] = None,
+        previous_level_concepts: Optional[List[torch.Tensor]] = None,
+    ) -> Tuple[Union[List[torch.Tensor], torch.Tensor], Dict[str, Any]]:
         """Extract with position constraints.
 
         DIMENSION FLOW:
-            Input: H [B, L, D_encoder]
-            Project: H_proj [B, L, D]
+            Input: encoder_hidden_states [B, L, D_encoder]
+            Project: projected_hidden [B, L, D]
             Centers: c_k [K] (learnable, sorted)
 
             For each level k:
-                scores = Q_k @ H_proj^T
+                scores = Q_k @ projected_hidden^T
                 prior = exp(-|positions - c_k| / T)
                 A_k = softmax(scores + log_prior)
-                C_k = A_k @ H_proj
+                C_k = A_k @ projected_hidden
 
             Output:
                 concepts: [C_0, ..., C_K]
                 aux: {'expected_positions': [...], 'centers': [...]}
         """
-        batch_size, L, _ = H.shape
-        H_proj = self.input_proj(H)  # [B, L, D]
+        # Single level mode
+        if target_level_index is not None:
+            level_concepts = self.forward_next_level(
+                encoder_hidden_states, previous_level_concepts, target_level_index
+            )
+            aux = {
+                "target_level_index": target_level_index,
+                "method": "position_constrained",
+            }
+            return level_concepts, aux
 
-        centers = self._get_sorted_centers(L)
-        positions = torch.arange(L, device=H.device, dtype=torch.float32)
+        # All levels mode
+        batch_size, seq_len, _ = encoder_hidden_states.shape
+        projected_hidden = self.input_proj(encoder_hidden_states)  # [B, L, D]
+
+        centers = self._get_sorted_centers(seq_len)
+        positions = torch.arange(
+            seq_len, device=encoder_hidden_states.device, dtype=torch.float32
+        )
 
         concepts = []
         expected_positions = []
@@ -558,7 +629,7 @@ class PositionConstrainedConceptGenerator(BaseConceptGenerator):
             Q = Q_k.unsqueeze(0).expand(batch_size, -1, -1)  # [B, L_k, D]
 
             # Base scores
-            scores = torch.bmm(Q, H_proj.transpose(1, 2)) / math.sqrt(
+            scores = torch.bmm(Q, projected_hidden.transpose(1, 2)) / math.sqrt(
                 self.config.hidden_dim
             )
 
@@ -568,15 +639,15 @@ class PositionConstrainedConceptGenerator(BaseConceptGenerator):
             log_prior = -distance / self.temperature
 
             # Combine
-            biased_scores = scores + log_prior.view(1, 1, L)
+            biased_scores = scores + log_prior.view(1, 1, seq_len)
             A_k = F.softmax(biased_scores, dim=-1)
 
             # Extract
-            C_k = torch.bmm(A_k, H_proj)
+            C_k = torch.bmm(A_k, projected_hidden)
             concepts.append(C_k)
 
             # Track expected position
-            exp_pos = torch.sum(A_k * positions.view(1, 1, L), dim=-1).mean()
+            exp_pos = torch.sum(A_k * positions.view(1, 1, seq_len), dim=-1).mean()
             expected_positions.append(exp_pos.item())
 
         aux = {
@@ -648,16 +719,77 @@ class HardOrderedMaskConceptGenerator(BaseConceptGenerator):
         mask = mask / (mask.sum(dim=1, keepdim=True) + 1e-10)
         return mask
 
-    def forward(self, H: torch.Tensor) -> Tuple[List[torch.Tensor], Dict[str, Any]]:
+    def forward_next_level(
+        self,
+        encoder_hidden_states: torch.Tensor,
+        previous_level_concepts: Optional[List[torch.Tensor]],
+        target_level_index: int,
+    ) -> torch.Tensor:
+        """Generate concepts for next level with hard ordered mask.
+
+        DIMENSION FLOW:
+            Input:
+                encoder_hidden_states: [B, L, D_encoder]
+                previous_level_concepts: Not used for this method
+                target_level_index: Target level to generate
+
+            Output:
+                level_concepts: [B, L_k, D]
+        """
+        batch_size, seq_len, _ = encoder_hidden_states.shape
+        projected_hidden = self.input_proj(encoder_hidden_states)
+
+        # Get queries for target level
+        level_queries = self.concept_queries[target_level_index]
+        num_concepts = level_queries.shape[0]
+
+        # Create mask for this level
+        mask = self._create_ordered_mask(
+            num_concepts, seq_len, encoder_hidden_states.device
+        )
+
+        # Expand queries
+        expanded_queries = level_queries.unsqueeze(0).expand(batch_size, -1, -1)
+        attention_scores = torch.bmm(expanded_queries, projected_hidden.transpose(1, 2))
+        attention_scores = attention_scores / math.sqrt(self.config.hidden_dim)
+
+        # Apply mask
+        log_mask = torch.log(mask.unsqueeze(0) + 1e-10)
+        biased_scores = attention_scores + log_mask
+        level_attention = F.softmax(biased_scores, dim=-1)
+
+        # Extract concepts
+        level_concepts = torch.bmm(level_attention, projected_hidden)
+
+        return level_concepts
+
+    def forward(
+        self,
+        encoder_hidden_states: torch.Tensor,
+        target_level_index: Optional[int] = None,
+        previous_level_concepts: Optional[List[torch.Tensor]] = None,
+    ) -> Tuple[Union[List[torch.Tensor], torch.Tensor], Dict[str, Any]]:
         """Extract with ordered mask.
 
         DIMENSION FLOW:
-            Input: H [B, L, D_encoder]
+            Input: encoder_hidden_states [B, L, D_encoder]
             Create mask: [L_k, L] for each level
             Apply mask to attention
         """
-        batch_size, L, _ = H.shape
-        H_proj = self.input_proj(H)
+        # Single level mode
+        if target_level_index is not None:
+            level_concepts = self.forward_next_level(
+                encoder_hidden_states, previous_level_concepts, target_level_index
+            )
+            aux = {
+                "target_level_index": target_level_index,
+                "method": "hard_ordered_mask",
+            }
+            return level_concepts, aux
+
+        # All levels mode
+        batch_size, seq_len, _ = encoder_hidden_states.shape
+        projected_hidden = self.input_proj(encoder_hidden_states)
 
         concepts = []
         all_masks = []
@@ -667,11 +799,11 @@ class HardOrderedMaskConceptGenerator(BaseConceptGenerator):
             L_k = Q_k.shape[0]
 
             # Create mask for this level
-            mask = self._create_ordered_mask(L_k, L, H.device)  # [L_k, L]
+            mask = self._create_ordered_mask(L_k, seq_len, encoder_hidden_states.device)
             all_masks.append(mask)
 
             Q = Q_k.unsqueeze(0).expand(batch_size, -1, -1)
-            scores = torch.bmm(Q, H_proj.transpose(1, 2)) / math.sqrt(
+            scores = torch.bmm(Q, projected_hidden.transpose(1, 2)) / math.sqrt(
                 self.config.hidden_dim
             )
 
@@ -680,7 +812,7 @@ class HardOrderedMaskConceptGenerator(BaseConceptGenerator):
             biased_scores = scores + log_mask
             A_k = F.softmax(biased_scores, dim=-1)
 
-            C_k = torch.bmm(A_k, H_proj)
+            C_k = torch.bmm(A_k, projected_hidden)
             concepts.append(C_k)
 
         aux = {
@@ -734,7 +866,55 @@ class RecursiveOrderedConceptGenerator(BaseConceptGenerator):
             nn.Linear(config.hidden_dim, config.hidden_dim),
         )
 
-    def forward(self, H: torch.Tensor) -> Tuple[List[torch.Tensor], Dict[str, Any]]:
+    def forward_next_level(
+        self,
+        encoder_hidden_states: torch.Tensor,
+        previous_level_concepts: Optional[List[torch.Tensor]],
+        target_level_index: int,
+    ) -> torch.Tensor:
+        """Generate concepts for next level using recursive masking.
+
+        DIMENSION FLOW:
+            Input:
+                encoder_hidden_states: [B, L, D_encoder]
+                previous_level_concepts: Not used (each level independent)
+                target_level_index: Target level to generate
+
+            Output:
+                level_concepts: [B, L_k, D]
+        """
+        batch_size, seq_len, _ = encoder_hidden_states.shape
+        projected_hidden = self.input_proj(encoder_hidden_states)
+
+        # Initialize remaining mask
+        remaining_mask = torch.ones(
+            batch_size, seq_len, device=encoder_hidden_states.device
+        )
+
+        # Get queries for target level
+        level_queries = self.concept_queries[target_level_index]
+
+        # Expand queries
+        expanded_queries = level_queries.unsqueeze(0).expand(batch_size, -1, -1)
+
+        # Compute scores with mask
+        attention_scores = torch.bmm(expanded_queries, projected_hidden.transpose(1, 2))
+        attention_scores = attention_scores.masked_fill(
+            remaining_mask.unsqueeze(1) < 0.5, float("-inf")
+        )
+        level_attention = F.softmax(attention_scores, dim=-1)
+
+        # Extract concepts
+        level_concepts = torch.bmm(level_attention, projected_hidden)
+
+        return level_concepts
+
+    def forward(
+        self,
+        encoder_hidden_states: torch.Tensor,
+        target_level_index: Optional[int] = None,
+        previous_level_concepts: Optional[List[torch.Tensor]] = None,
+    ) -> Tuple[Union[List[torch.Tensor], torch.Tensor], Dict[str, Any]]:
         """Extract recursively with remaining mask.
 
         DIMENSION FLOW:
@@ -744,33 +924,48 @@ class RecursiveOrderedConceptGenerator(BaseConceptGenerator):
                 Extract C_i
                 Update remaining_mask
         """
-        batch_size, L, _ = H.shape
-        H_proj = self.input_proj(H)
+        # Single level mode
+        if target_level_index is not None:
+            level_concepts = self.forward_next_level(
+                encoder_hidden_states, previous_level_concepts, target_level_index
+            )
+            aux = {
+                "target_level_index": target_level_index,
+                "method": "recursive_ordered",
+            }
+            return level_concepts, aux
 
-        remaining_mask = torch.ones(batch_size, L, device=H.device)
+        # All levels mode
+        batch_size, seq_len, _ = encoder_hidden_states.shape
+        projected_hidden = self.input_proj(encoder_hidden_states)
+
+        remaining_mask = torch.ones(
+            batch_size, seq_len, device=encoder_hidden_states.device
+        )
         concepts = []
         remaining_history = []
 
         for level_idx in range(self.config.num_levels):
             Q_k = self.concept_queries[level_idx]
-            L_k = Q_k.shape[0]
+            L_k = Q_k.shape[0]  # Number of concepts for this level
 
-            # Use first query for this level (simplified)
-            Q = Q_k[0:1].unsqueeze(0).expand(batch_size, -1, -1)  # [B, 1, D]
+            # Use all queries for this level
+            Q = Q_k.unsqueeze(0).expand(batch_size, -1, -1)  # [B, L_k, D]
 
-            # Compute scores with mask
-            scores = torch.bmm(Q, H_proj.transpose(1, 2)).squeeze(1)  # [B, L]
-            scores = scores.masked_fill(remaining_mask < 0.5, float("-inf"))
-            A_k = F.softmax(scores, dim=-1)  # [B, L]
+            # Compute scores with mask [B, L_k, L]
+            scores = torch.bmm(Q, projected_hidden.transpose(1, 2))
+            # Apply mask to all query positions
+            scores = scores.masked_fill(remaining_mask.unsqueeze(1) < 0.5, float("-inf"))
+            A_k = F.softmax(scores, dim=-1)  # [B, L_k, L]
 
-            # Extract concept (single concept per level for simplicity)
-            C_k = torch.bmm(A_k.unsqueeze(1), H_proj)  # [B, 1, D]
+            # Extract concepts for this level
+            C_k = torch.bmm(A_k, projected_hidden)  # [B, L_k, D]
             concepts.append(C_k)
 
-            # Update remaining mask
-            max_attn = A_k.max(dim=-1, keepdim=True)[0]
-            usage = (A_k > max_attn * self.usage_threshold).float()
-            remaining_mask = remaining_mask * (1 - usage * self.decay_rate)
+            # Update remaining mask (aggregate over all queries in this level)
+            max_attn = A_k.max(dim=1, keepdim=True)[0]  # [B, 1, L] - max over queries
+            usage = (A_k.max(dim=1, keepdim=True)[0] > max_attn * self.usage_threshold).float()
+            remaining_mask = remaining_mask * (1 - usage.squeeze(1) * self.decay_rate)
             remaining_history.append(remaining_mask.clone())
 
         aux = {
@@ -820,34 +1015,90 @@ class OrderConstrainedTrainingConceptGenerator(BaseConceptGenerator):
         violation = F.relu(pos_current - pos_next + self.order_margin)
         return violation.mean() * self.order_weight
 
-    def forward(self, H: torch.Tensor) -> Tuple[List[torch.Tensor], Dict[str, Any]]:
+    def forward_next_level(
+        self,
+        encoder_hidden_states: torch.Tensor,
+        previous_level_concepts: Optional[List[torch.Tensor]],
+        target_level_index: int,
+    ) -> torch.Tensor:
+        """Generate concepts for next level with order constraints.
+
+        DIMENSION FLOW:
+            Input:
+                encoder_hidden_states: [B, L, D_encoder]
+                previous_level_concepts: Not used (each level independent)
+                target_level_index: Target level to generate
+
+            Output:
+                level_concepts: [B, L_k, D]
+        """
+        batch_size, seq_len, _ = encoder_hidden_states.shape
+        projected_hidden = self.input_proj(encoder_hidden_states)
+
+        # Get queries for target level
+        level_queries = self.concept_queries[target_level_index]
+
+        # Expand queries
+        expanded_queries = level_queries.unsqueeze(0).expand(batch_size, -1, -1)
+
+        # Compute attention scores
+        attention_scores = torch.bmm(expanded_queries, projected_hidden.transpose(1, 2))
+        attention_scores = attention_scores / (
+            math.sqrt(self.config.hidden_dim) * self.temperature
+        )
+        level_attention = F.softmax(attention_scores, dim=-1)
+
+        # Extract concepts
+        level_concepts = torch.bmm(level_attention, projected_hidden)
+
+        return level_concepts
+
+    def forward(
+        self,
+        encoder_hidden_states: torch.Tensor,
+        target_level_index: Optional[int] = None,
+        previous_level_concepts: Optional[List[torch.Tensor]] = None,
+    ) -> Tuple[Union[List[torch.Tensor], torch.Tensor], Dict[str, Any]]:
         """Extract with order loss (computed externally).
 
         DIMENSION FLOW:
             Standard attention extraction
             Track expected positions for loss computation
         """
-        batch_size, L, _ = H.shape
-        H_proj = self.input_proj(H)
-        positions = torch.arange(L, device=H.device, dtype=torch.float32)
+        # Single level mode
+        if target_level_index is not None:
+            level_concepts = self.forward_next_level(
+                encoder_hidden_states, previous_level_concepts, target_level_index
+            )
+            aux = {
+                "target_level_index": target_level_index,
+                "method": "order_constrained",
+            }
+            return level_concepts, aux
+
+        # All levels mode
+        batch_size, seq_len, _ = encoder_hidden_states.shape
+        projected_hidden = self.input_proj(encoder_hidden_states)
+        positions = torch.arange(
+            seq_len, device=encoder_hidden_states.device, dtype=torch.float32
+        )
 
         concepts = []
         expected_positions = []
 
         for level_idx in range(self.config.num_levels):
             Q_k = self.concept_queries[level_idx]
-            L_k = Q_k.shape[0]
 
             Q = Q_k.unsqueeze(0).expand(batch_size, -1, -1)
-            scores = torch.bmm(Q, H_proj.transpose(1, 2))
+            scores = torch.bmm(Q, projected_hidden.transpose(1, 2))
             scores = scores / (math.sqrt(self.config.hidden_dim) * self.temperature)
             A_k = F.softmax(scores, dim=-1)
 
-            C_k = torch.bmm(A_k, H_proj)
+            C_k = torch.bmm(A_k, projected_hidden)
             concepts.append(C_k)
 
             # Track expected position
-            exp_pos = torch.sum(A_k * positions.view(1, 1, L), dim=-1).mean()
+            exp_pos = torch.sum(A_k * positions.view(1, 1, seq_len), dim=-1).mean()
             expected_positions.append(exp_pos)
 
         # Compute order loss
@@ -922,9 +1173,69 @@ class RobustOrderedConceptGenerator(BaseConceptGenerator):
         violation = F.relu(pos_current - pos_next + self.order_margin)
         return violation.mean() * self.order_weight
 
+    def forward_next_level(
+        self,
+        encoder_hidden_states: torch.Tensor,
+        previous_level_concepts: Optional[List[torch.Tensor]],
+        target_level_index: int,
+    ) -> torch.Tensor:
+        """Generate concepts for next level with robust ordering.
+
+        DIMENSION FLOW:
+            Input:
+                encoder_hidden_states: [B, L, D_encoder]
+                previous_level_concepts: Not used (each level independent)
+                target_level_index: Target level to generate
+
+            Output:
+                level_concepts: [B, L_k, D]
+        """
+        batch_size, seq_len, _ = encoder_hidden_states.shape
+        projected_hidden = self.input_proj(encoder_hidden_states)
+
+        # Get sorted centers
+        centers = self._get_sorted_centers(seq_len)
+        prior_weight = self.train_prior_weight
+
+        # Get positions
+        positions = torch.arange(
+            seq_len, device=encoder_hidden_states.device, dtype=torch.float32
+        )
+
+        # Get queries for target level
+        level_queries = self.concept_queries[target_level_index]
+
+        # Expand queries
+        expanded_queries = level_queries.unsqueeze(0).expand(batch_size, -1, -1)
+
+        # Compute attention scores
+        attention_scores = torch.bmm(
+            expanded_queries, projected_hidden.transpose(1, 2)
+        ) / math.sqrt(self.config.hidden_dim)
+
+        # Position prior
+        center = centers[target_level_index]
+        distance = torch.abs(positions - center)
+        position_bias = -distance / self.temperature
+
+        # Apply with appropriate weight
+        biased_scores = attention_scores + prior_weight * position_bias.view(
+            1, 1, seq_len
+        )
+        level_attention = F.softmax(biased_scores, dim=-1)
+
+        # Extract concepts
+        level_concepts = torch.bmm(level_attention, projected_hidden)
+
+        return level_concepts
+
     def forward(
-        self, H: torch.Tensor, training: bool = True
-    ) -> Tuple[List[torch.Tensor], Dict[str, Any]]:
+        self,
+        encoder_hidden_states: torch.Tensor,
+        target_level_index: Optional[int] = None,
+        previous_level_concepts: Optional[List[torch.Tensor]] = None,
+        training: bool = True,
+    ) -> Tuple[Union[List[torch.Tensor], torch.Tensor], Dict[str, Any]]:
         """Extract with robust ordering.
 
         DIMENSION FLOW:
@@ -933,11 +1244,22 @@ class RobustOrderedConceptGenerator(BaseConceptGenerator):
             Apply position bias (weak in training, strong in inference)
             Compute order loss
         """
-        batch_size, L, _ = H.shape
-        H_proj = self.input_proj(H)
-        positions = torch.arange(L, device=H.device, dtype=torch.float32)
+        # Single level mode
+        if target_level_index is not None:
+            level_concepts = self.forward_next_level(
+                encoder_hidden_states, previous_level_concepts, target_level_index
+            )
+            aux = {"target_level_index": target_level_index, "method": "robust_ordered"}
+            return level_concepts, aux
 
-        centers = self._get_sorted_centers(L)
+        # All levels mode
+        batch_size, seq_len, _ = encoder_hidden_states.shape
+        projected_hidden = self.input_proj(encoder_hidden_states)
+        positions = torch.arange(
+            seq_len, device=encoder_hidden_states.device, dtype=torch.float32
+        )
+
+        centers = self._get_sorted_centers(seq_len)
         prior_weight = self.train_prior_weight if training else self.infer_prior_weight
 
         concepts = []
@@ -945,10 +1267,9 @@ class RobustOrderedConceptGenerator(BaseConceptGenerator):
 
         for level_idx in range(self.config.num_levels):
             Q_k = self.concept_queries[level_idx]
-            L_k = Q_k.shape[0]
 
             Q = Q_k.unsqueeze(0).expand(batch_size, -1, -1)
-            scores = torch.bmm(Q, H_proj.transpose(1, 2)) / math.sqrt(
+            scores = torch.bmm(Q, projected_hidden.transpose(1, 2)) / math.sqrt(
                 self.config.hidden_dim
             )
 
@@ -958,14 +1279,14 @@ class RobustOrderedConceptGenerator(BaseConceptGenerator):
             position_bias = -distance / self.temperature
 
             # Apply with appropriate weight
-            biased_scores = scores + prior_weight * position_bias.view(1, 1, L)
+            biased_scores = scores + prior_weight * position_bias.view(1, 1, seq_len)
             A_k = F.softmax(biased_scores, dim=-1)
 
-            C_k = torch.bmm(A_k, H_proj)
+            C_k = torch.bmm(A_k, projected_hidden)
             concepts.append(C_k)
 
             # Track expected position
-            exp_pos = torch.sum(A_k * positions.view(1, 1, L), dim=-1).mean()
+            exp_pos = torch.sum(A_k * positions.view(1, 1, seq_len), dim=-1).mean()
             expected_positions.append(exp_pos)
 
         # Compute order loss
@@ -1074,7 +1395,64 @@ class MonotonicSoftAssignmentConceptGenerator(BaseConceptGenerator):
         # Learnable temperature (bandwidth)
         self.sigma = nn.Parameter(torch.tensor(0.1))
 
-    def forward(self, H: torch.Tensor) -> Tuple[List[torch.Tensor], Dict[str, Any]]:
+        # Level-specific cross-attention layers
+        self.level_attn = nn.ModuleList(
+            [
+                nn.MultiheadAttention(
+                    embed_dim=config.hidden_dim,
+                    num_heads=config.num_heads,
+                    batch_first=True,
+                )
+                for _ in range(config.num_levels)
+            ]
+        )
+
+    def forward_next_level(
+        self,
+        encoder_hidden_states: torch.Tensor,
+        previous_level_concepts: Optional[List[torch.Tensor]],
+        target_level_index: int,
+    ) -> torch.Tensor:
+        """Generate concepts for next level with monotonic soft assignment.
+
+        DIMENSION FLOW:
+            Input:
+                encoder_hidden_states: [B, L, D_encoder]
+                previous_level_concepts: List of previous level concept tensors
+                target_level_index: Target level to generate
+
+            Output:
+                level_concepts: [B, L_k, D]
+        """
+        batch_size, _, _ = encoder_hidden_states.shape
+        projected_hidden = self.input_proj(encoder_hidden_states)
+
+        # Get queries for target level
+        level_queries = self.concept_queries[target_level_index]
+
+        # Expand queries
+        expanded_queries = level_queries.unsqueeze(0).expand(batch_size, -1, -1)
+
+        # Prepare context
+        if target_level_index == 0 or not previous_level_concepts:
+            context = projected_hidden
+        else:
+            prev_concepts = torch.cat(previous_level_concepts, dim=1)
+            context = torch.cat([projected_hidden, prev_concepts], dim=1)
+
+        # Cross-attention
+        level_concepts, _ = self.level_attn[target_level_index](
+            expanded_queries, context, context
+        )
+
+        return level_concepts
+
+    def forward(
+        self,
+        encoder_hidden_states: torch.Tensor,
+        target_level_index: Optional[int] = None,
+        previous_level_concepts: Optional[List[torch.Tensor]] = None,
+    ) -> Tuple[Union[List[torch.Tensor], torch.Tensor], Dict[str, Any]]:
         """Extract concepts with monotonic soft assignment.
 
         DIMENSION FLOW:
@@ -1088,30 +1466,42 @@ class MonotonicSoftAssignmentConceptGenerator(BaseConceptGenerator):
 
             Output: [C_0, ..., C_K]
         """
-        batch_size = H.shape[0]
-        H_proj = self.input_proj(H)
+        # Single level mode
+        if target_level_index is not None:
+            level_concepts = self.forward_next_level(
+                encoder_hidden_states, previous_level_concepts, target_level_index
+            )
+            aux = {
+                "target_level_index": target_level_index,
+                "method": "monotonic_soft_assignment",
+            }
+            return level_concepts, aux
+
+        # All levels mode
+        batch_size = encoder_hidden_states.shape[0]
+        projected_hidden = self.input_proj(encoder_hidden_states)
 
         concepts = []
 
         for level_idx in range(self.config.num_levels):
             Q_k = self.concept_queries[level_idx]
-            L_k = Q_k.shape[0]
 
             # Prepare queries
             Q = Q_k.unsqueeze(0).expand(batch_size, -1, -1)  # [B, L_k, D]
 
             # Prepare context
             if level_idx == 0:
-                context = H_proj
+                context = projected_hidden
             else:
                 prev_concepts = torch.cat(concepts, dim=1)
-                context = torch.cat([H_proj, prev_concepts], dim=1)
+                context = torch.cat([projected_hidden, prev_concepts], dim=1)
 
             # Cross-attention
             C_k, _ = self.level_attn[level_idx](Q, context, context)
             concepts.append(C_k)
 
-        return concepts
+        aux = {"method": "monotonic_soft_assignment"}
+        return concepts, aux
 
 
 ################################################################################
@@ -1218,180 +1608,6 @@ class AutoregressiveConceptGenerator(nn.Module):
         return concepts
 
 
-################################################################################
-#                                                                              #
-#                         UNIFIED INTERFACE                                    #
-#                                                                              #
-#    Wraps all training extractors and inference generator into a single API.  #
-#    Provides method selection, distillation, and consistent interface.        #
-#                                                                              #
-################################################################################
-
-
-# =============================================================================
-# Unified Interface: ConceptGenerator
-# =============================================================================
-
-
-class ConceptGenerator(nn.Module):
-    """Unified concept generator wrapping all methods.
-
-    PURPOSE:
-        Provide a single interface for both training and inference.
-        Automatically selects appropriate method based on mode.
-
-    ATTRIBUTES:
-        training_generators: Dict of training methods
-        inference_generator: Autoregressive generator
-    """
-
-    def __init__(
-        self,
-        config: NLCPV3Config,
-        encoder_hidden_dim: int,
-        default_training_method: str = "residual_pooling",
-    ):
-        super().__init__()
-        self.config = config
-        self.encoder_hidden_dim = encoder_hidden_dim
-        self.default_training_method = default_training_method
-
-        # Training generators (all trainable, independent)
-        self.training_generators = nn.ModuleDict(
-            {
-                # Basic methods
-                "residual_pooling": ResidualAttentivePoolingConceptGenerator(
-                    config, encoder_hidden_dim
-                ),
-                "position_constrained": PositionConstrainedConceptGenerator(
-                    config, encoder_hidden_dim
-                ),
-                "hard_ordered_mask": HardOrderedMaskConceptGenerator(
-                    config, encoder_hidden_dim
-                ),
-                "recursive_ordered": RecursiveOrderedConceptGenerator(
-                    config, encoder_hidden_dim
-                ),
-                "order_constrained": OrderConstrainedTrainingConceptGenerator(
-                    config, encoder_hidden_dim
-                ),
-                "robust_ordered": RobustOrderedConceptGenerator(
-                    config, encoder_hidden_dim
-                ),
-                # Advanced causal methods
-                "monotonic_soft_assignment": MonotonicSoftAssignmentConceptGenerator(
-                    config, encoder_hidden_dim
-                ),
-                "causal_sequential_refinement": CausalSequentialRefinementConceptGenerator(
-                    config, encoder_hidden_dim
-                ),
-                "continuous_causal_kernel": ContinuousCausalKernelConceptGenerator(
-                    config, encoder_hidden_dim
-                ),
-                "autoregressive_soft_boundary": AutoregressiveSoftBoundaryConceptGenerator(
-                    config, encoder_hidden_dim
-                ),
-                "causal_soft_pooling": CausalSoftPoolingConceptGenerator(
-                    config, encoder_hidden_dim
-                ),
-            }
-        )
-
-        # Inference generator
-        self.inference_generator = AutoregressiveConceptGenerator(
-            config, encoder_hidden_dim
-        )
-
-    def forward_training(
-        self, H: torch.Tensor, method: Optional[str] = None
-    ) -> Tuple[List[torch.Tensor], Dict[str, Any]]:
-        """Training: Extract concepts using specified method.
-
-        Args:
-            H: [B, L, D_encoder] - Hidden states from Q+CoT
-            method: Extraction method name (default: self.default_training_method)
-
-        Returns:
-            concepts: List of concept tensors
-            aux: Auxiliary information (method-specific)
-        """
-        method = method or self.default_training_method
-        if method not in self.training_generators:
-            raise ValueError(
-                f"Unknown method: {method}. Available: {list(self.training_generators.keys())}"
-            )
-
-        return self.training_generators[method](H)
-
-    def forward_inference(self, H: torch.Tensor) -> List[torch.Tensor]:
-        """Inference: Generate concepts from Q.
-
-        Args:
-            H: [B, L, D_encoder] - Hidden states from Q only
-
-        Returns:
-            concepts: List of concept tensors
-        """
-        return self.inference_generator(H)
-
-    def forward(
-        self, H: torch.Tensor, mode: str = "training", method: Optional[str] = None
-    ) -> Tuple[List[torch.Tensor], Optional[Dict[str, Any]]]:
-        """Unified forward pass.
-
-        Args:
-            H: Hidden states
-            mode: 'training' or 'inference'
-            method: Training method (if mode='training')
-
-        Returns:
-            concepts (and aux if training)
-        """
-        if mode == "training":
-            return self.forward_training(H, method)
-        elif mode == "inference":
-            return self.forward_inference(H), None
-        else:
-            raise ValueError(f"Unknown mode: {mode}")
-
-    def get_generator(self, method: str) -> BaseConceptGenerator:
-        """Get a specific training generator (for advanced usage).
-
-        Args:
-            method: Generator name
-
-        Returns:
-            generator: The requested generator module
-        """
-        return self.training_generators[method]
-
-    def compute_distillation_loss(
-        self, teacher_method: str, H: torch.Tensor
-    ) -> torch.Tensor:
-        """Compute distillation loss between teacher and inference generator.
-
-        PURPOSE:
-            Train inference generator to match a training extractor.
-
-        Args:
-            teacher_method: Which training method to use as teacher
-            H: Hidden states
-
-        Returns:
-            loss: MSE loss between teacher and student outputs
-        """
-        with torch.no_grad():
-            teacher_concepts, _ = self.forward_training(H, teacher_method)
-
-        student_concepts = self.forward_inference(H)
-
-        losses = []
-        for t_c, s_c in zip(teacher_concepts, student_concepts):
-            losses.append(F.mse_loss(s_c, t_c))
-
-        return sum(losses) / len(losses)
-
-
 class CausalSequentialRefinementConceptGenerator(BaseConceptGenerator):
     """Causal sequential refinement with soft pooling.
 
@@ -1471,7 +1687,48 @@ class CausalSequentialRefinementConceptGenerator(BaseConceptGenerator):
         # Temperature for soft pooling
         self.temperature = nn.Parameter(torch.ones(1))
 
-    def forward(self, H: torch.Tensor) -> Tuple[List[torch.Tensor], Dict[str, Any]]:
+    def forward_next_level(
+        self,
+        encoder_hidden_states: torch.Tensor,
+        previous_level_concepts: Optional[List[torch.Tensor]],
+        target_level_index: int,
+    ) -> torch.Tensor:
+        """Generate concepts for next level with causal sequential refinement.
+
+        DIMENSION FLOW:
+            Input:
+                encoder_hidden_states: [B, L, D_encoder]
+                previous_level_concepts: Previous level concepts for context
+                target_level_index: Target level to generate
+
+            Output:
+                level_concepts: [B, L_k, D]
+        """
+        batch_size, seq_len, _ = encoder_hidden_states.shape
+        projected_hidden = self.input_proj(encoder_hidden_states)
+
+        # Get queries for target level
+        level_queries = self.concept_queries[target_level_index]
+
+        # Expand queries
+        expanded_queries = level_queries.unsqueeze(0).expand(batch_size, -1, -1)
+
+        # Compute attention scores
+        attention_scores = torch.bmm(expanded_queries, projected_hidden.transpose(1, 2))
+        attention_scores = attention_scores / (math.sqrt(self.config.hidden_dim) * self.temperature)
+        level_attention = F.softmax(attention_scores, dim=-1)
+
+        # Extract concepts
+        level_concepts = torch.bmm(level_attention, projected_hidden)
+
+        return level_concepts
+
+    def forward(
+        self,
+        encoder_hidden_states: torch.Tensor,
+        target_level_index: Optional[int] = None,
+        previous_level_concepts: Optional[List[torch.Tensor]] = None,
+    ) -> Tuple[Union[List[torch.Tensor], torch.Tensor], Dict[str, Any]]:
         """Extract and refine concepts with causal dependencies.
 
         DIMENSION FLOW:
@@ -1480,8 +1737,17 @@ class CausalSequentialRefinementConceptGenerator(BaseConceptGenerator):
             Z_0: [B, N, D]
             Z: [B, N, D]
         """
-        batch_size, L, _ = H.shape
-        H_proj = self.input_proj(H)  # [B, L, D]
+        # Single level mode
+        if target_level_index is not None:
+            level_concepts = self.forward_next_level(
+                encoder_hidden_states, previous_level_concepts, target_level_index
+            )
+            aux = {"target_level_index": target_level_index, "method": "causal_sequential_refinement"}
+            return level_concepts, aux
+
+        # All levels mode
+        batch_size, seq_len, _ = encoder_hidden_states.shape
+        projected_hidden = self.input_proj(encoder_hidden_states)  # [B, L, D]
         total_concepts = sum(self.config.level_lengths)
 
         # Step 1: Soft pooling (concatenate all level queries)
@@ -1491,12 +1757,12 @@ class CausalSequentialRefinementConceptGenerator(BaseConceptGenerator):
         Q_all = torch.cat(all_queries, dim=0)  # [N, D]
 
         Q = Q_all.unsqueeze(0).expand(batch_size, -1, -1)  # [B, N, D]
-        scores = torch.bmm(Q, H_proj.transpose(1, 2))  # [B, N, L]
+        scores = torch.bmm(Q, projected_hidden.transpose(1, 2))  # [B, N, L]
         scores = scores / (math.sqrt(self.config.hidden_dim) * self.temperature)
         A = F.softmax(scores, dim=-1)  # [B, N, L]
 
         # Initial segment representations
-        Z_0 = torch.bmm(A, H_proj)  # [B, N, D]
+        Z_0 = torch.bmm(A, projected_hidden)  # [B, N, D]
 
         # Step 2: Causal refinement
         Z = Z_0
@@ -1628,7 +1894,48 @@ class ContinuousCausalKernelConceptGenerator(BaseConceptGenerator):
 
         return K
 
-    def forward(self, H: torch.Tensor) -> Tuple[List[torch.Tensor], Dict[str, Any]]:
+    def forward_next_level(
+        self,
+        encoder_hidden_states: torch.Tensor,
+        previous_level_concepts: Optional[List[torch.Tensor]],
+        target_level_index: int,
+    ) -> torch.Tensor:
+        """Generate concepts for next level with continuous causal kernel.
+
+        DIMENSION FLOW:
+            Input:
+                encoder_hidden_states: [B, L, D_encoder]
+                previous_level_concepts: Not used (each level independent)
+                target_level_index: Target level to generate
+
+            Output:
+                level_concepts: [B, L_k, D]
+        """
+        batch_size, seq_len, _ = encoder_hidden_states.shape
+        projected_hidden = self.input_proj(encoder_hidden_states)
+
+        # Get queries for target level
+        level_queries = self.concept_queries[target_level_index]
+
+        # Expand queries
+        expanded_queries = level_queries.unsqueeze(0).expand(batch_size, -1, -1)
+
+        # Compute attention scores
+        attention_scores = torch.bmm(expanded_queries, projected_hidden.transpose(1, 2))
+        attention_scores = attention_scores / math.sqrt(self.config.hidden_dim)
+        level_attention = F.softmax(attention_scores, dim=-1)
+
+        # Extract concepts
+        level_concepts = torch.bmm(level_attention, projected_hidden)
+
+        return level_concepts
+
+    def forward(
+        self,
+        encoder_hidden_states: torch.Tensor,
+        target_level_index: Optional[int] = None,
+        previous_level_concepts: Optional[List[torch.Tensor]] = None,
+    ) -> Tuple[Union[List[torch.Tensor], torch.Tensor], Dict[str, Any]]:
         """Extract concepts with continuous causal kernel.
 
         DIMENSION FLOW:
@@ -1640,11 +1947,20 @@ class ContinuousCausalKernelConceptGenerator(BaseConceptGenerator):
             A: [B, L, N]
             Z: [B, N, D]
         """
-        batch_size, L, _ = H.shape
-        H_proj = self.input_proj(H)  # [B, L, D]
+        # Single level mode
+        if target_level_index is not None:
+            level_concepts = self.forward_next_level(
+                encoder_hidden_states, previous_level_concepts, target_level_index
+            )
+            aux = {"target_level_index": target_level_index, "method": "continuous_causal_kernel"}
+            return level_concepts, aux
+
+        # All levels mode
+        batch_size, seq_len, _ = encoder_hidden_states.shape
+        projected_hidden = self.input_proj(encoder_hidden_states)  # [B, L, D]
 
         # Step 1: Predict continuous positions
-        pos_continuous = self.pos_net(H_proj).squeeze(-1)  # [B, L]
+        pos_continuous = self.pos_net(projected_hidden).squeeze(-1)  # [B, L]
 
         # Step 2: Sort centers to ensure ordering
         centers_sorted, _ = torch.sort(torch.sigmoid(self.centers))
@@ -1656,7 +1972,7 @@ class ContinuousCausalKernelConceptGenerator(BaseConceptGenerator):
         A = K / (K.sum(dim=2, keepdim=True) + 1e-8)  # [B, L, N]
 
         # Step 5: Extract concept representations
-        Z = torch.bmm(A.transpose(1, 2), H_proj)  # [B, N, D]
+        Z = torch.bmm(A.transpose(1, 2), projected_hidden)  # [B, N, D]
 
         # Split into hierarchical levels
         concepts = []
@@ -1763,7 +2079,48 @@ class AutoregressiveSoftBoundaryConceptGenerator(BaseConceptGenerator):
         # Learnable initial boundary
         self.init_boundary = nn.Parameter(torch.tensor(0.0))
 
-    def forward(self, H: torch.Tensor) -> Tuple[List[torch.Tensor], Dict[str, Any]]:
+    def forward_next_level(
+        self,
+        encoder_hidden_states: torch.Tensor,
+        previous_level_concepts: Optional[List[torch.Tensor]],
+        target_level_index: int,
+    ) -> torch.Tensor:
+        """Generate concepts for next level with autoregressive soft boundary.
+
+        DIMENSION FLOW:
+            Input:
+                encoder_hidden_states: [B, L, D_encoder]
+                previous_level_concepts: Previous level concepts for conditioning
+                target_level_index: Target level to generate
+
+            Output:
+                level_concepts: [B, L_k, D]
+        """
+        batch_size, seq_len, _ = encoder_hidden_states.shape
+        projected_hidden = self.input_proj(encoder_hidden_states)
+
+        # Get queries for target level
+        level_queries = self.concept_queries[target_level_index]
+
+        # Expand queries
+        expanded_queries = level_queries.unsqueeze(0).expand(batch_size, -1, -1)
+
+        # Compute attention scores
+        attention_scores = torch.bmm(expanded_queries, projected_hidden.transpose(1, 2))
+        attention_scores = attention_scores / math.sqrt(self.config.hidden_dim)
+        level_attention = F.softmax(attention_scores, dim=-1)
+
+        # Extract concepts
+        level_concepts = torch.bmm(level_attention, projected_hidden)
+
+        return level_concepts
+
+    def forward(
+        self,
+        encoder_hidden_states: torch.Tensor,
+        target_level_index: Optional[int] = None,
+        previous_level_concepts: Optional[List[torch.Tensor]] = None,
+    ) -> Tuple[Union[List[torch.Tensor], torch.Tensor], Dict[str, Any]]:
         """Extract concepts with autoregressive soft boundary prediction.
 
         DIMENSION FLOW:
@@ -1781,16 +2138,25 @@ class AutoregressiveSoftBoundaryConceptGenerator(BaseConceptGenerator):
 
             concepts: [z_1, ..., z_N] -> reshaped to [C_0, ..., C_K]
         """
-        batch_size, L, _ = H.shape
-        H_proj = self.input_proj(H)  # [B, L, D]
+        # Single level mode
+        if target_level_index is not None:
+            level_concepts = self.forward_next_level(
+                encoder_hidden_states, previous_level_concepts, target_level_index
+            )
+            aux = {"target_level_index": target_level_index, "method": "autoregressive_soft_boundary"}
+            return level_concepts, aux
+
+        # All levels mode
+        batch_size, seq_len, _ = encoder_hidden_states.shape
+        projected_hidden = self.input_proj(encoder_hidden_states)  # [B, L, D]
 
         # Compute sequence summary
-        H_summary = self.summary_net(H_proj.mean(dim=1))  # [B, D]
+        H_summary = self.summary_net(projected_hidden.mean(dim=1))  # [B, D]
 
         concepts = []
         boundaries = []
         prev_boundary = torch.full(
-            (batch_size, 1), self.init_boundary.item(), device=H.device
+            (batch_size, 1), self.init_boundary.item(), device=encoder_hidden_states.device
         )  # [B, 1]
         boundaries.append(prev_boundary)
 
@@ -1818,7 +2184,7 @@ class AutoregressiveSoftBoundaryConceptGenerator(BaseConceptGenerator):
             boundaries.append(new_boundary)
 
             # Create attention mask for positions within current segment
-            positions = torch.linspace(0, 1, L, device=H.device).view(1, L)  # [1, L]
+            positions = torch.linspace(0, 1, seq_len, device=encoder_hidden_states.device).view(1, seq_len)  # [1, L]
             # Mask: positions > prev_boundary AND positions <= new_boundary
             mask = (
                 (positions > prev_boundary) & (positions <= new_boundary)
@@ -1827,7 +2193,7 @@ class AutoregressiveSoftBoundaryConceptGenerator(BaseConceptGenerator):
             # Compute attention scores
             # Use a learnable query for each concept iteration
             Q = self.concept_queries[0][0].unsqueeze(0).expand(batch_size, -1)  # [B, D]
-            scores = torch.bmm(Q.unsqueeze(1), H_proj.transpose(1, 2)).squeeze(
+            scores = torch.bmm(Q.unsqueeze(1), projected_hidden.transpose(1, 2)).squeeze(
                 1
             )  # [B, L]
             scores = scores / self.temperature
@@ -1837,7 +2203,7 @@ class AutoregressiveSoftBoundaryConceptGenerator(BaseConceptGenerator):
             A = F.softmax(masked_scores, dim=-1)  # [B, L]
 
             # Extract concept
-            z = torch.bmm(A.unsqueeze(1), H_proj).squeeze(1)  # [B, D]
+            z = torch.bmm(A.unsqueeze(1), projected_hidden).squeeze(1)  # [B, D]
             z = self.concept_proj(z)
             concepts.append(z.unsqueeze(1))  # [B, 1, D]
 
@@ -1992,7 +2358,48 @@ class CausalSoftPoolingConceptGenerator(BaseConceptGenerator):
         usage_variance = concept_usage.var(dim=1).mean()
         return usage_variance
 
-    def forward(self, H: torch.Tensor) -> Tuple[List[torch.Tensor], Dict[str, Any]]:
+    def forward_next_level(
+        self,
+        encoder_hidden_states: torch.Tensor,
+        previous_level_concepts: Optional[List[torch.Tensor]],
+        target_level_index: int,
+    ) -> torch.Tensor:
+        """Generate concepts for next level with causal soft pooling.
+
+        DIMENSION FLOW:
+            Input:
+                encoder_hidden_states: [B, L, D_encoder]
+                previous_level_concepts: Not used (each level independent)
+                target_level_index: Target level to generate
+
+            Output:
+                level_concepts: [B, L_k, D]
+        """
+        batch_size, seq_len, _ = encoder_hidden_states.shape
+        projected_hidden = self.input_proj(encoder_hidden_states)
+
+        # Get queries for target level
+        level_queries = self.concept_queries[target_level_index]
+
+        # Expand queries
+        expanded_queries = level_queries.unsqueeze(0).expand(batch_size, -1, -1)
+
+        # Compute attention scores
+        attention_scores = torch.bmm(expanded_queries, projected_hidden.transpose(1, 2))
+        attention_scores = attention_scores / math.sqrt(self.config.hidden_dim)
+        level_attention = F.softmax(attention_scores, dim=-1)
+
+        # Extract concepts
+        level_concepts = torch.bmm(level_attention, projected_hidden)
+
+        return level_concepts
+
+    def forward(
+        self,
+        encoder_hidden_states: torch.Tensor,
+        target_level_index: Optional[int] = None,
+        previous_level_concepts: Optional[List[torch.Tensor]] = None,
+    ) -> Tuple[Union[List[torch.Tensor], torch.Tensor], Dict[str, Any]]:
         """Complete causal soft pooling pipeline.
 
         DIMENSION FLOW:
@@ -2004,11 +2411,20 @@ class CausalSoftPoolingConceptGenerator(BaseConceptGenerator):
             Z: [B, N, D]
             H_recon: [B, L, D]
         """
-        batch_size, L, _ = H.shape
-        H_proj = self.input_proj(H)  # [B, L, D]
+        # Single level mode
+        if target_level_index is not None:
+            level_concepts = self.forward_next_level(
+                encoder_hidden_states, previous_level_concepts, target_level_index
+            )
+            aux = {"target_level_index": target_level_index, "method": "causal_soft_pooling"}
+            return level_concepts, aux
+
+        # All levels mode
+        batch_size, seq_len, _ = encoder_hidden_states.shape
+        projected_hidden = self.input_proj(encoder_hidden_states)  # [B, L, D]
 
         # Step 1: Monotonic position prediction
-        pos_logits = self.pos_mlp(H_proj).squeeze(-1)  # [B, L]
+        pos_logits = self.pos_mlp(projected_hidden).squeeze(-1)  # [B, L]
         pos_continuous = torch.cumsum(F.softplus(pos_logits), dim=1)
         pos_continuous = pos_continuous / (pos_continuous[:, -1:] + 1e-8)
 
@@ -2025,7 +2441,7 @@ class CausalSoftPoolingConceptGenerator(BaseConceptGenerator):
         A = A_unnorm / (A_unnorm.sum(dim=2, keepdim=True) + 1e-8)  # [B, L, N]
 
         # Step 5: Initial pooling
-        Z_0 = torch.bmm(A.transpose(1, 2), H_proj)  # [B, N, D]
+        Z_0 = torch.bmm(A.transpose(1, 2), projected_hidden)  # [B, N, D]
 
         # Step 6: Causal refinement
         Z = Z_0
@@ -2037,7 +2453,7 @@ class CausalSoftPoolingConceptGenerator(BaseConceptGenerator):
         H_recon = self.recon_head(torch.bmm(A, Z))  # [B, L, D]
 
         # Step 8: Compute losses
-        recon_loss = F.mse_loss(H_recon, H_proj)
+        recon_loss = F.mse_loss(H_recon, projected_hidden)
         mono_loss = self._compute_monotonicity_loss(A)
         cov_loss = self._compute_coverage_loss(A)
 

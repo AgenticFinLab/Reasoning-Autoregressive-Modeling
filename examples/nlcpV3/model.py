@@ -49,8 +49,8 @@ from typing import Optional
 from nlcpV3.config import NLCPV3Config
 from nlcpV3.encoder import NLCPV3Encoder
 from nlcpV3.concept_generator import (
-    ConceptGenerator,
     ResidualAttentivePoolingConceptGenerator,
+    AutoregressiveConceptGenerator,
 )
 from nlcpV3.concept_transformer import ConceptTransformer
 from nlcpV3.token_decoder import SolutionDecoder
@@ -61,13 +61,14 @@ class NLCPV3Model(nn.Module):
 
     PURPOSE:
         Complete model for V3 architecture. Handles both training
-        (with CoT) and inference (without CoT) modes using unified
-        ConceptGenerator that shares parameters between modes.
+        (with CoT) and inference (without CoT) modes using separate
+        concept extractors for each mode.
 
     ATTRIBUTES:
         config: NLCPV3Config instance
         encoder: Text encoder (Qwen2.5-based)
-        concept_generator: Unified concept extraction/generation
+        training_extractor: Concept extraction from Q+CoT during training
+        inference_generator: Concept generation from Q during inference
         concept_transformer: Concept refinement with level-level causality
         solution_decoder: Direct solution decoder (key difference from V2!)
 
@@ -95,9 +96,15 @@ class NLCPV3Model(nn.Module):
         self.encoder = NLCPV3Encoder(config)
         encoder_hidden_dim = self.encoder.get_encoder_hidden_dim()
 
-        # Unified Concept Generator (training & inference)
-        # Shares concept_queries between training extraction and inference generation
-        self.concept_generator = ConceptGenerator(config, encoder_hidden_dim)
+        # Concept extractors (separate for training and inference)
+        # Training: Extract concepts from Q+CoT
+        self.training_extractor = ResidualAttentivePoolingConceptGenerator(
+            config, encoder_hidden_dim
+        )
+        # Inference: Generate concepts from Q only
+        self.inference_generator = AutoregressiveConceptGenerator(
+            config, encoder_hidden_dim
+        )
 
         # Concept transformer (shared)
         self.concept_transformer = ConceptTransformer(config)
@@ -149,9 +156,7 @@ class NLCPV3Model(nn.Module):
         )  # [B, L, D_encoder]
 
         # Step 2: Extract concepts from CoT (training mode)
-        concepts, aux = self.concept_generator.forward_training(
-            H, mode="residual_pooling"
-        )
+        concepts, aux = self.training_extractor(H)
         # concepts = [C_0, C_1, ..., C_K]
         # aux contains H_hat, H_rest (like VAR's f_hat, f_rest)
 
@@ -214,7 +219,7 @@ class NLCPV3Model(nn.Module):
         )  # [B, L', D_encoder]
 
         # Step 2: Generate concepts from Q (inference mode)
-        concepts = self.concept_generator.inference_generator(H)
+        concepts = self.inference_generator(H)
         # concepts = [C_0, C_1, ..., C_K]
 
         # Step 3: Refine concepts
