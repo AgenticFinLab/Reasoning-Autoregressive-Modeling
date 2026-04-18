@@ -3,7 +3,14 @@
 USAGE:
     from nlcpV3 import NLCPV3Config, NLCPV3Model
 
-    # Individual extractors (for standalone use)
+    # RECOMMENDED: Hybrid generator (combines best of 3 methods)
+    from nlcpV3 import HybridConceptGenerator
+    config = NLCPV3Config(...)
+    generator = HybridConceptGenerator(config, encoder_hidden_dim)
+    concepts, aux = generator(H_cot)  # Training
+    C_k, aux = generator(H, target_level_index=k, previous_level_concepts=[...])  # Inference
+
+    # Individual extractors (for standalone use / ablation studies)
     from nlcpV3 import (
         ResidualAttentivePoolingConceptGenerator,
         PositionConstrainedConceptGenerator,
@@ -13,7 +20,6 @@ USAGE:
         RobustOrderedConceptGenerator,
         AutoregressiveConceptGenerator,
     )
-    config = NLCPV3Config(...)
     extractor = ResidualAttentivePoolingConceptGenerator(config, encoder_hidden_dim)
     concepts, aux = extractor(H_cot)
 
@@ -61,6 +67,7 @@ from nlcpV3.concept_generator import (
     # Inference generator
     AutoregressiveConceptGenerator,
 )
+from nlcpV3.concept_generator_hybrid import HybridConceptGenerator
 from nlcpV3.concept_transformer import ConceptTransformer
 from nlcpV3.token_decoder import SolutionDecoder
 from nlcpV3.model import NLCPV3Model
@@ -86,6 +93,8 @@ __all__ = [
     "CausalSoftPoolingConceptGenerator",
     # Inference generator
     "AutoregressiveConceptGenerator",
+    # Hybrid generator (recommended)
+    "HybridConceptGenerator",
     # Other components
     "ConceptTransformer",
     "SolutionDecoder",

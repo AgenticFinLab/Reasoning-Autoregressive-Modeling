@@ -1,0 +1,86 @@
+# =============================================================================
+# NLCP V3 Hybrid Concept Generator Test Configuration
+# =============================================================================
+# Purpose: Configuration for testing HybridConceptGenerator
+# Usage: python examples/nlcpV3/utest/test_hybrid_generator.py -c configs/nlcpV3/utest/test_hybrid_generator.yml
+#
+# Hybrid Generator Design:
+#   Combines three best methods:
+#   1. ResidualAttentivePooling - VAR-style residual decomposition (backbone)
+#   2. MonotonicSoftAssignment - Cross-attention context accumulation (bridge)
+#   3. AutoregressiveSoftBoundary - Boundary ordering constraint (auxiliary)
+# =============================================================================
+
+# Data configuration (minimal for testing)
+data:
+  data_name: "GSM8K"
+  data_path: "EXPERIMENT/data/GSM8K"
+  split: "train"
+  subset: ""
+
+# Environment configuration
+environment:
+  dotenv_path: ".env"
+  seed: 42
+  dataloader_num_workers: 0
+  device_map:
+    model:
+      device: "auto"
+      priority: 1
+
+# NLCP V3 Configuration (used by test_hybrid_generator.py)
+nlcpV3:
+  # Concept space dimensions
+  hidden_dim: 256
+  num_heads: 8
+  vocab_size: 151936
+
+  # Hierarchical pyramid structure
+  num_levels: 6
+  level_lengths: [1, 2, 4, 8, 16, 32]
+
+  # Sequence configuration
+  max_seq_len: 512
+  dropout: 0.1
+  rms_norm_eps: 1.0e-6
+
+  # Encoder configuration
+  encoder_model_name: "Qwen/Qwen2.5-0.5B"
+  encoder_num_layers: 4
+  encoder_freeze: true
+
+  # Loss weights
+  ntp_loss_weight: 1.0
+  concept_loss_weight: 0.1
+  recon_loss_weight: 0.1
+  muP_scale: 1.0
+
+# Training configuration (minimal for testing)
+training:
+  batch_size: 4
+  num_epochs: 1
+  learning_rate: 1.0e-4
+  weight_decay: 0.01
+  scheduler_type: "cosine"
+  warmup_steps: 10
+  gradient:
+    max_grad_norm: 1.0
+    checkpointing: false
+  bf16: true
+  resume: null
+
+# Log configuration
+log:
+  save_folder: "EXPERIMENT/nlcpV3/utest"
+  checkpoint_path: "EXPERIMENT/nlcpV3/utest/checkpoints"
+  log_path: "EXPERIMENT/nlcpV3/utest/logs"
+  log_level: "INFO"
+  checkpoint_step_interval: 100
+  log_step_interval: 10
+
+# Evaluation configuration (disabled for testing)
+evaluation:
+  enabled: false
+  eval_step_interval: 100
+  datasets: []
+  metrics: []
