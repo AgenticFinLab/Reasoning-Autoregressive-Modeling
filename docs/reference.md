@@ -55,14 +55,4 @@ with Fused Information in Latent Tokens
 
 - Rethinking LLM Reasoning: From Explicit Trajectories to Latent Representations
 
-
-scp -r sjia@10.123.4.30:/home/sjia/projects/Reasoning-Autoregressive-Modeling/EXPERIMENT/uTEST-ed_train/logs ./EXPERIMENT/uTEST-ed_train/logs
-
-scp -r sjia@10.123.4.30:/home/sjia/projects/Reasoning-Autoregressive-Modeling/EXPERIMENT/uTEST-ed_train/logs ./EXPERIMENT/uTEST-ed_train/logs
-
-scp -r sjia@10.123.4.30:/home/sjia/projects/Reasoning-Autoregressive-Modeling/EXPERIMENT/c3/logs ./EXPERIMENT/c3/logs
-
-scp -r sjia@10.123.4.30:/home/sjia/projects/Reasoning-Autoregressive-Modeling/EXPERIMENT/c3/recon_results ./EXPERIMENT/c3/recon_results
-
-
-
+- The Latent Space: Foundation, Evolution, Mechanism, Ability, and Outlook
