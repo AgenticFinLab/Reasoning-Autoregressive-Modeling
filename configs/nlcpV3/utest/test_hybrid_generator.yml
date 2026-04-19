@@ -31,53 +31,40 @@ environment:
       device: "auto"
       priority: 1
 
-# NLCP V3 Configuration - strictly for HybridConceptGenerator testing
-nlcpV3:
-  # Concept space dimensions
-  hidden_dim: 256
-  num_heads: 8
-  vocab_size: 151936
-
-  # Hierarchical pyramid structure
-  num_levels: 6
-  level_lengths: [1, 2, 4, 8, 16, 32]
-
-  # Sequence configuration
-  max_seq_len: 512
-  dropout: 0.1
-  rms_norm_eps: 1.0e-6
-
+# Model configuration - Hybrid Concept Generator specific
+model:
   # Encoder configuration
-  encoder_model_name: "Qwen/Qwen2.5-0.5B"
-  encoder_num_layers: 4
-  encoder_freeze: true
+  encoder:
+    encoder_model_name: "Qwen/Qwen2.5-0.5B"
+    encoder_num_layers: 4
+    encoder_freeze: true
+    encoder_hidden_dim: 896
 
-  # Loss weights
-  ntp_loss_weight: 1.0
-  concept_loss_weight: 0.1
-  recon_loss_weight: 0.1
-  muP_scale: 1.0
+  # Concept pyramid configuration
+  pyramid:
+    hidden_dim: 256
+    num_heads: 8
+    num_levels: 6
+    level_lengths: [1, 2, 4, 8, 16, 32]
+    max_seq_len: 512
 
-# Hybrid Concept Generator specific parameters
-hybrid_generator:
-  # Encoder hidden dimension (from Qwen2.5-0.5B)
-  encoder_hidden_dim: 896
-  # Ordering loss weight (lambda_order)
-  order_loss_weight: 0.1
-  # Ordering constraint margin
-  order_margin: 1.0
+  # Decoder configuration
+  decoder:
+    vocab_size: 151936
+    dropout: 0.1
+    rms_norm_eps: 1.0e-6
+    muP_scale: 1.0
 
-# Test configuration
-test:
-  # Batch sizes for different test scenarios
-  default_batch_size: 2
-  default_seq_len: 128
-  # GSM8K integration test samples
-  gsm8k_max_samples: 3
-  # Edge case test parameters
-  edge_cases:
-    batch_sizes: [1, 2]
-    seq_lens: [16, 64, 128, 256]
+  # Hybrid Concept Generator specific parameters
+  hybrid_generator:
+    # Ordering loss weight (lambda_order)
+    order_loss_weight: 0.1
+    # Ordering constraint margin
+    order_margin: 1.0
+    # Query initialization mode (ablation option)
+    # True: initialize queries with positional priors (DLCM-style segment bias)
+    # False: random Xavier uniform initialization
+    use_positional_query_init: true
 
 # Training configuration (minimal for testing)
 training:
@@ -87,6 +74,13 @@ training:
   weight_decay: 0.01
   scheduler_type: "cosine"
   warmup_steps: 10
+
+  # Loss weights for training objectives
+  loss_weights:
+    ntp_loss_weight: 1.0
+    concept_loss_weight: 0.1
+    recon_loss_weight: 0.1
+
   gradient:
     max_grad_norm: 1.0
     checkpointing: false

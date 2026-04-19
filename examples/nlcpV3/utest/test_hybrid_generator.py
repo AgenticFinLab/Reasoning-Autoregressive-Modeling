@@ -193,24 +193,29 @@ def build_nlcpV3_config(config: dict) -> NLCPV3Config:
     Returns:
         NLCPV3Config instance with all parameters explicitly set
     """
-    nlcp_config = config["nlcpV3"]
+    model_config = config["model"]
+    encoder_config = model_config["encoder"]
+    pyramid_config = model_config["pyramid"]
+    decoder_config = model_config["decoder"]
+    training_config = config["training"]
+    loss_config = training_config["loss_weights"]
 
     return NLCPV3Config(
-        hidden_dim=nlcp_config["hidden_dim"],
-        num_heads=nlcp_config["num_heads"],
-        vocab_size=nlcp_config["vocab_size"],
-        num_levels=nlcp_config["num_levels"],
-        level_lengths=nlcp_config["level_lengths"],
-        max_seq_len=nlcp_config["max_seq_len"],
-        dropout=nlcp_config["dropout"],
-        rms_norm_eps=nlcp_config["rms_norm_eps"],
-        encoder_model_name=nlcp_config["encoder_model_name"],
-        encoder_num_layers=nlcp_config["encoder_num_layers"],
-        encoder_freeze=nlcp_config["encoder_freeze"],
-        ntp_loss_weight=nlcp_config["ntp_loss_weight"],
-        concept_loss_weight=nlcp_config["concept_loss_weight"],
-        recon_loss_weight=nlcp_config["recon_loss_weight"],
-        muP_scale=nlcp_config["muP_scale"],
+        hidden_dim=pyramid_config["hidden_dim"],
+        num_heads=pyramid_config["num_heads"],
+        vocab_size=decoder_config["vocab_size"],
+        num_levels=pyramid_config["num_levels"],
+        level_lengths=pyramid_config["level_lengths"],
+        max_seq_len=pyramid_config["max_seq_len"],
+        dropout=decoder_config["dropout"],
+        rms_norm_eps=decoder_config["rms_norm_eps"],
+        encoder_model_name=encoder_config["encoder_model_name"],
+        encoder_num_layers=encoder_config["encoder_num_layers"],
+        encoder_freeze=encoder_config["encoder_freeze"],
+        ntp_loss_weight=loss_config["ntp_loss_weight"],
+        concept_loss_weight=loss_config["concept_loss_weight"],
+        recon_loss_weight=loss_config["recon_loss_weight"],
+        muP_scale=decoder_config["muP_scale"],
     )
 
 
@@ -223,28 +228,14 @@ def get_hybrid_generator_params(config: dict) -> dict:
     Returns:
         Dictionary with encoder_hidden_dim, order_loss_weight, order_margin
     """
-    hybrid_config = config["hybrid_generator"]
+    model_config = config["model"]
+    encoder_config = model_config["encoder"]
+    hybrid_config = model_config["hybrid_generator"]
     return {
-        "encoder_hidden_dim": hybrid_config["encoder_hidden_dim"],
+        "encoder_hidden_dim": encoder_config["encoder_hidden_dim"],
         "order_loss_weight": hybrid_config["order_loss_weight"],
         "order_margin": hybrid_config["order_margin"],
-    }
-
-
-def get_test_params(config: dict) -> dict:
-    """Extract test parameters from config.
-
-    Args:
-        config: Configuration dictionary from YAML file
-
-    Returns:
-        Dictionary with test configuration parameters
-    """
-    test_config = config["test"]
-    return {
-        "default_batch_size": test_config["default_batch_size"],
-        "default_seq_len": test_config["default_seq_len"],
-        "gsm8k_max_samples": test_config["gsm8k_max_samples"],
+        "use_positional_query_init": hybrid_config["use_positional_query_init"],
     }
 
 
@@ -287,9 +278,14 @@ def test_constructor(
         encoder_hidden_dim = hybrid_params["encoder_hidden_dim"]
         order_loss_weight = hybrid_params["order_loss_weight"]
         order_margin = hybrid_params["order_margin"]
+        use_positional_query_init = hybrid_params["use_positional_query_init"]
 
         generator = HybridConceptGenerator(
-            config, encoder_hidden_dim, order_loss_weight, order_margin
+            config,
+            encoder_hidden_dim,
+            order_loss_weight,
+            order_margin,
+            use_positional_query_init,
         )
 
         # Check attributes
@@ -465,6 +461,7 @@ def test_inference_mode(
 
         # Reset cached attentions
         generator._cached_attentions = []
+        generator._cached_base_concepts = []
 
         # Level 0
         C_0, aux_0 = generator(H, 0, None)
@@ -493,6 +490,7 @@ def test_inference_mode(
 
         # Generate all levels sequentially
         generator._cached_attentions = []
+        generator._cached_base_concepts = []
         all_concepts = []
         for k in range(config.num_levels):
             C_k, aux_k = generator(
@@ -511,6 +509,7 @@ def test_inference_mode(
 
         # Verify consistency with training mode
         generator._cached_attentions = []
+        generator._cached_base_concepts = []
         training_concepts, _ = generator(H, None, None)
 
         for k in range(config.num_levels):
@@ -543,6 +542,7 @@ def test_forward_next_level(
 
         # Reset cache
         generator._cached_attentions = []
+        generator._cached_base_concepts = []
 
         # Level 0
         C_0 = generator.forward_next_level(H, None, 0)
@@ -660,6 +660,7 @@ def test_edge_cases(
 
         # Test inference with single level
         generator._cached_attentions = []
+        generator._cached_base_concepts = []
         H = torch.randn(2, 64, encoder_hidden_dim)
         C_0, aux = generator(H, 0, None)
         assert C_0.shape == (2, config.level_lengths[0], config.hidden_dim)
@@ -694,6 +695,7 @@ def test_gsm8k_integration(
             encoder_hidden_dim=encoder_hidden_dim,
             order_loss_weight=0.1,
             order_margin=1.0,
+            use_positional_query_init=True,
         )
         tokenizer = AutoTokenizer.from_pretrained(
             config.encoder_model_name, trust_remote_code=True
@@ -805,6 +807,7 @@ def run_all_tests(config_path: str, specific_test: Optional[str]):
                 hybrid_params["encoder_hidden_dim"],
                 hybrid_params["order_loss_weight"],
                 hybrid_params["order_margin"],
+                hybrid_params["use_positional_query_init"],
             )
 
             # Test training mode
@@ -829,10 +832,7 @@ def run_all_tests(config_path: str, specific_test: Optional[str]):
 
             # Test GSM8K integration
             if specific_test is None or specific_test == "gsm8k":
-                test_params = get_test_params(config_dict)
-                test_gsm8k_integration(
-                    config, config_dict, results, test_params["gsm8k_max_samples"]
-                )
+                test_gsm8k_integration(config, config_dict, results, 3)
 
         except Exception as e:
             print(f"\nFatal error: {e}")

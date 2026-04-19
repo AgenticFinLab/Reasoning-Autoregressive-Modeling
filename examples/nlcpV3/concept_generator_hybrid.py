@@ -72,6 +72,22 @@ MATHEMATICS:
     Let H ∈ ℝ^{B×L×D_encoder} be encoder hidden states from Q+CoT.
     Let K be number of levels, with L_0 < L_1 < ... < L_{K-1} concepts per level.
 
+    VAR Principles (from VAR.md Section 5.2.2):
+        f_rest: "what still needs encoding" — decreases each level
+        f_hat:  "what has been encoded"    — accumulates each level
+        Constraint: f_hat + f_rest = H_proj (exact decomposition)
+
+    CRITICAL DESIGN: Commit vs Refinement Separation
+        The residual flow (f_rest, f_hat) must remain pure. Only base-extracted
+        concepts (C_k_base) enter the residual flow. Cross-attention refinement
+        (refined_k) improves concept quality for the decoder but does NOT
+        participate in residual decomposition. This prevents double-counting:
+
+        - C_k_base = level_proj(A_k @ H_rest_k)    # Commit: new info, enters f_rest
+        - refined_k = cross_attn(Q_k, context)       # Refine: context-aware, no f_rest
+        - C_k = C_k_base + refined_k                 # Output: goes to decoder
+        - R_k = A_k^T @ C_k_base                     # Reconstruct from BASE only
+
     Training Path (All Levels - Parallel):
         H_proj = Linear(H) ∈ ℝ^{B×L×D}                           # Project to concept space
 
@@ -85,41 +101,37 @@ MATHEMATICS:
 
             # Attention over residual
             A_k = softmax(Q_k' @ H_rest_k^T / (√D × τ)) ∈ ℝ^{B×L_k×L}
-            C_k = A_k @ H_rest_k ∈ ℝ^{B×L_k×D}                   # Extract concepts
+            C_k_base = level_proj(A_k @ H_rest_k) ∈ ℝ^{B×L_k×D}  # BASE concept
+
+            # Reconstruct from BASE only (commit path)
+            H_recon_k = A_k^T @ C_k_base ∈ ℝ^{B×L×D}
+            H_hat_{k+1} = H_hat_k + H_recon_k                   # f_hat accumulation
+            H_rest_{k+1} = H_rest_k - H_recon_k                  # f_rest update
 
             # Cross-Attention Context (from MonotonicSoftAssignment)
             If k > 0:
                 context = concat([H_proj, C_0, ..., C_{k-1}]) ∈ ℝ^{B×(L+ΣL_i)×D}
-                C_k' = CrossAttn(Q_k', context, context) ∈ ℝ^{B×L_k×D}
-                C_k = C_k + C_k'                                 # Residual connection
-
-            # Reconstruction
-            H_recon_k = A_k^T @ C_k ∈ ℝ^{B×L×D}
-            H_hat_{k+1} = H_hat_k + H_recon_k
-            H_rest_{k+1} = H_rest_k - H_recon_k
+                refined_k = CrossAttn(Q_k', context, context) ∈ ℝ^{B×L_k×D}
+                C_k = C_k_base + refined_k                         # Refined output
+            Else:
+                C_k = C_k_base
 
         # Auxiliary Losses
         L_recon = ||H_hat_K - H_proj||²                          # Reconstruction loss
 
         # Boundary Constraint (from AutoregressiveSoftBoundary)
-        For each concept position j across all levels:
-            exp_pos[j] = Σ_t A[t,j] × t                            # Expected position
-        L_order = Σ_j ReLU(exp_pos[j] - exp_pos[j+1] + margin)     # Ordering loss
+        Two ordering constraints following VAR scale-level causality:
+        1. Intra-level: consecutive concept slots ordered by CoT position
+           L_intra = Σ_level Σ_j ReLU(exp_pos[j] - exp_pos[j+1] + margin)
+        2. Inter-level: coarse-to-fine positional progression
+           L_inter = Σ_k ReLU(last_pos_k - first_pos_{k+1} + margin)
 
-        Total Loss = L_recon + λ_order × L_order
+        Total Loss = L_recon + λ_order × (L_intra + L_inter)
 
     Inference Path (Next-Level - Sequential):
-        # Matches training but level-by-level for autoregressive generation
-
-        Level 0:
-            Q_0 = concept_queries[0]
-            A_0 = softmax(Q_0 @ H_proj^T / √D)
-            C_0 = A_0 @ H_proj
-
-        Level k > 0:
-            Q_k = concept_queries[k]
-            context = concat([H_proj, C_0, ..., C_{k-1}])          # Accumulated context
-            C_k = CrossAttn(Q_k, context, context)                 # Use cross-attention
+        Matches training computation but level-by-level.
+        Uses _cached_attentions and _cached_base_concepts to compute
+        residual from previous levels (f_hat accumulation).
 
 DIMENSION FLOW:
     Input:  H ∈ ℝ^{B×L×D_encoder}
@@ -216,6 +228,7 @@ class HybridConceptGenerator(nn.Module):
         encoder_hidden_dim: int,
         order_loss_weight: float,
         order_margin: float,
+        use_positional_query_init: bool,
     ):
         """Initialize Hybrid Concept Generator.
 
@@ -224,6 +237,14 @@ class HybridConceptGenerator(nn.Module):
             encoder_hidden_dim: Dimension of encoder hidden states
             order_loss_weight: Weight for boundary ordering loss (λ_order)
             order_margin: Margin for ordering constraint
+            use_positional_query_init: If True, initialize concept queries with
+                positional priors so query j within level k is biased toward
+                position j/L_k (segment-scoped initialization). If False, use
+                random initialization (Xavier uniform). This is an experimental
+                option for ablation: positional init may accelerate convergence
+                by providing DLCM-style segment-concept correspondence as a
+                starting point, while random init lets the model discover
+                position structure purely from training signal.
 
         DIMENSION FLOW:
             Input: config, encoder_hidden_dim
@@ -234,6 +255,7 @@ class HybridConceptGenerator(nn.Module):
         self.encoder_hidden_dim = encoder_hidden_dim
         self.order_loss_weight = order_loss_weight
         self.order_margin = order_margin
+        self.use_positional_query_init = use_positional_query_init
 
         # =====================================================================
         # Component 1: Projection (shared across all methods)
@@ -266,8 +288,12 @@ class HybridConceptGenerator(nn.Module):
             ]
         )
 
-        # Cache for attention weights (used in residual computation)
+        # Cache for attention weights and base concepts (used in residual computation)
+        # _cached_attentions: stores A_k for each level (used to compute f_rest)
+        # _cached_base_concepts: stores C_k_base for each level (used to compute f_hat)
+        # Both are populated during inference (forward_next_level)
         self._cached_attentions: List[torch.Tensor] = []
+        self._cached_base_concepts: List[torch.Tensor] = []
 
         # =====================================================================
         # Component 4: MonotonicSoftAssignment Components
@@ -288,12 +314,70 @@ class HybridConceptGenerator(nn.Module):
         self._init_weights()
 
     def _init_weights(self):
-        """Initialize all weights using Xavier uniform initialization."""
+        """Initialize all weights using Xavier uniform initialization.
+
+        Concept queries have two initialization modes controlled by
+        self.use_positional_query_init:
+
+        1. Random (False): Xavier uniform — no positional prior.
+           The model must discover segment structure from training signal.
+
+        2. Positional (True): Xavier uniform + positional embedding.
+           Each query j within level k receives a positional component
+           proportional to j/L_k, following DLCM's segment-concept
+           correspondence principle. This provides a starting point
+           where query j is biased toward attending to the j-th segment
+           of the sequence.
+
+           Concretely: Q_k[j] = xavier_init + α × PE(j/L_k)
+           where PE(p) is a sinusoidal positional encoding at position p,
+           and α is a scaling factor controlling the init signal strength.
+        """
         nn.init.xavier_uniform_(self.input_proj.weight)
         nn.init.zeros_(self.input_proj.bias)
 
-        for queries in self.concept_queries:
-            nn.init.xavier_uniform_(queries)
+        # Initialize concept queries
+        if self.use_positional_query_init:
+            # Positional initialization: add segment-scoped positional prior
+            # α controls the strength of positional signal vs random signal
+            # A moderate α lets the model quickly discover position structure
+            # while still allowing training to override the prior
+            positional_init_alpha = 0.5
+
+            for level_idx, queries in enumerate(self.concept_queries):
+                L_k = queries.shape[0]
+                D = queries.shape[1]
+
+                # Step 1: Xavier uniform base
+                nn.init.xavier_uniform_(queries)
+
+                # Step 2: Add positional component
+                # Normalized positions: [0, 1/L_k, 2/L_k, ..., (L_k-1)/L_k]
+                positions_norm = torch.arange(L_k, dtype=torch.float32) / L_k
+
+                # Sinusoidal positional encoding at normalized positions
+                # Dividing by 2i for the standard PE formula
+                dim_half = D // 2
+                pe = torch.zeros(L_k, D)
+                div_term = torch.exp(
+                    torch.arange(0, dim_half, dtype=torch.float32)
+                    * -(math.log(10000.0) / dim_half)
+                )
+                pe[:, 0::2] = torch.sin(
+                    positions_norm.unsqueeze(1) * div_term.unsqueeze(0)
+                )
+                pe[:, 1::2] = torch.cos(
+                    positions_norm.unsqueeze(1) * div_term.unsqueeze(0)
+                )
+
+                # Add positional signal to queries
+                # Q_k[j] += α * PE(j/L_k)
+                with torch.no_grad():
+                    queries.add_(positional_init_alpha * pe)
+        else:
+            # Random initialization: pure Xavier uniform
+            for queries in self.concept_queries:
+                nn.init.xavier_uniform_(queries)
 
         for proj in self.level_projs:
             nn.init.xavier_uniform_(proj.weight)
@@ -357,29 +441,38 @@ class HybridConceptGenerator(nn.Module):
         # =================================================================
         # Step 2: Compute residual from previous levels (ResidualAttentivePooling)
         # =================================================================
+        # Following VAR Section 5.2.2:
+        #   f_rest = H_proj - f_hat (what still needs encoding)
+        #   f_hat = Σ A_prev^T @ C_prev_base (what has been encoded)
+        #
+        # CRITICAL: reconstruction uses C_prev_BASE only (not refined),
+        # ensuring residual flow is clean without double-counting.
+        #
         if previous_level_concepts is None or len(previous_level_concepts) == 0:
             # Level 0: No previous concepts, use full projected hidden states
             residual_hidden = projected_hidden
         else:
-            # Level k > 0: Subtract reconstruction from previous concepts
-            # Reconstruct H from previous concepts using cached attentions
+            # Level k > 0: Subtract reconstruction from previous BASE concepts
+            # Reconstruct H from previous levels using cached attentions
+            # NOTE: _cached_base_concepts stores the BASE (pre-refinement) concepts
+            # that entered the residual flow during training
             reconstructed_hidden = torch.zeros_like(projected_hidden)
 
-            for prev_level_idx, (prev_concepts, prev_attention) in enumerate(
-                zip(previous_level_concepts, self._cached_attentions)
+            for prev_level_idx, (prev_base_concept, prev_attention) in enumerate(
+                zip(self._cached_base_concepts, self._cached_attentions)
             ):
                 # prev_attention: [B, L_prev, L]
-                # prev_concepts: [B, L_prev, D]
-                # Reconstruction: A^T @ C -> [B, L, L_prev] @ [B, L_prev, D] = [B, L, D]
+                # prev_base_concept: [B, L_prev, D] (BASE, not refined)
+                # Reconstruction: A^T @ C_base -> [B, L, L_prev] @ [B, L_prev, D] = [B, L, D]
                 reconstructed_hidden = reconstructed_hidden + torch.bmm(
-                    prev_attention.transpose(1, 2), prev_concepts
+                    prev_attention.transpose(1, 2), prev_base_concept
                 )
 
-            # Residual = Original - Reconstructed
+            # Residual = Original - Reconstructed (f_rest = H_proj - f_hat)
             residual_hidden = projected_hidden - reconstructed_hidden
 
         # =================================================================
-        # Step 3: Extract concepts from residual using attention
+        # Step 3: Extract BASE concepts from residual using attention (commit)
         # =================================================================
         # Get learnable queries for this level
         level_queries = self.concept_queries[target_level_index]  # [L_k, D]
@@ -403,18 +496,30 @@ class HybridConceptGenerator(nn.Module):
         else:
             self._cached_attentions[target_level_index] = level_attention.detach()
 
-        # Extract concepts: A @ H_rest
+        # Extract BASE concepts: A @ H_rest
         # [B, L_k, L] @ [B, L, D] = [B, L_k, D]
-        level_concepts = torch.bmm(level_attention, residual_hidden)
+        level_concepts_base = torch.bmm(level_attention, residual_hidden)
 
-        # Apply level-specific projection
-        level_concepts = self.level_projs[target_level_index](level_concepts)
+        # Apply level-specific projection to base concepts
+        level_concepts_base = self.level_projs[target_level_index](level_concepts_base)
+
+        # Cache BASE concepts for future residual computation
+        # (only BASE enters f_rest, not refined)
+        if target_level_index >= len(self._cached_base_concepts):
+            self._cached_base_concepts.append(level_concepts_base.detach())
+        else:
+            self._cached_base_concepts[target_level_index] = (
+                level_concepts_base.detach()
+            )
 
         # =================================================================
         # Step 4: Refine with cross-attention (MonotonicSoftAssignment)
         # =================================================================
+        # Cross-attention adds context-aware refinement that does NOT enter f_rest.
+        # This matches training: refined C_k goes to decoder, not residual flow.
         if target_level_index > 0 and previous_level_concepts is not None:
             # Build accumulated context: [H_proj, C_0, ..., C_{k-1}]
+            # previous_level_concepts are REFINED concepts (what decoder sees)
             # Shape: prev_concepts_cat [B, ΣL_i, D]
             prev_concepts_cat = torch.cat(previous_level_concepts, dim=1)
             # Shape: context [B, L+ΣL_i, D]
@@ -428,8 +533,10 @@ class HybridConceptGenerator(nn.Module):
                 context,
             )
 
-            # Residual connection: combine residual extraction + cross-attention refinement
-            level_concepts = level_concepts + refined_concepts
+            # Residual connection: base extraction + cross-attention refinement
+            level_concepts = level_concepts_base + refined_concepts
+        else:
+            level_concepts = level_concepts_base
 
         return level_concepts
 
@@ -500,8 +607,9 @@ class HybridConceptGenerator(nn.Module):
         # =================================================================
         batch_size = encoder_hidden_states.shape[0]
 
-        # Clear cached attentions for fresh computation
+        # Clear caches for fresh computation
         self._cached_attentions = []
+        self._cached_base_concepts = []
 
         # Project to concept dimension
         projected_hidden = self.input_proj(encoder_hidden_states)  # [B, L, D]
@@ -516,6 +624,22 @@ class HybridConceptGenerator(nn.Module):
         # =================================================================
         # Extract all levels with residual decomposition
         # =================================================================
+        #
+        # CRITICAL DESIGN (following VAR Section 5.2.2):
+        #   The residual flow (f_rest) must ONLY subtract base-extracted concepts,
+        #   NOT the cross-attention refined concepts. This is because:
+        #
+        #   1. f_rest tells each level "what still needs encoding" (VAR 5.2.3)
+        #   2. Cross-attention reads from [H_proj, C_0..C_{k-1}], which includes
+        #      information already reconstructed by previous levels
+        #   3. If refined C_k enters f_rest, it double-counts this information,
+        #      violating the f_hat ≈ H_proj reconstruction target
+        #
+        #   Therefore we split:
+        #     C_k_base = A_k @ H_rest_k (commit to residual, enters f_rest)
+        #     C_k = C_k_base + refined_k (output concept, goes to decoder)
+        #     R_k = A_k^T @ C_k_base (only base concept reconstructs)
+        #
         for level_idx in range(self.config.num_levels):
             # Get queries for this level
             level_queries = self.concept_queries[level_idx]  # [L_k, D]
@@ -534,30 +658,47 @@ class HybridConceptGenerator(nn.Module):
             level_attention = F.softmax(attention_scores, dim=-1)  # [B, L_k, L]
             all_attentions.append(level_attention)
 
-            # Extract concepts from residual
-            level_concepts = torch.bmm(level_attention, residual_hidden)  # [B, L_k, D]
+            # Extract BASE concepts from residual (commit path)
+            # C_k_base: only new information from H_rest, enters residual flow
+            level_concepts_base = torch.bmm(
+                level_attention, residual_hidden
+            )  # [B, L_k, D]
 
-            # Apply level-specific projection
-            level_concepts = self.level_projs[level_idx](level_concepts)
+            # Apply level-specific projection to base concepts
+            level_concepts_base = self.level_projs[level_idx](level_concepts_base)
+
+            # Reconstruct from BASE concepts only (not refined)
+            # This is the VAR f_hat update: f_hat += A_k^T @ C_k_base
+            reconstruction = torch.bmm(
+                level_attention.transpose(1, 2), level_concepts_base
+            )  # [B, L, D]
+
+            # Update residual flow BEFORE cross-attention refinement
+            # f_hat += R_k (accumulate what's been encoded)
+            # f_rest -= R_k (tell next level what still needs encoding)
+            reconstructed_accumulator = reconstructed_accumulator + reconstruction
+            residual_hidden = residual_hidden - reconstruction
 
             # Cross-attention refinement (if not level 0)
+            # refined_k adds context-aware information that does NOT enter f_rest
+            # This is free to incorporate accumulated context without
+            # double-counting, because it only affects the output C_k,
+            # not the residual flow
             if level_idx > 0:
+                # Context includes H_proj + all previous REFINED concepts
+                # (refined concepts are what the decoder sees, so cross-attn
+                # should align with the same information the decoder uses)
                 prev_concepts_cat = torch.cat(all_level_concepts, dim=1)  # [B, ΣL_i, D]
                 context = torch.cat([projected_hidden, prev_concepts_cat], dim=1)
 
                 refined_concepts, _ = self.level_attn[level_idx](
                     expanded_queries, context, context
                 )
-                level_concepts = level_concepts + refined_concepts
+                level_concepts = level_concepts_base + refined_concepts
+            else:
+                level_concepts = level_concepts_base
 
             all_level_concepts.append(level_concepts)
-
-            # Reconstruct and update residual
-            reconstruction = torch.bmm(
-                level_attention.transpose(1, 2), level_concepts
-            )  # [B, L, D]
-            reconstructed_accumulator = reconstructed_accumulator + reconstruction
-            residual_hidden = residual_hidden - reconstruction
 
         # =================================================================
         # Compute Auxiliary Losses
@@ -600,15 +741,28 @@ class HybridConceptGenerator(nn.Module):
         """Compute boundary ordering loss (from AutoregressiveSoftBoundary).
 
         PURPOSE:
-            Enforce that concepts are ordered by position in the CoT.
-            Earlier concepts should attend to earlier positions.
+            Enforce that concepts respect CoT positional causality:
+            - Cross-level: earlier levels attend to earlier positions
+              (coarse concepts cover the beginning, fine concepts cover details)
+            - Intra-level: within each level, concepts are ordered by position
+              (earlier concept slots attend to earlier CoT positions)
 
         MATHEMATICS:
+            Following VAR's scale-level causality (Section 5.3.1):
+            - Level k sees Level 0..k (inter-level causal)
+            - Within level k, all positions are parallel (intra-level parallel)
+
+            However, unlike images with natural spatial coordinates, text
+            concepts need an explicit ordering signal. We enforce:
+
             For each concept j, compute expected position:
                 exp_pos[j] = Σ_t A[j, t] × t
 
-            Enforce monotonicity:
-                L_order = Σ_j ReLU(exp_pos[j] - exp_pos[j+1] + margin)
+            Two ordering constraints:
+            1. Intra-level: consecutive concepts within same level are ordered
+               L_intra = Σ_level Σ_j ReLU(exp_pos[j] - exp_pos[j+1] + margin)
+            2. Inter-level: last concept of level k < first concept of level k+1
+               L_inter = Σ_k ReLU(last_pos_k - first_pos_{k+1} + margin)
 
         DIMENSION FLOW:
             Input:
@@ -628,33 +782,63 @@ class HybridConceptGenerator(nn.Module):
         seq_len = encoder_hidden_states.shape[1]
         device = encoder_hidden_states.device
 
-        # Concatenate all attention weights: [B, N_total, L]
-        # where N_total = sum of all level lengths
-        all_attention_cat = torch.cat(all_attentions, dim=1)  # [B, N_total, L]
-        num_total_concepts = all_attention_cat.shape[1]
-
         # Position indices: [L]
         positions = torch.arange(seq_len, device=device, dtype=torch.float32)
 
-        # Compute expected position for each concept: [B, N_total]
-        # exp_pos[b, j] = Σ_t A[b, j, t] × t
-        expected_positions = torch.sum(
-            all_attention_cat * positions.view(1, 1, seq_len),  # [B, N_total, L]
-            dim=-1,  # Sum over positions
-        )  # [B, N_total]
+        total_violation = torch.tensor(0.0, device=device)
 
-        # Compute ordering violation
-        # For consecutive concepts, enforce exp_pos[j] < exp_pos[j+1]
-        current_pos = expected_positions[:, :-1]  # [B, N_total-1]
-        next_pos = expected_positions[:, 1:]  # [B, N_total-1]
+        # =================================================================
+        # Constraint 1: Intra-level ordering
+        # Within each level, enforce that consecutive concept slots
+        # attend to non-decreasing positions.
+        # This is a soft version of VAR's spatial position ordering.
+        # =================================================================
+        for level_idx, level_attention in enumerate(all_attentions):
+            # level_attention: [B, L_k, L]
+            L_k = level_attention.shape[1]
 
-        # Violation: current_pos - next_pos + margin > 0
-        violation = F.relu(current_pos - next_pos + self.order_margin)
+            # Compute expected position for each concept in this level
+            # exp_pos[b, j] = Σ_t A[b, j, t] × t
+            expected_positions = torch.sum(
+                level_attention * positions.view(1, 1, seq_len),
+                dim=-1,
+            )  # [B, L_k]
 
-        # Average over batch and concepts
-        order_loss = violation.mean()
+            if L_k > 1:
+                # Enforce monotonicity: exp_pos[j] < exp_pos[j+1]
+                current_pos = expected_positions[:, :-1]  # [B, L_k-1]
+                next_pos = expected_positions[:, 1:]  # [B, L_k-1]
 
-        return order_loss
+                violation = F.relu(current_pos - next_pos + self.order_margin)
+                total_violation = total_violation + violation.mean()
+
+        # =================================================================
+        # Constraint 2: Inter-level ordering
+        # Last concept of level k should attend to earlier positions than
+        # first concept of level k+1.
+        # This ensures coarse-to-fine: level k covers the "beginning" of
+        # what remains, level k+1 covers later details.
+        # =================================================================
+        if len(all_attentions) > 1:
+            level_expected_positions = []
+            for level_idx, level_attention in enumerate(all_attentions):
+                exp_pos = torch.sum(
+                    level_attention * positions.view(1, 1, seq_len),
+                    dim=-1,
+                )  # [B, L_k]
+                level_expected_positions.append(exp_pos)
+
+            for k in range(len(all_attentions) - 1):
+                # Last concept of level k
+                last_pos_k = level_expected_positions[k][:, -1]  # [B]
+                # First concept of level k+1
+                first_pos_k1 = level_expected_positions[k + 1][:, 0]  # [B]
+
+                # Enforce: last_pos_k < first_pos_k1
+                violation = F.relu(last_pos_k - first_pos_k1 + self.order_margin)
+                total_violation = total_violation + violation.mean()
+
+        return total_violation
 
     def get_level_config(self, level_idx: int) -> Dict[str, Any]:
         """Get configuration for a specific level.
