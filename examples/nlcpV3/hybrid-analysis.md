@@ -16,6 +16,19 @@ We use a two-level subscript **C_{k,j}** to unambiguously distinguish inter-leve
 
 Level configuration: L_0=1, L_1=2, L_2=4, L_3=8, L_4=16, L_5=32 (total: 63 concepts)
 
+### 1.1.1 Notation Convention
+
+Throughout this document, we use **our NLCP notation** C_{k,j} consistently, even
+when describing other methods. When referencing DLCM's single-level concepts
+(written as c_k in the DLCM paper), we write them as C_{k,j} and add a note
+explaining the mapping. This is because:
+
+- DLCM's c_1, c_2, c_3, ... correspond to our C_{k,0}, C_{k,1}, C_{k,2}, ...
+  at any given level k
+- DLCM has no inter-level dimension — it only partitions the CoT at one
+  granularity, so its concept index maps directly to our intra-level index j
+- Our C_{k,j} **subsumes** DLCM's c_j by adding the level dimension k
+
 ### 1.2 Key Variables (following VAR.md Section 5.2.2)
 
 | Variable         | VAR Image Domain                | Our Text Domain                               | Physical Meaning              |
@@ -197,12 +210,17 @@ From dlcm.md Section 3.2, DLCM establishes a **hard segment-concept corresponden
 
 ```
 CoT: "Q: What is 2+3? A: Let me solve this step by step. 2+3=5. Answer: 5"
-      └── Segment 1 ──┘└──── Segment 2 ────┘└── Seg 3 ──┘└Seg 4┘└Seg 5┘
+      └── Segment 0 ──┘└──── Segment 1 ────┘└── Seg 2 ──┘└Seg 3┘└Seg 4┘
             ↓                    ↓                ↓           ↓       ↓
-          c_1                  c_2              c_3         c_4     c_5
+         C_{k,0}              C_{k,1}         C_{k,2}    C_{k,3}  C_{k,4}
 ```
 
-Each concept c_k = mean(S_k) contains information from exactly one disjoint segment. This guarantees:
+> **Notation mapping**: DLCM only has a single-level concept partition, so its
+> c_1, c_2, c_3, ... correspond to our C_{k,0}, C_{k,1}, C_{k,2}, ... at any
+> given level k. DLCM has no inter-level dimension — it only partitions at one
+> granularity. Our C_{k,j} generalizes DLCM's c_j by adding the level index k.
+
+Each concept C_{k,j} = mean(S_j) contains information from exactly one disjoint segment. This guarantees:
 - **Non-overlap**: No position belongs to two concepts
 - **Coverage**: Every position belongs to some concept
 - **Ordering**: Segments (and therefore concepts) are sequentially ordered
@@ -251,7 +269,7 @@ structure has already been subtracted out.
 ```
 
 **Comparison with DLCM**:
-- DLCM: hard boundary, c_k = mean(S_k), segments are disjoint sets
+- DLCM: hard boundary, C_{k,j} = mean(S_j), segments are disjoint sets
 - Our design: soft boundary, C_{k,j} = A_{k,j} @ H_rest_k, concepts attend to different (mostly non-overlapping) regions because residual removes claimed information
 
 #### Mechanism 3: Ordering Loss (Intra-Level Only)
@@ -346,7 +364,11 @@ A subtle but important distinction:
 
 **Concept Content** (what does C_{k,j} contain?): Determined by A_{k,j} @ H_rest_k — what information is extracted from those positions. This is governed by the encoder representations and the level_proj transformation.
 
-In DLCM: c_k = mean(S_k). The content is simply the average of token representations in segment S_k. The position is determined by the segment boundaries.
+In DLCM: C_{k,j} = mean(S_j). The content is simply the average of token representations in segment S_j. The position is determined by the segment boundaries.
+
+> **Notation**: DLCM uses c_k for its single-level concepts. Since DLCM only has one
+> level of segmentation, DLCM's c_k ≡ our C_{k,j} at whichever single level DLCM
+> operates. Our notation C_{k,j} subsumes DLCM's by adding the level dimension.
 
 In our design: C_{k,j}_base = level_proj(A_{k,j} @ H_rest_k). The content is a learned, weighted combination of residual representations. The position emerges from attention patterns.
 
