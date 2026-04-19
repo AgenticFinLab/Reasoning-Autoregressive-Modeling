@@ -1,4 +1,4 @@
-# HybridConceptGenerator: Deep Design Analysis
+# Concept Pyramid Architecture: From CoT to Hierarchical Concepts
 
 ## 1. Notation and Concepts
 
@@ -8,13 +8,14 @@ We use a two-level subscript **C_{k,j}** to unambiguously distinguish inter-leve
 
 | Symbol      | Meaning                                                       | Example                            |
 |-------------|---------------------------------------------------------------|------------------------------------|
-| **k**       | Level index (inter-level)                                     | k=0 is coarsest, k=5 is finest     |
-| **j**       | Concept slot within level k (intra-level)                     | j=0,1,...,L_k-1                    |
+| **K**       | Total number of levels                                        | K=6 (levels 0 to 5)                |
+| **k**       | Level index (inter-level)                                     | k ∈ {0, 1, ..., K-1}               |
+| **j**       | Concept slot within level k (intra-level)                     | j ∈ {0, 1, ..., L_k-1}             |
 | **C_{k,j}** | The j-th concept at level k                                   | C_{5,17} = 18th concept at level 5 |
-| **L_k**     | Number of concept slots at level k                            | L_0=1, L_1=2, ..., L_5=32          |
+| **L_k**     | Number of concept slots at level k                            | L_k = 2^k for k < K                |
 | **C_k**     | All concepts at level k: [C_{k,0}, C_{k,1}, ..., C_{k,L_k-1}] | C_5 has shape [B, 32, D]           |
 
-Level configuration: L_0=1, L_1=2, L_2=4, L_3=8, L_4=16, L_5=32 (total: 63 concepts)
+Level configuration (K=6): L_0=1, L_1=2, L_2=4, L_3=8, L_4=16, L_5=32 (total: 63 concepts)
 
 ### 1.1.1 Notation Convention
 
@@ -33,7 +34,7 @@ explaining the mapping. This is because:
 
 | Variable         | VAR Image Domain                | Our Text Domain                               | Physical Meaning              |
 |------------------|---------------------------------|-----------------------------------------------|-------------------------------|
-| **H_proj**       | z = Encoder(image)              | H_proj = Linear(Encoder(Q+CoT))               | Full information to decompose |
+| **H_proj**       | z = Encoder(image)              | H_proj = Linear(Encoder(CoT))                 | CoT information to decompose  |
 | **H_rest**       | f_rest = "still needs encoding" | H_rest_k = H_proj - Σ_{i<k} R_i               | Residual at level k           |
 | **H_hat**        | f_hat = "already encoded"       | H_hat_k = Σ_{i<k} R_i                         | Accumulated reconstruction    |
 | **A_{k,j}**      | (implicit in VQ)                | A_{k,j} = softmax(Q_{k,j} @ H_rest_k^T)       | Attention weights for C_{k,j} |
@@ -79,6 +80,95 @@ Level 5 = [C_{5,0},  C_{5,1},  ...,  C_{5,31}]
 
 **Inter-level** governs **what granularity** of information is captured.
 **Intra-level** governs **which segment** of the CoT is captured at that granularity.
+
+### 1.4 Overall Architecture: From CoT to Concept Pyramid to Solution
+
+This section provides a high-level overview of how the hybrid design achieves the research goal: **compressing CoT into a hierarchical concept pyramid for efficient reasoning**.
+
+#### 1.4.1 The Two-Phase Pipeline
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         TRAINING PHASE                                       │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│  Input: (Q, CoT, Solution)                                                   │
+│         │   │       │                                                        │
+│         │   │       └── Used to validate pyramid's reasoning capability      │
+│         │   └── Core source for building concept pyramid                     │
+│         └── Prior/context (not part of pyramid)                              │
+│                                                                              │
+│  Step 1: ConceptPyramidBuilder                                               │
+│          ├── Encodes CoT → H_CoT                                            │
+│          ├── Applies soft attention with learnable queries (1→2→4→8→16→32)   │
+│          ├── Uses residual reconstruction for coarse-to-fine decomposition   │
+│          └── Outputs: Groundtruth [C_0, C_1, ..., C_{K-1}]  (K=6 levels)    │
+│                                                                              │
+│  Step 2: ConceptPredictor (Decoder-only Transformer)                         │
+│          ├── Input sequence: [Q, C_0, C_1, ..., C_{K-1}, Solution]          │
+│          ├── Training: Teacher forcing with causal masking                   │
+│          ├── Learns: Given Q and previous concepts, predict next level       │
+│          └── Output: Predicted concepts matching Builder's groundtruth       │
+│                                                                              │
+│  Loss: L_reconstruction + L_ordering + L_prediction + L_solution             │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+                                    ↓
+                                    ↓ Trained models
+                                    ↓
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                        INFERENCE PHASE                                       │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                              │
+│  Input: Q only (no CoT, no Solution)                                         │
+│                                                                              │
+│  Step 1: ConceptPredictor autoregressively generates                         │
+│          Q → Ĉ_0 → Ĉ_1 → Ĉ_2 → Ĉ_3 → Ĉ_4 → Ĉ_5                              │
+│                                                                              │
+│  Step 2: Solution Decoder                                                    │
+│          [Q, Ĉ_0, Ĉ_1, Ĉ_2, Ĉ_3, Ĉ_4, Ĉ_5] → Solution                       │
+│                                                                              │
+│  Output: Solution (without explicit CoT generation)                          │
+│                                                                              │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+#### 1.4.2 Key Design Principles
+
+**1. Builder-Predictor Separation**
+- **Builder**: Uses soft attention + residual flow to extract groundtruth from CoT
+- **Predictor**: Uses decoder-only Transformer to autoregressively generate concepts
+- **Rationale**: Builder defines "what is a good pyramid", Predictor learns "how to generate it"
+
+**2. Preserved Core Mechanisms**
+All mechanisms from Section 1.3 are retained:
+- **Query expansion**: 1→2→4→8→16→32 learnable queries per level
+- **Soft attention**: Competition-based segment-concept correspondence
+- **Residual reconstruction**: Coarse-to-fine information decomposition
+- **Intra-level ordering**: Concepts ordered by CoT position
+- **Commit-refinement separation**: Clean residual flow
+
+**3. Training-Inference Alignment**
+- Training: Predictor sees groundtruth concepts (teacher forcing)
+- Inference: Predictor generates concepts step-by-step
+- Both use same causal structure: level k depends on levels < k
+
+#### 1.4.3 Why This Design Works
+
+**Efficiency**: At inference, we bypass CoT generation:
+```
+Traditional: Q → [long CoT text] → Solution  (slow, many tokens)
+Ours:        Q → [Σ_{k=0}^{K-1} L_k concepts] → Solution   (fast, hierarchical)
+```
+
+**Effectiveness**: The concept pyramid preserves CoT's reasoning structure:
+- Level 0 (1 concept): Global reasoning strategy
+- Level 3 (8 concepts): Key reasoning steps
+- Level 5 (32 concepts): Fine-grained details
+
+**Learnability**: Two-phase design provides clear training signals:
+- Builder ensures good pyramid structure exists
+- Predictor learns to generate this structure from Q alone
 
 ---
 
@@ -185,13 +275,13 @@ Level k processing:
 
 ### 2.4 Potential Issue: Greedy Early Levels
 
-**Concern**: Level 0 (1 concept) might extract too much information, leaving H_rest_1 nearly empty for levels 1-5.
+**Concern**: Level 0 (1 concept) might extract too much information, leaving H_rest_1 nearly empty for levels 1 to K-1.
 
 **Analysis**: This is constrained by the rank bottleneck. R_0 has rank 1 — even if C_{0,0}_base contains a lot of "energy", the reconstruction A_0^T @ C_{0,0}_base is still rank 1. It can only capture one linear direction of H_proj. The remaining directions are preserved in H_rest_1.
 
 However, `level_proj` is a linear layer that can amplify the magnitude of C_{0,0}_base. If C_{0,0}_base has very large norm, then R_0 = A_0^T @ C_{0,0}_base can "absorb" a disproportionate share of H_proj's magnitude, leaving H_rest_1 with small but informationally rich residuals.
 
-**Is this actually a problem?** The reconstruction loss provides a corrective signal: if levels 1-5 cannot reconstruct H_rest (because it's nearly zero), the total loss increases. The model is incentivized to balance extraction across levels. But the incentive is indirect — the loss only measures total coverage, not per-level balance.
+**Is this actually a problem?** The reconstruction loss provides a corrective signal: if levels 1 to K-1 cannot reconstruct H_rest (because it's nearly zero), the total loss increases. The model is incentivized to balance extraction across levels. But the incentive is indirect — the loss only measures total coverage, not per-level balance.
 
 **Mitigation strategies** (for future consideration, not current implementation):
 1. Per-level reconstruction loss: L_balanced = Σ_k ||R_k||² / ||H_proj||² (encourage each level to contribute)
@@ -245,7 +335,7 @@ After level k extracts R_k from H_rest_k, the extracted information is removed:
 H_rest_{k+1} = H_rest_k - R_k
 ```
 
-At level 5, H_rest_5 = H_proj - R_0 - R_1 - ... - R_4. The residual flow means:
+At level k=K-1, H_rest_{K-1} = H_proj - Σ_{i=0}^{K-2} R_i. The residual flow means:
 - Positions whose information was already captured by earlier levels have diminished representation in H_rest_5
 - C_{5,j} = A_{5,j} @ H_rest_5 can only extract what remains
 - This creates a natural "soft boundary" effect: concepts at level 5 physically cannot attend to information already claimed by coarser levels
@@ -333,7 +423,7 @@ of the CoT, just like DLCM's hard segmentation — but enforced softly via loss.
 | Ordering              | Guaranteed by sequential segments | Enforced by ordering loss                            | Both achieve                          |
 | Adaptive boundaries   | Similarity threshold τ            | Learned via concept_queries                          | Soft is more adaptive                 |
 | Boundary sharpness    | Binary (boundary or not)          | Gradual (attention weights decay smoothly)           | Soft handles fuzzy boundaries better  |
-| Multi-scale hierarchy | None (single granularity)         | 6 levels, coarse-to-fine                             | Soft is strictly superior             |
+| Multi-scale hierarchy | None (single granularity)         | K levels, coarse-to-fine                             | Soft is strictly superior             |
 | Differentiability     | Threshold not differentiable      | Fully differentiable                                 | Soft is strictly superior             |
 
 **Key insight**: DLCM's hard segmentation is a special case of soft attention where attention weights are binary (0 or 1). Our soft attention can learn to approximate hard segmentation when appropriate, but also allows smooth transitions where semantic boundaries are fuzzy. This is **strictly more expressive** than hard segmentation.
@@ -379,178 +469,210 @@ Our design is strictly more expressive because:
 
 ---
 
-## 4. Training-Inference Alignment
+## 4. Two-Phase Architecture: Builder and Predictor
 
-### 4.1 The Two-Phase Problem in VAR
+Following VAR's design principle, we explicitly separate **concept extraction** from **concept generation**:
 
-VAR uses two separate training phases:
+### 4.1 ConceptPyramidBuilder (Phase 1: Extraction)
 
-**Phase 1 (VQ-VAE)**: Given image → extract discrete indices
-- Input: complete image z
-- Output: indices per scale
-- Purpose: learn the codebook and extraction mechanism
+The Builder constructs the groundtruth concept pyramid from CoT using soft attention and residual reconstruction.
 
-**Phase 2 (VAR Transformer)**: Given f_hat → predict next scale's indices
-- Input: accumulated features from previous scales
-- Output: probability distribution over codebook for current scale
-- Purpose: learn to **generate** indices autoregressively
+**Input**: (Q, CoT, Solution)
+- **CoT**: Core source for building the concept pyramid
+- **Q**: Context/prior (conditions the extraction but doesn't enter pyramid)
+- **Solution**: Used for auxiliary loss (validating pyramid's reasoning capability)
 
-The key insight: Phase 1 is **encoding** (information extraction), Phase 2 is **decoding** (information generation). They are different models with different inputs.
-
-### 4.2 Our Design: Single Mechanism for Both
-
-Our concept generator serves as the **encoder** (Phase 1 equivalent). It extracts concepts from encoder hidden states:
-
+**Mechanism**:
 ```
-Training:   H = Encoder(Q + CoT)  →  concepts = Generator(H)
-Inference:  H = Encoder(Q)        →  concepts = Generator(H)
-```
+H_CoT = Encoder(CoT)  # Encode CoT to hidden states
+H_rest_0 = H_CoT
 
-**Critical difference from VAR**: In VAR, the VQ-VAE always receives the complete image z (both training and inference use the same input). In our design, training uses Q+CoT while inference uses Q-only. The input distribution **shifts** between training and inference.
-
-**Is this a problem?** Not necessarily, because:
-
-1. **Concept queries learn structural templates**: Q_{k,j} learns "attend to the j-th segment's structure at level k." This template is content-independent — it works regardless of whether the input is Q+CoT or Q-only.
-
-2. **Encoder(Q) still contains structural information**: The question encoding contains information about the problem structure, entities, and relationships. These provide sufficient signal for concept extraction at all levels.
-
-3. **NTP loss provides end-to-end feedback**: In the full NLCP pipeline, the decoder's next-token prediction loss provides a training signal that ensures concepts extracted from Q-only are useful for token prediction.
-
-### 4.3 What About VAR's Phase 2 (Generation)?
-
-In VAR, Phase 2 (Transformer) is needed because the VQ-VAE alone cannot **generate** — it can only **extract**. Generation requires predicting indices without seeing the actual image.
-
-In our framework, the concept generator plays both roles:
-- **Training**: Extract concepts from Q+CoT (encoding, like Phase 1)
-- **Inference**: Extract concepts from Q (encoding with partial input)
-
-The "generation" aspect comes from the level-level autoregressive structure:
-```
-Level 0: C_0 = Generator(H, level=0, previous=None)
-Level 1: C_1 = Generator(H, level=1, previous=[C_0])
-Level k: C_k = Generator(H, level=k, previous=[C_0,...,C_{k-1}])
+for k in range(K):  # K=6 levels: 0, 1, 2, 3, 4, 5
+    # Use learnable queries Q_{k,0}, ..., Q_{k,L_k-1}
+    A_k = softmax(Q_k @ H_rest_k^T / sqrt(D))
+    C_k_base = level_proj(A_k @ H_rest_k)
+    
+    # Refine with cross-attention to previous concepts
+    C_k_refined = CrossAttn(Q_k, [C_0, ..., C_{k-1}], [C_0, ..., C_{k-1}])
+    C_k = C_k_base + C_k_refined
+    
+    # Residual update
+    R_k = A_k^T @ C_k_base
+    H_rest_{k+1} = H_rest_k - R_k
 ```
 
-Each level conditions on previous levels' concepts, creating an autoregressive chain. This is analogous to VAR's Phase 2 (predict next scale given previous scales), but embedded within the extraction mechanism itself rather than a separate model.
+**Output**: Groundtruth concept pyramid [C_0, C_1, ..., C_{K-1}]
 
-**Trade-off**:
-- VAR's two-phase design is cleaner conceptually but requires training a separate Transformer
-- Our single-mechanism design is simpler but relies on the concept queries generalizing from Q+CoT to Q-only
-
-**Assessment**: The single-mechanism design is appropriate for our research goal. The concept queries, combined with cross-attention refinement from previous levels, provide sufficient context for meaningful concept extraction even from Q-only input. The end-to-end NTP loss in the full NLCP pipeline will provide the training signal needed to ensure Q-only extraction quality.
-
-### 4.4 Inference Path Detail
-
-During inference, `forward_next_level` is called sequentially:
-
+**Loss**:
 ```
-Step 0: Compute H_proj = input_proj(Encoder(Q))
-        C_0 = forward_next_level(H_proj, previous=None, level=0)
-        Cache: A_0, C_{0,0}_base
+L_builder = L_reconstruction + λ_order × L_ordering + λ_solution × L_solution
 
-Step 1: Compute H_rest_1 = H_proj - A_0^T @ C_{0,0}_base   (from cache)
-        C_1 = forward_next_level(H_proj, previous=[C_0], level=1)
-        Cache: A_1, C_{1,0}_base, C_{1,1}_base
-
-Step k: Compute H_rest_k = H_proj - Σ_{i<k} A_i^T @ C_i_base  (from cache)
-        context = [H_proj, C_0, ..., C_{k-1}]
-        C_k_base = level_proj(A_k @ H_rest_k)
-        refined_k = CrossAttn(Q_k, context, context)
-        C_k = C_k_base + refined_k
-        Cache: A_k, C_k_base
+- L_reconstruction: ||reconstruct([C_0, ..., C_{K-1}]) - H_CoT||²
+- L_ordering: Intra-level concept ordering (Section 3.2)
+- L_solution: ||predict_solution([C_0, ..., C_{K-1}]) - Solution||²
 ```
 
-The caches (_cached_attentions and _cached_base_concepts) ensure that the residual computation at each step matches the training computation exactly. This is the inference equivalent of VAR's f_hat accumulation — at each step, f_hat = Σ_{i<k} A_i^T @ C_i_base provides the "already encoded" context, and f_rest = H_proj - f_hat provides "what still needs encoding."
+**Key Properties**:
+- Builder is only used during training to generate groundtruth
+- All mechanisms from Sections 2-3 are employed (soft attention, residual flow, query expansion)
+- The output serves as training targets for the Predictor
+
+### 4.2 ConceptPredictor (Phase 2: Generation)
+
+The Predictor learns to autoregressively generate the concept pyramid from Q alone, mimicking the Builder's output.
+
+**Architecture**: Decoder-only Transformer with level-wise causal masking
+
+**Training** (Teacher Forcing):
+```
+Input sequence: [Q_emb, C_0, C_1, ..., C_{K-1}, Solution]
+                 ↑    ↑    ↑          ↑          ↑
+               条件  GT   GT          GT         GT
+
+Position 0 (Q):      Input [Q]              → Predict C_0
+Position 1 (C_0):    Input [Q, C_0]         → Predict C_1
+Position 2-3 (C_1):  Input [Q, C_0, C_1]    → Predict C_2
+...
+Position Σ_{i=0}^{K-1} L_i+ (C_{K-1}):  Input [Q, C_0..C_{K-1}] → Predict Solution
+```
+
+**Level-wise Causal Masking**:
+- Within a level: parallel (all positions attend to each other)
+- Across levels: causal (level k can only attend to levels < k)
+
+**Loss**:
+```
+L_predictor = Σ_{k=0}^{K-1} MSE(Ĉ_k, C_k) + L_solution
+
+Where C_k are groundtruth concepts from Builder
+```
+
+**Inference** (Autoregressive Generation):
+```
+Step 0: Q → Ĉ_0
+Step 1: Q, Ĉ_0 → Ĉ_1
+Step 2: Q, Ĉ_0, Ĉ_1 → Ĉ_2
+...
+Step K: Q, Ĉ_0, ..., Ĉ_{K-1} → Solution  (K=6)
+```
+
+### 4.3 Why This Separation?
+
+**VAR's Lesson**: VQ-VAE (extraction) and Transformer (generation) are separate because:
+1. Extraction requires seeing the full information
+2. Generation requires predicting without seeing the target
+
+**Our Design**:
+- **Builder**: Has access to CoT, uses soft attention to extract hierarchical structure
+- **Predictor**: Only sees Q, learns to generate the same structure autoregressively
+
+**Benefits**:
+1. **Clear training signal**: Builder provides high-quality groundtruth
+2. **Aligned inference**: Predictor mimics Builder's output distribution
+3. **Efficient inference**: No need to generate CoT, directly predict concepts
+
+### 4.4 Relationship to VAR
+
+| VAR Component             | Our Equivalent        | Role                                            |
+|---------------------------|-----------------------|-------------------------------------------------|
+| VQ-VAE (Phase 1)          | ConceptPyramidBuilder | Extract groundtruth from full information       |
+| VAR Transformer (Phase 2) | ConceptPredictor      | Generate autoregressively from condition        |
+| Multi-scale indices       | Concept pyramid       | Hierarchical discrete/continuous representation |
+| VAE Decoder               | Solution Decoder      | Decode final output from concepts               |
+
+**Key Difference**: VAR predicts discrete indices; we predict continuous concepts. This is because:
+- Our Builder uses soft attention (continuous)
+- We want to preserve gradient flow end-to-end
+- Continuous concepts are more expressive for text reasoning
 
 ---
 
 ## 5. Loss Function Analysis
 
-### 5.1 Reconstruction Loss
+We have two separate loss functions for the two phases.
+
+### 5.1 ConceptPyramidBuilder Loss
+
+The Builder's loss ensures high-quality groundtruth concept pyramid extraction.
+
+#### 5.1.1 Reconstruction Loss
 
 ```
-L_recon = ||H_hat_K - H_proj||²
+L_recon = ||H_hat_K - H_CoT||²
 ```
 
-This is the primary training signal, inherited from VAR's VQ loss. It ensures that the concept pyramid **preserves all information** from H_proj.
+Ensures the concept pyramid **preserves all information** from CoT.
 
-**What it guarantees**: If L_recon → 0, then Σ_k A_k^T @ C_k_base → H_proj. Every position in H_proj is reconstructable from the concept pyramid. This is the **full coverage** guarantee.
+**What it guarantees**: If L_recon → 0, then Σ_k A_k^T @ C_k_base → H_CoT. Every position in H_CoT is reconstructable from the concept pyramid.
 
-**What it does NOT guarantee**:
-- Balanced extraction across levels (one level could dominate)
-- Focused attention patterns (concepts could be diffuse)
-- Meaningful semantic content (concepts could be arbitrary linear combinations)
-
-### 5.2 Ordering Loss (Intra-Level Only)
+#### 5.1.2 Ordering Loss (Intra-Level Only)
 
 ```
 L_order = Σ_k Σ_j ReLU(exp_pos[C_{k,j}] - exp_pos[C_{k,j+1}] + margin)
 ```
 
-where exp_pos[C_{k,j}] = Σ_t A_{k,j}(t) × t is the expected CoT position that concept C_{k,j} attends to.
+where exp_pos[C_{k,j}] = Σ_t A_{k,j}(t) × t is the expected CoT position.
 
-**Intra-level ordering**: Within each level, concept slots are ordered by the expected CoT position they attend to. C_{k,0} focuses on earlier positions, C_{k,L_k-1} on later positions.
+Ensures concepts within each level are ordered by CoT position (Section 3.2).
 
-**Concrete example for Level 2 (4 concepts)**:
-```
-CoT: "Let me solve this. First, 2+3=5. Then, 5×4=20. So the answer is 20."
-       └── pos 0-9 ──┘└── pos 10-19 ──┘└── pos 20-29 ──┘└ pos 30-39 ┘
+**Why no inter-level ordering**: Levels cover the SAME CoT at different granularities, not sequential segments (Section 3.2).
 
-What we WANT (ordered):              What we DON'T want (disordered):
-  C_{2,0} → exp_pos ≈ 5               C_{2,0} → exp_pos ≈ 25
-  C_{2,1} → exp_pos ≈ 15              C_{2,1} → exp_pos ≈ 5
-  C_{2,2} → exp_pos ≈ 25              C_{2,2} → exp_pos ≈ 35
-  C_{2,3} → exp_pos ≈ 35              C_{2,3} → exp_pos ≈ 15
-
-L_order penalizes when exp_pos[C_{2,j}] > exp_pos[C_{2,j+1}]:
-  violation = ReLU(exp_pos[j] - exp_pos[j+1] + margin)
-  This is zero when concepts are correctly ordered, positive otherwise.
-```
-
-**Why inter-level ordering is NOT needed**:
-
-Inter-level ordering ("last concept of level k attends to earlier positions than first concept of level k+1") is incorrect because levels are not sequentially ordered — they cover the SAME CoT at different granularities.
+#### 5.1.3 Solution Loss (Auxiliary)
 
 ```
-Level 1 (2 concepts):  C_{1,0} ~ [0, L/2),   C_{1,1} ~ [L/2, L)
-Level 2 (4 concepts):  C_{2,0} ~ [0, L/4),   C_{2,1} ~ [L/4, L/2),
-                        C_{2,2} ~ [L/2, 3L/4), C_{2,3} ~ [3L/4, L)
-
-Inter-level ordering would demand: exp_pos[C_{1,1}] < exp_pos[C_{2,0}]
-  → 0.75L < 0.125L  → IMPOSSIBLE
-
-Level 1's last concept covers the CoT's second half.
-Level 2's first concept covers the CoT's first quarter.
-They are different segments at different granularities — no ordering exists.
-
-The coarse-to-fine structure is guaranteed by:
-1. Rank bottleneck: Level 0 has capacity 1, Level 5 has capacity 32
-2. Residual flow: Each level subtracts out what it captured, forcing
-   finer levels to focus on remaining (finer) details
+L_solution_builder = ||predict_solution([C_0, ..., C_{K-1}]) - Solution||²
 ```
 
-### 5.3 Interaction Between Losses
+Validates that the concept pyramid contains sufficient information to derive the Solution.
 
-The two losses work together:
-
-```
-L_recon:  "Preserve ALL information" → encourages comprehensive attention
-L_order:  "Order the attention by position" → encourages structured attention
-```
-
-Without L_order, L_recon alone might produce: each concept attends uniformly to all positions (maximum coverage, minimum structure).
-
-Without L_recon, L_order alone might produce: well-ordered but informationally empty concepts (the ordering constraint is satisfied but no useful information is captured).
-
-Together: concepts that are both informationally rich and positionally structured.
-
-### 5.4 Total Loss
+#### 5.1.4 Total Builder Loss
 
 ```
-L_total = L_recon + λ_order × L_order
+L_builder = L_recon + λ_order × L_order + λ_solution × L_solution_builder
 ```
 
-λ_order controls the trade-off between information preservation and positional structure. Too high: concepts are well-ordered but may sacrifice information. Too low: concepts preserve information but lack segment structure. This is a hyperparameter for experimental tuning.
+### 5.2 ConceptPredictor Loss
+
+The Predictor's loss ensures accurate autoregressive generation of concepts.
+
+```
+L_predictor = Σ_{k=0}^{K-1} MSE(Ĉ_k, C_k) + L_solution
+
+Where:
+- Ĉ_k: Predicted concepts at level k
+- C_k: Groundtruth concepts from Builder
+- L_solution: Cross-entropy loss for Solution prediction
+```
+
+**Training**: Teacher forcing with groundtruth concepts
+**Inference**: Autoregressive generation without groundtruth
+
+### 5.3 Interaction Between Builder and Predictor
+
+```
+Builder (with CoT) ──→ Groundtruth [C_0, ..., C_{K-1}] ──→ Predictor (with Q only)
+       ↑                                                    ↓
+       └────────────── Training Signal ←────────────────────┘
+```
+
+1. **Builder defines "what is good"**: Uses full CoT to extract optimal pyramid
+2. **Predictor learns "how to generate"**: Mimics Builder's output from Q alone
+3. **End-to-end flow**: Builder's output serves as Predictor's training targets
+
+### 5.4 Optional: Per-Level Weighting
+
+For the Predictor, we can add per-level weights:
+
+```
+L_predictor_weighted = Σ_{k=0}^{K-1} w_k × MSE(Ĉ_k, C_k) + L_solution
+```
+
+Weighting strategies:
+- **Uniform**: w_k = 1/K (default)
+- **Progressive**: w_k increases with k (more weight on fine-grained levels)
+- **Adaptive**: Learn w_k based on training dynamics
+
+This is an experimental option for future exploration.
 
 **Loss interaction example**:
 ```
@@ -574,7 +696,9 @@ Scenario 3: Balanced λ_order
 
 ---
 
-## 6. Positional Query Initialization
+## 6. Positional Query Initialization (Builder)
+
+Positional initialization is a training technique for the ConceptPyramidBuilder to accelerate convergence.
 
 ### 6.1 Motivation
 
@@ -615,103 +739,115 @@ The queries remain fully learnable — training can override the positional prio
 
 ### 6.3 Ablation Value
 
-This is an **experimental option**, not an architectural requirement. Comparing `use_positional_query_init=True` vs `False` allows us to measure:
+This is an **experimental option** for the Builder, not an architectural requirement. Comparing `use_positional_query_init=True` vs `False` allows us to measure:
 
 1. **Convergence speed**: Does positional init reach good ordering faster?
 2. **Final quality**: Does positional init lead to better segment locality at convergence?
 3. **Training stability**: Does positional init avoid the diffuse-attention local minimum?
 
+Note: The Predictor may also benefit from level embeddings initialized from the Builder's trained concept_queries.
+
 ---
 
 ## 7. Relationship to VAR Pipeline
 
-### 7.1 Structural Mapping
+### 7.1 Two-Phase Architecture Mapping
 
-| VAR Component             | NLCP V3 Equivalent                      | Role                                          |
-|---------------------------|-----------------------------------------|-----------------------------------------------|
-| Encoder (tok+pos embed)   | NLCPV3Encoder (Qwen2.5)                 | Encode input to hidden states                 |
-| Multi-scale quantizer     | HybridConceptGenerator                  | Extract hierarchical discrete representations |
-| Codebook                  | concept_queries + attention mechanism   | Learnable "vocabulary" of concept patterns    |
-| f_hat / f_rest            | H_hat / H_rest                          | Residual decomposition                        |
-| VAR Transformer (Phase 2) | Level-level autoregressive in generator | Next-level concept generation                 |
-| VAE Decoder               | NLCPV3Decoder                           | Reconstruct tokens from concepts              |
+VAR explicitly separates extraction (VQ-VAE) from generation (Transformer). We follow the same principle:
 
-### 7.2 Key Difference: Discrete vs Continuous Concepts
+| VAR Component                | Our Equivalent             | Role                                            |
+|------------------------------|----------------------------|-------------------------------------------------|
+| **Phase 1: VQ-VAE**          | **ConceptPyramidBuilder**  | Extract groundtruth from full information (CoT) |
+| Encoder                      | Encoder(CoT)               | Encode CoT to hidden states                     |
+| Multi-scale quantizer        | Soft attention + residual  | Extract hierarchical concepts                   |
+| Codebook                     | concept_queries            | Learnable "vocabulary" of concept patterns      |
+| f_hat / f_rest               | H_hat / H_rest             | Residual decomposition                          |
+| **Phase 2: VAR Transformer** | **ConceptPredictor**       | Generate autoregressively from condition        |
+| Decoder-only Transformer     | Decoder-only Transformer   | Predict next level given previous               |
+| Scale embeddings             | Level queries / embeddings | Mark current generation level                   |
+| VAE Decoder                  | Solution Decoder           | Decode final output from concepts               |
 
-VAR produces **discrete** indices (codebook lookups), which enables categorical cross-entropy loss for the Transformer. Our design produces **continuous** concept vectors, which:
-- Cannot use cross-entropy loss directly
-- Use MSE reconstruction loss instead
-- Are more expressive (no codebook bottleneck)
-- But may be harder to model autoregressively (no discrete probability distribution)
+### 7.2 Key Differences
 
-This is a deliberate design choice: continuous concepts avoid the information loss of vector quantization while still maintaining hierarchical structure through the residual decomposition.
+**VAR**: Predicts discrete indices (categorical distribution)
+- Uses cross-entropy loss
+- Hard codebook bottleneck
+- Clear probability modeling
+
+**Ours**: Predicts continuous concepts (regression)
+- Uses MSE loss
+- No codebook bottleneck
+- More expressive but harder to model
+
+**Why continuous?** 
+- Builder uses soft attention (naturally continuous)
+- Avoids VQ information loss
+- End-to-end gradient flow
 
 ### 7.3 What We Gain from VAR
 
-1. **f_hat + f_rest decomposition**: Mathematically principled coarse-to-fine
-2. **Scale-level causality**: Levels are generated sequentially (level 0 → level 1 → ... → level 5), but within each level, all L_k concepts are generated in parallel
-3. **Rank bottleneck**: Natural information capacity constraint per level
-4. **Reconstruction loss**: Direct training signal for information preservation
-
-**Clarification on "inter-level sequential"**: This does NOT mean concepts are sequentially ordered across levels. It means the **generation process** is sequential level-by-level: you must generate Level 0 before Level 1, because Level 1 depends on the residual H_rest_1 = H_proj - R_0. Within each level, all concepts are computed simultaneously via parallel attention:
-```
-Level 0: [C_{0,0}]                                          — 1 concept, parallel
-Level 1: [C_{1,0}, C_{1,1}]                                  — 2 concepts, parallel
-Level 2: [C_{2,0}, C_{2,1}, C_{2,2}, C_{2,3}]                — 4 concepts, parallel
-Level 5: [C_{5,0}, C_{5,1}, ..., C_{5,31}]                   — 32 concepts, parallel
-
-Generation order: Level 0 ──→ Level 1 ──→ Level 2 ──→ ... ──→ Level 5
-                   (sequential)                                     (sequential)
-But within each level: all concepts computed in one forward pass
-                   (parallel)
-```
+1. **Two-phase separation**: Clear distinction between extraction and generation
+2. **f_hat + f_rest decomposition**: Mathematically principled coarse-to-fine
+3. **Scale-level causality**: Level-by-level generation with parallel intra-level computation
+4. **Teacher forcing training**: Groundtruth concepts guide Predictor learning
 
 ### 7.4 What We Adapt for Text
 
-1. **Attention replaces quantization**: Soft attention over H_rest replaces hard VQ lookup
-2. **Learnable queries replace codebook**: concept_queries replace fixed codebook vectors
-3. **Positional ordering replaces spatial coordinates**: Ordering loss replaces the natural 2D spatial structure of images
-4. **Cross-attention refinement**: No direct VAR equivalent — this exploits the sequential structure of text
+1. **Builder uses CoT, Predictor uses Q**: Training-inference asymmetry like VAR's VQ-VAE always seeing full images
+2. **Soft attention replaces quantization**: Continuous concept extraction
+3. **Learnable queries replace codebook**: Query expansion 1→2→4→8→16→32
+4. **Ordering loss replaces spatial structure**: Enforce segment-concept correspondence
 
 ---
 
 ## 8. Summary of Design Validity
 
-### 8.1 What Is Guaranteed by Construction
+### 8.1 What Is Guaranteed by Construction (Builder)
 
-| Guarantee                 | Mechanism                                                  | Strength                                  |
-|---------------------------|------------------------------------------------------------|-------------------------------------------|
-| Coarse-to-fine hierarchy  | Rank bottleneck (L_k concepts per level) + residual flow   | **Hard** (mathematically provable)        |
-| Full information coverage | Reconstruction loss ‖H_hat - H_proj‖²                      | **Soft** (loss-driven, converges to zero) |
-| Clean residual flow       | Commit-refinement separation (only C_k_base enters f_rest) | **Hard** (architectural constraint)       |
-| Level-level causality     | Sequential forward_next_level + cached reconstructions     | **Hard** (architectural constraint)       |
+| Guarantee                 | Mechanism                                      | Strength                           |
+|---------------------------|------------------------------------------------|------------------------------------|
+| Coarse-to-fine hierarchy  | Rank bottleneck (L_k concepts) + residual flow | **Hard** (mathematically provable) |
+| Full information coverage | Reconstruction loss ‖H_hat - H_CoT‖²           | **Soft** (loss-driven)             |
+| Clean residual flow       | Commit-refinement separation                   | **Hard** (architectural)           |
+| Intra-level ordering      | Ordering loss L_order                          | **Soft** (loss-driven)             |
 
-### 8.2 What Is Encouraged but Not Guaranteed
+### 8.2 What Is Guaranteed by Construction (Predictor)
 
-| Property                          | Mechanism                                             | Strength                             |
-|-----------------------------------|-------------------------------------------------------|--------------------------------------|
-| Segment locality (intra-level)    | Ordering loss + softmax competition + residual flow   | **Soft** (loss + inductive bias)     |
-| Coarse-to-fine across levels      | Rank bottleneck + residual flow (NOT ordering loss)   | **Hard** (architectural + rank)      |
-| Balanced extraction across levels | Rank bottleneck + recon loss                          | **Soft** (indirect incentive)        |
-| Q-only generalization (inference) | Structural concept_queries + NTP loss (full pipeline) | **Soft** (training signal dependent) |
+| Guarantee                 | Mechanism                     | Strength                  |
+|---------------------------|-------------------------------|---------------------------|
+| Level-level causality     | Causal masking in Transformer | **Hard** (architectural)  |
+| Intra-level parallelism   | Level-wise attention mask     | **Hard** (architectural)  |
+| Teacher forcing alignment | Groundtruth from Builder      | **Hard** (training setup) |
 
-### 8.3 Open Questions for Experimental Validation
+### 8.3 What Is Encouraged but Not Guaranteed
 
-1. **Segment locality**: Does the soft attention actually learn focused segment patterns, or does it remain diffuse? Visualize attention heatmaps A_{k,j} during training to verify.
+| Property                      | Mechanism                           | Strength                      |
+|-------------------------------|-------------------------------------|-------------------------------|
+| Segment locality (Builder)    | Ordering loss + softmax competition | **Soft** (inductive bias)     |
+| Balanced extraction           | Rank bottleneck + recon loss        | **Soft** (indirect)           |
+| Predictor matches Builder     | MSE loss + sufficient capacity      | **Soft** (training dependent) |
+| Q-only → CoT-quality concepts | End-to-end training                 | **Soft** (emergent)           |
 
-2. **Balanced extraction**: Do coarse levels extract "too much"? Monitor per-level reconstruction norm ‖R_k‖ over training to check balance.
+### 8.4 Open Questions for Experimental Validation
 
-3. **Q-only quality**: Do concepts extracted from Encoder(Q) carry meaningful information? Evaluate with downstream NTP accuracy in the full NLCP pipeline.
+1. **Builder quality**: Does the Builder extract meaningful hierarchical structure? Visualize attention maps A_{k,j} and reconstructions.
 
-4. **Positional init ablation**: Does `use_positional_query_init=True` measurably improve convergence speed or final segment locality compared to random init?
+2. **Predictor fidelity**: Does the Predictor accurately mimic the Builder? Compare Ĉ_k vs C_k across levels.
 
-5. **Cross-attention contribution**: Is refined_k actually meaningful, or does the model suppress it? Monitor ‖refined_k‖ / ‖C_k_base‖ during training.
+3. **Inference quality**: Do predicted concepts enable accurate Solution generation? Evaluate end-to-end accuracy.
+
+4. **Ablation studies**:
+   - Positional query initialization: Does it help convergence?
+   - Per-level weighting: Does progressive weighting improve fine-grained prediction?
+   - Solution loss in Builder: Does it improve downstream performance?
+
+5. **Scalability**: How does performance vary with concept dimension D, number of levels, or query expansion pattern?
 
 ---
 
 ## 9. Conclusion
 
-The HybridConceptGenerator design is architecturally sound. The commit-refinement separation correctly follows VAR's f_hat/f_rest principle. The rank bottleneck provides a hard guarantee of coarse-to-fine hierarchy. The combination of softmax competition, residual flow, and ordering loss creates sufficient inductive bias for DLCM-style segment-concept correspondence without requiring hard segmentation.
+The Concept Pyramid design is architecturally sound. The ConceptPyramidBuilder uses soft attention with learnable query expansion to extract hierarchical concepts from CoT, while the ConceptPredictor learns to autoregressively generate these concepts from Q alone. The commit-refinement separation correctly follows VAR's f_hat/f_rest principle. The rank bottleneck provides a hard guarantee of coarse-to-fine hierarchy. The combination of softmax competition, residual flow, and ordering loss creates sufficient inductive bias for DLCM-style segment-concept correspondence without requiring hard segmentation.
 
 The main limitations — soft segment locality, potential extraction imbalance, and Q-only generalization — are inherent trade-offs of the soft attention approach. They are acceptable for our research goals because:
 1. The soft approach is strictly more expressive than hard segmentation
