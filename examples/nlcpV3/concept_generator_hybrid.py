@@ -120,13 +120,19 @@ MATHEMATICS:
         L_recon = ||H_hat_K - H_proj||²                          # Reconstruction loss
 
         # Boundary Constraint (from AutoregressiveSoftBoundary)
-        Two ordering constraints following VAR scale-level causality:
-        1. Intra-level: consecutive concept slots ordered by CoT position
-           L_intra = Σ_level Σ_j ReLU(exp_pos[j] - exp_pos[j+1] + margin)
-        2. Inter-level: coarse-to-fine positional progression
-           L_inter = Σ_k ReLU(last_pos_k - first_pos_{k+1} + margin)
+        Intra-level ordering constraint following VAR scale-level causality:
+        Consecutive concept slots within each level are ordered by CoT position:
+           L_order = Σ_level Σ_j ReLU(exp_pos[j] - exp_pos[j+1] + margin)
 
-        Total Loss = L_recon + λ_order × (L_intra + L_inter)
+        NOTE: Inter-level ordering (last of level k < first of level k+1) is
+        intentionally NOT enforced. The relationship between levels is
+        granularity (coarse-to-fine), not sequential ordering. Level k+1
+        provides a finer partition of the SAME space that level k covers,
+        so level k+1's first concept can attend to earlier positions than
+        level k's last concept. Coarse-to-fine is already guaranteed by
+        the residual flow and f_hat/f_rest decomposition.
+
+        Total Loss = L_recon + λ_order × L_order
 
     Inference Path (Next-Level - Sequential):
         Matches training computation but level-by-level.
@@ -758,11 +764,18 @@ class HybridConceptGenerator(nn.Module):
             For each concept j, compute expected position:
                 exp_pos[j] = Σ_t A[j, t] × t
 
-            Two ordering constraints:
-            1. Intra-level: consecutive concepts within same level are ordered
-               L_intra = Σ_level Σ_j ReLU(exp_pos[j] - exp_pos[j+1] + margin)
-            2. Inter-level: last concept of level k < first concept of level k+1
-               L_inter = Σ_k ReLU(last_pos_k - first_pos_{k+1} + margin)
+            Intra-level ordering constraint:
+                L_order = Σ_level Σ_j ReLU(exp_pos[j] - exp_pos[j+1] + margin)
+
+            This ensures consecutive concept slots within each level attend
+            to non-decreasing positions in the CoT.
+
+            NOTE: Inter-level ordering is intentionally NOT enforced.
+            The relationship between levels is granularity (coarse-to-fine),
+            not sequential ordering. Level k+1 provides a finer partition
+            of the same space, so its first concept can legitimately attend
+            to earlier positions than level k's last concept.
+            Coarse-to-fine structure is guaranteed by residual flow.
 
         DIMENSION FLOW:
             Input:
@@ -813,30 +826,16 @@ class HybridConceptGenerator(nn.Module):
                 total_violation = total_violation + violation.mean()
 
         # =================================================================
-        # Constraint 2: Inter-level ordering
-        # Last concept of level k should attend to earlier positions than
-        # first concept of level k+1.
-        # This ensures coarse-to-fine: level k covers the "beginning" of
-        # what remains, level k+1 covers later details.
+        # NOTE: Inter-level ordering is intentionally REMOVED.
+        # The relationship between levels is granularity (coarse-to-fine),
+        # NOT sequential ordering. Level k+1 provides a finer partition of
+        # the SAME space that level k covers. For example:
+        #   Level 1 (2 concepts): C_{1,0} ~ [0, L/2],  C_{1,1} ~ [L/2, L]
+        #   Level 2 (4 concepts): C_{2,0} ~ [0, L/4],  C_{2,1} ~ [L/4, L/2], ...
+        # Enforcing exp_pos[C_{1,1}] < exp_pos[C_{2,0}] would require
+        # L/2 < L/4, which is impossible. The coarse-to-fine structure is
+        # already guaranteed by the residual flow and f_hat/f_rest decomposition.
         # =================================================================
-        if len(all_attentions) > 1:
-            level_expected_positions = []
-            for level_idx, level_attention in enumerate(all_attentions):
-                exp_pos = torch.sum(
-                    level_attention * positions.view(1, 1, seq_len),
-                    dim=-1,
-                )  # [B, L_k]
-                level_expected_positions.append(exp_pos)
-
-            for k in range(len(all_attentions) - 1):
-                # Last concept of level k
-                last_pos_k = level_expected_positions[k][:, -1]  # [B]
-                # First concept of level k+1
-                first_pos_k1 = level_expected_positions[k + 1][:, 0]  # [B]
-
-                # Enforce: last_pos_k < first_pos_k1
-                violation = F.relu(last_pos_k - first_pos_k1 + self.order_margin)
-                total_violation = total_violation + violation.mean()
 
         return total_violation
 

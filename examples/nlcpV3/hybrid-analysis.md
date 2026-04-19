@@ -31,19 +31,37 @@ Level configuration: L_0=1, L_1=2, L_2=4, L_3=8, L_4=16, L_5=32 (total: 63 conce
 
 The concept pyramid has two orthogonal structural dimensions:
 
-```
-Inter-level (coarse-to-fine):
-  C_0 ─────── [1 concept]    ← Global structure of CoT
-  C_1 ─────── [2 concepts]   ← Two major segments
-  C_2 ─────── [4 concepts]   ← Four sub-segments
-  ...
-  C_5 ─────── [32 concepts]  ← Fine-grained segments
+**Inter-level (coarse-to-fine granularity)** — all levels look at the SAME CoT, but at different resolutions:
 
-Intra-level (positional ordering within each level):
-  C_5 = [C_{5,0}, C_{5,1}, ..., C_{5,31}]
-         ↑       ↑              ↑
-    earliest  middle        latest
-    segment   segment       segment
+```
+CoT: "Let me solve this. First, 2+3=5. Then, 5×4=20. So the answer is 20."
+
+Level 0 (1 concept):  [■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■]
+                       └─────────── entire CoT compressed to 1 concept ──────┘
+
+Level 1 (2 concepts): [■■■■■■■■■■■■■■■■■■■■■|■■■■■■■■■■■■■■■■■■■■■■■■■■■■]
+                       └─ first half ──┘└──── second half ──────────────┘
+
+Level 2 (4 concepts): [■■■■■■■■■|■■■■■■■■■|■■■■■■■■■|■■■■■■■■■]
+                       └ 1st qtr ┘└ 2nd qtr ┘└ 3rd qtr ┘└ 4th qtr ┘
+
+... (each level divides the SAME CoT into finer segments)
+
+Level 5 (32 concepts): [■|■|■|■|■|■|■|■|■|■|■|■|■|■|■|■|■|■|■|■|■|■|■|■|■|■|■|■|■|■|■|■]
+                        └each tiny segment compressed to 1 concept┘
+```
+
+Key: Level 2 does NOT come "after" Level 1. Level 2 covers the SAME CoT,
+just with finer segmentation. This is granularity, not sequential ordering.
+
+**Intra-level (positional ordering within each level)** — within a single level,
+concepts are ordered from early to late CoT positions:
+
+```
+Level 5 = [C_{5,0},  C_{5,1},  ...,  C_{5,31}]
+            ↑         ↑               ↑
+       earliest   middle          latest
+       segment    segment         segment
 ```
 
 **Inter-level** governs **what granularity** of information is captured.
@@ -69,6 +87,18 @@ This means:
 
 This rank bottleneck is the mathematical guarantee of coarse-to-fine behavior. Regardless of how expressive `level_proj` is, the reconstruction R_k cannot exceed rank L_k. Level 0 is physically incapable of capturing fine details — it must focus on the dominant global pattern.
 
+**Intuitive example**: Think of drawing a portrait:
+```
+Level 0 (1 concept):  One broad stroke — just the overall face shape and skin tone
+Level 1 (2 concepts): Two strokes — left side vs right side of the face
+Level 2 (4 concepts): Four strokes — forehead, eyes, nose, mouth regions
+...
+Level 5 (32 concepts): 32 fine strokes — individual eyelashes, pores, wrinkles
+```
+Each level CAN ONLY ADD at most L_k independent details. You can't paint
+eyelashes with a single broad stroke (rank 1). The rank bottleneck is the
+mathematical reason why coarse levels capture coarse structure.
+
 ### 2.2 Analogy with VAR Scale Bottleneck
 
 | VAR Scale | Tokens | Information Capacity  | NLCP Level | Concepts | Information Capacity  |
@@ -80,6 +110,30 @@ This rank bottleneck is the mathematical guarantee of coarse-to-fine behavior. R
 | 32×32     | 1024   | Fine details          | Level 5    | 32       | Fine-grained segments |
 
 In VAR, each scale is independently quantized (VQ lookup), which naturally partitions information across scales. In our design, the residual flow serves the same purpose: H_rest_{k+1} = H_rest_k - R_k ensures that information captured at level k is no longer available at level k+1.
+
+**Same image, different resolutions** (VAR):
+```
+An image of a cat:
+
+1×1:  [██]             — just "orange blob" (1 token)
+2×2:  [██|██]           — "orange blob, left/right half differ" (4 tokens)
+4×4:  [████|████]       — "ears on top, face in middle" (16 tokens)
+32×32: [detailed cat]   — whiskers, eyes, fur texture (1024 tokens)
+
+All scales describe THE SAME cat, just at different pixel resolutions.
+```
+
+**Same CoT, different segmentations** (NLCP):
+```
+CoT: "Let me solve this. First, 2+3=5. Then, 5×4=20. So the answer is 20."
+
+Level 0: [■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■] — "solving a math problem"
+Level 1: [■■■■■■■■■■■■■■■■■■■■■|■■■■■■■■■■■■■■■■■■■■■■■■■■■■] — "setup | computation"
+Level 2: [■■■■■■■■■|■■■■■■■■■|■■■■■■■■■|■■■■■■■■■] — "intro|step1|step2|answer"
+Level 5: [■|■|■|■|■|■|■|■|■|■|■|■|■|■|■|■|■|■|■|■|■|■|■|■|■|■|■|■|■|■|■|■]
+
+All levels describe THE SAME CoT, just at different segment granularities.
+```
 
 ### 2.3 The Commit vs Refinement Separation
 
@@ -178,22 +232,79 @@ At level 5, H_rest_5 = H_proj - R_0 - R_1 - ... - R_4. The residual flow means:
 - C_{5,j} = A_{5,j} @ H_rest_5 can only extract what remains
 - This creates a natural "soft boundary" effect: concepts at level 5 physically cannot attend to information already claimed by coarser levels
 
+**Intuitive example**: Think of peeling layers of an onion:
+```
+H_proj = full information of the CoT
+
+Level 0 extracts: R_0 = "global theme" (e.g., "this is a math calculation")
+  → H_rest_1 = H_proj - R_0 = everything EXCEPT the global theme
+
+Level 1 extracts: R_1 = "two major segments" (e.g., "setup | computation")
+  → H_rest_2 = H_rest_1 - R_1 = everything EXCEPT global theme and major segments
+
+Level 5 extracts: R_5 = "32 fine-grained details" (e.g., individual step details)
+  → H_rest_6 ≈ 0 (almost everything has been accounted for)
+
+Each level can only "see" what coarser levels haven't already taken.
+This is why finer levels naturally capture finer details — the coarse
+structure has already been subtracted out.
+```
+
 **Comparison with DLCM**:
 - DLCM: hard boundary, c_k = mean(S_k), segments are disjoint sets
 - Our design: soft boundary, C_{k,j} = A_{k,j} @ H_rest_k, concepts attend to different (mostly non-overlapping) regions because residual removes claimed information
 
-#### Mechanism 3: Ordering Loss
+#### Mechanism 3: Ordering Loss (Intra-Level Only)
 
 ```
-Intra-level:  L_intra = Σ_k Σ_j ReLU(exp_pos[C_{k,j}] - exp_pos[C_{k,j+1}] + margin)
-Inter-level:  L_inter = Σ_k ReLU(exp_pos[last of C_k] - exp_pos[first of C_{k+1}] + margin)
+L_order = Σ_k Σ_j ReLU(exp_pos[C_{k,j}] - exp_pos[C_{k,j+1}] + margin)
 ```
 
 where exp_pos[C_{k,j}] = Σ_t A_{k,j}(t) × t is the expected CoT position that concept C_{k,j} attends to.
 
 This loss enforces:
 - **Intra-level ordering**: C_{k,0} attends to earlier positions than C_{k,1}, which attends earlier than C_{k,2}, etc.
-- **Inter-level ordering**: The last concept of level k attends to earlier positions than the first concept of level k+1
+
+Concrete example for Level 5 (32 concepts):
+```
+CoT: "Let me solve this. First, 2+3=5. Then, 5×4=20. So the answer is 20."
+
+Without ordering loss:            With ordering loss:
+  C_{5,0} → "5×4=20" (pos 18)      C_{5,0} → "Let me"      (pos 0)
+  C_{5,1} → "Let me"   (pos 0)      C_{5,1} → "solve"      (pos 4)
+  C_{5,2} → "2+3=5"   (pos 12)     C_{5,2} → "this."       (pos 8)
+  ...  (chaotic, no structure)       ...  (ordered, segment-like)
+```
+
+The ordering loss ensures each concept slot "owns" a contiguous, ordered segment
+of the CoT, just like DLCM's hard segmentation — but enforced softly via loss.
+
+> **Why no inter-level ordering?** Inter-level ordering (e.g., "last concept of
+> level k attends to earlier positions than first concept of level k+1") is
+> **incorrect and unnecessary**.
+>
+> Remember: each level covers the SAME CoT at a different granularity.
+> Level k+1 is a finer partition of the SAME space, not a continuation of it.
+>
+> Concrete example — a CoT with 100 tokens:
+> ```
+> Level 1 (2 concepts):  C_{1,0} ~ tokens [0, 50),   C_{1,1} ~ tokens [50, 100)
+> Level 2 (4 concepts):  C_{2,0} ~ tokens [0, 25),   C_{2,1} ~ tokens [25, 50),
+>                         C_{2,2} ~ tokens [50, 75),  C_{2,3} ~ tokens [75, 100)
+> ```
+>
+> Inter-level ordering would demand: exp_pos[C_{1,1}] < exp_pos[C_{2,0}]
+>                                            75          <           12
+> This is impossible! C_{1,1} covers the 2nd half of CoT, C_{2,0} covers
+> the 1st quarter. There is no sequential relationship between them — they
+> are different granularities of the same CoT.
+>
+> The coarse-to-fine structure is already guaranteed by:
+> 1. **Rank bottleneck**: Level 0 can only capture 1 direction, level 5 can
+>    capture 32 directions — finer levels have more capacity by construction.
+> 2. **Residual flow**: H_rest_{k+1} = H_proj - R_0 - ... - R_k. Each level
+>    picks up what coarser levels left behind. Finer levels naturally capture
+>    finer residual details.
 
 ### 3.3 Soft vs Hard Segmentation: Theoretical Comparison
 
@@ -348,23 +459,53 @@ This is the primary training signal, inherited from VAR's VQ loss. It ensures th
 - Focused attention patterns (concepts could be diffuse)
 - Meaningful semantic content (concepts could be arbitrary linear combinations)
 
-### 5.2 Ordering Loss
+### 5.2 Ordering Loss (Intra-Level Only)
 
 ```
-L_intra = Σ_k Σ_j ReLU(exp_pos[C_{k,j}] - exp_pos[C_{k,j+1}] + margin)
-L_inter = Σ_k ReReLU(exp_pos[last of C_k] - exp_pos[first of C_{k+1}] + margin)
-L_order = L_intra + L_inter
+L_order = Σ_k Σ_j ReLU(exp_pos[C_{k,j}] - exp_pos[C_{k,j+1}] + margin)
 ```
 
-**Intra-level ordering** (L_intra): Within each level, concept slots are ordered by the expected CoT position they attend to. C_{k,0} focuses on earlier positions, C_{k,L_k-1} on later positions.
+where exp_pos[C_{k,j}] = Σ_t A_{k,j}(t) × t is the expected CoT position that concept C_{k,j} attends to.
 
-**Inter-level ordering** (L_inter): The last concept of level k attends to earlier positions than the first concept of level k+1. This ensures a coarse-to-fine positional progression across levels.
+**Intra-level ordering**: Within each level, concept slots are ordered by the expected CoT position they attend to. C_{k,0} focuses on earlier positions, C_{k,L_k-1} on later positions.
 
-**Why both are needed**:
+**Concrete example for Level 2 (4 concepts)**:
+```
+CoT: "Let me solve this. First, 2+3=5. Then, 5×4=20. So the answer is 20."
+       └── pos 0-9 ──┘└── pos 10-19 ──┘└── pos 20-29 ──┘└ pos 30-39 ┘
 
-Without L_inter, we could have: C_{5,0} attending to position [0, L/32] while C_{4,15} attends to position [31L/32, L]. This would violate the coarse-to-fine principle — fine-level concepts should not attend to earlier positions than coarse-level concepts.
+What we WANT (ordered):              What we DON'T want (disordered):
+  C_{2,0} → exp_pos ≈ 5               C_{2,0} → exp_pos ≈ 25
+  C_{2,1} → exp_pos ≈ 15              C_{2,1} → exp_pos ≈ 5
+  C_{2,2} → exp_pos ≈ 25              C_{2,2} → exp_pos ≈ 35
+  C_{2,3} → exp_pos ≈ 35              C_{2,3} → exp_pos ≈ 15
 
-Without L_intra, within level 5, C_{5,5} could attend to position 100 while C_{5,3} attends to position 200. This would violate the DLCM segment ordering — concepts within a level should be positionally ordered.
+L_order penalizes when exp_pos[C_{2,j}] > exp_pos[C_{2,j+1}]:
+  violation = ReLU(exp_pos[j] - exp_pos[j+1] + margin)
+  This is zero when concepts are correctly ordered, positive otherwise.
+```
+
+**Why inter-level ordering is NOT needed**:
+
+Inter-level ordering ("last concept of level k attends to earlier positions than first concept of level k+1") is incorrect because levels are not sequentially ordered — they cover the SAME CoT at different granularities.
+
+```
+Level 1 (2 concepts):  C_{1,0} ~ [0, L/2),   C_{1,1} ~ [L/2, L)
+Level 2 (4 concepts):  C_{2,0} ~ [0, L/4),   C_{2,1} ~ [L/4, L/2),
+                        C_{2,2} ~ [L/2, 3L/4), C_{2,3} ~ [3L/4, L)
+
+Inter-level ordering would demand: exp_pos[C_{1,1}] < exp_pos[C_{2,0}]
+  → 0.75L < 0.125L  → IMPOSSIBLE
+
+Level 1's last concept covers the CoT's second half.
+Level 2's first concept covers the CoT's first quarter.
+They are different segments at different granularities — no ordering exists.
+
+The coarse-to-fine structure is guaranteed by:
+1. Rank bottleneck: Level 0 has capacity 1, Level 5 has capacity 32
+2. Residual flow: Each level subtracts out what it captured, forcing
+   finer levels to focus on remaining (finer) details
+```
 
 ### 5.3 Interaction Between Losses
 
@@ -384,10 +525,30 @@ Together: concepts that are both informationally rich and positionally structure
 ### 5.4 Total Loss
 
 ```
-L_total = L_recon + λ_order × (L_intra + L_inter)
+L_total = L_recon + λ_order × L_order
 ```
 
 λ_order controls the trade-off between information preservation and positional structure. Too high: concepts are well-ordered but may sacrifice information. Too low: concepts preserve information but lack segment structure. This is a hyperparameter for experimental tuning.
+
+**Loss interaction example**:
+```
+Scenario 1: λ_order = 0 (no ordering pressure)
+  → All concepts attend uniformly to the whole CoT
+  → L_recon ≈ 0 (good coverage)
+  → But concepts are redundant — C_{5,0} ≈ C_{5,1} ≈ ... ≈ C_{5,31}
+  → Decoder cannot distinguish segments → poor NTP quality
+
+Scenario 2: λ_order = ∞ (ordering dominates)
+  → Concepts perfectly ordered but may miss information at segment boundaries
+  → L_recon > 0 (some information lost at boundaries)
+  → But each concept clearly "owns" its segment → good NTP quality
+
+Scenario 3: Balanced λ_order
+  → Concepts are mostly ordered with some overlap at boundaries
+  → L_recon ≈ 0 (good coverage including boundaries)
+  → L_order ≈ 0 (mostly ordered)
+  → Best of both worlds: structured AND comprehensive
+```
 
 ---
 
@@ -466,9 +627,22 @@ This is a deliberate design choice: continuous concepts avoid the information lo
 ### 7.3 What We Gain from VAR
 
 1. **f_hat + f_rest decomposition**: Mathematically principled coarse-to-fine
-2. **Scale-level causality**: Inter-level sequential, intra-level parallel
+2. **Scale-level causality**: Levels are generated sequentially (level 0 → level 1 → ... → level 5), but within each level, all L_k concepts are generated in parallel
 3. **Rank bottleneck**: Natural information capacity constraint per level
 4. **Reconstruction loss**: Direct training signal for information preservation
+
+**Clarification on "inter-level sequential"**: This does NOT mean concepts are sequentially ordered across levels. It means the **generation process** is sequential level-by-level: you must generate Level 0 before Level 1, because Level 1 depends on the residual H_rest_1 = H_proj - R_0. Within each level, all concepts are computed simultaneously via parallel attention:
+```
+Level 0: [C_{0,0}]                                          — 1 concept, parallel
+Level 1: [C_{1,0}, C_{1,1}]                                  — 2 concepts, parallel
+Level 2: [C_{2,0}, C_{2,1}, C_{2,2}, C_{2,3}]                — 4 concepts, parallel
+Level 5: [C_{5,0}, C_{5,1}, ..., C_{5,31}]                   — 32 concepts, parallel
+
+Generation order: Level 0 ──→ Level 1 ──→ Level 2 ──→ ... ──→ Level 5
+                   (sequential)                                     (sequential)
+But within each level: all concepts computed in one forward pass
+                   (parallel)
+```
 
 ### 7.4 What We Adapt for Text
 
@@ -495,7 +669,7 @@ This is a deliberate design choice: continuous concepts avoid the information lo
 | Property                          | Mechanism                                             | Strength                             |
 |-----------------------------------|-------------------------------------------------------|--------------------------------------|
 | Segment locality (intra-level)    | Ordering loss + softmax competition + residual flow   | **Soft** (loss + inductive bias)     |
-| Positional ordering (inter-level) | Inter-level ordering loss                             | **Soft** (loss-driven)               |
+| Coarse-to-fine across levels      | Rank bottleneck + residual flow (NOT ordering loss)   | **Hard** (architectural + rank)      |
 | Balanced extraction across levels | Rank bottleneck + recon loss                          | **Soft** (indirect incentive)        |
 | Q-only generalization (inference) | Structural concept_queries + NTP loss (full pipeline) | **Soft** (training signal dependent) |
 
