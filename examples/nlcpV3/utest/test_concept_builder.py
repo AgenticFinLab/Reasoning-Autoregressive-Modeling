@@ -3,19 +3,14 @@
 Loads config from YAML, initializes the real Qwen encoder from HuggingFace,
 and validates the full Builder pipeline on real data.
 
+Device is auto-detected via lmbase.utils.env_tools.get_device():
+  cuda > mps (Apple Silicon) > cpu
+
 COMMAND LINE USAGE:
-  # Basic run (uses config defaults)
+  # Run with config (auto-detects best available device)
   cd /Users/sjia/Documents/AgenticFinLab/Projects/Reasoning-Autoregressive-Modeling
   python3 examples/nlcpV3/utest/test_concept_builder.py \\
       -c configs/nlcpV3/utest/test_concept_builder.yml
-
-  # Specify device
-  python3 examples/nlcpV3/utest/test_concept_builder.py \\
-      -c configs/nlcpV3/utest/test_concept_builder.yml --device cuda
-
-  # CPU mode
-  python3 examples/nlcpV3/utest/test_concept_builder.py \\
-      -c configs/nlcpV3/utest/test_concept_builder.yml --device cpu
 """
 
 import argparse
@@ -41,6 +36,7 @@ from nlcpV3.concept_hybrid_builder import (
     PyramidOutput,
     SingleLevelOutput,
 )
+from lmbase.utils.env_tools import get_device
 from ram.utils import load_config
 
 
@@ -60,12 +56,6 @@ def parse_args():
         type=str,
         required=True,
         help="Path to YAML config file",
-    )
-    parser.add_argument(
-        "--device",
-        type=str,
-        default="cpu",
-        help="Device for model execution (cpu/cuda/auto)",
     )
     return parser.parse_args()
 
@@ -142,10 +132,8 @@ class TestConceptPyramidBuilder(unittest.TestCase):
         cls.yaml_config = load_config(str(config_path))
         cls.nlcp_config = build_nlcpv3_config_from_yaml(cls.yaml_config)
 
-        # Resolve device
-        cls.device = cls.args.device
-        if cls.device == "auto":
-            cls.device = "cuda" if torch.cuda.is_available() else "cpu"
+        # Resolve device via lmbase auto-detection (cuda > mps > cpu)
+        cls.device = str(get_device("auto"))
 
         logging.info("=" * 60)
         logging.info("ConceptPyramidBuilder Integration Test")
@@ -157,7 +145,7 @@ class TestConceptPyramidBuilder(unittest.TestCase):
         logging.info("Concept dim D:  %d", cls.nlcp_config.hidden_dim)
         logging.info("Num levels K:   %d", cls.nlcp_config.num_levels)
         logging.info("Level lengths:  %s", cls.nlcp_config.level_lengths)
-        logging.info("Device:         %s", cls.device)
+        logging.info("Device:         %s (auto-detected)", cls.device)
 
         # Load Builder with real model
         logging.info("Loading model from HuggingFace...")
