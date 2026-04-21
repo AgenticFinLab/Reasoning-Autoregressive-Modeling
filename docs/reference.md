@@ -56,3 +56,7 @@ with Fused Information in Latent Tokens
 - Rethinking LLM Reasoning: From Explicit Trajectories to Latent Representations
 
 - The Latent Space: Foundation, Evolution, Mechanism, Ability, and Outlook
+
+- In-context Autoencoder for Context Compression in a Large Language Model
+
+- Context Cascade Compression: Exploring the Upper Limits of Text Compression

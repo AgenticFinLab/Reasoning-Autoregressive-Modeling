@@ -23,11 +23,12 @@ DIMENSION FLOW:
     - hidden_dim: Concept dimension (D) used across all modules
     - num_levels: Number of hierarchical levels (K)
     - level_lengths: Concepts per level [1, 2, 4, ..., 2^(K-1)]
-    - encoder_model_name: Pretrained encoder for Q+CoT/Q encoding
+    - reason_model_name: Pretrained decoder-only model for CoT extraction & Solution generation
+    - use_positional_query_init: Whether to init concept queries with positional priors
 """
 
 from dataclasses import dataclass
-from typing import List
+from typing import List, Optional, Dict, Any
 
 
 @dataclass
@@ -46,16 +47,37 @@ class NLCPV3Config:
             level_lengths: List of concept counts per level [L_0, L_1, ..., L_{K-1}]
             max_seq_len: Maximum sequence length for encoder
 
-        Encoder Configuration:
-            encoder_model_name: HuggingFace model name for encoder
-            encoder_num_layers: Number of layers in encoder (if customizing)
-            encoder_freeze: Whether to freeze encoder parameters
+        Reason Model Configuration:
+            reason_model_name: HuggingFace model name for the decoder-only
+                Transformer used as both CoT feature extractor and Solution
+                generator. Builder uses AutoModel backbone; Predictor uses
+                lm_head for autoregressive generation.
+            reason_model_num_layers: Number of layers to use (-1 = all)
+            reason_model_freeze: Whether to freeze backbone parameters
+            reason_model_lora: Optional LoRA config dict for reason_model.
+                If non-None, applies PEFT LoRA adapters to the backbone.
+                Example: {"r": 8, "lora_alpha": 16, "target_modules": ["q_proj", "v_proj"]}
 
-        Decoder Configuration:
-            vocab_size: Vocabulary size for solution token prediction
-            dropout: Dropout rate for regularization
-            rms_norm_eps: Epsilon for RMS normalization
-            muP_scale: Scaling factor for muP (maximal update parameterization)
+        Solution Decoder Configuration:
+            decoder_model_name: HuggingFace model name for the solution decoder.
+                This is the SAME base model as reason_model but loaded with
+                AutoModelForCausalLM (includes lm_head). Used for Solution
+                generation from Q + concept pyramid. Can differ from
+                reason_model_name for model distillation scenarios.
+            decoder_freeze: Whether to freeze the decoder backbone parameters
+            decoder_lora: Optional LoRA config dict for the solution decoder.
+                If non-None, applies PEFT LoRA adapters.
+            vocab_size: Derived from decoder_model_name.config.vocab_size
+                (no manual setting needed — the pretrained model defines its
+                own vocabulary size)
+            dropout / rms_norm_eps / muP_scale: Derived from the pretrained
+                model's config. Not set manually — the model already defines
+                its own normalization epsilon, dropout, etc.
+
+        Builder Options:
+            use_positional_query_init: If True, initialize concept queries with
+                positional priors (hybrid-analysis.md Section 6). This biases
+                C_{k,j} toward the j-th segment of the sequence.
 
         Loss Weights:
             ntp_loss_weight: Weight for next-token prediction loss
@@ -69,18 +91,24 @@ class NLCPV3Config:
     level_lengths: List[int]
     max_seq_len: int
 
-    encoder_model_name: str
-    encoder_num_layers: int
-    encoder_freeze: bool
+    reason_model_name: str
+    reason_model_num_layers: int
+    reason_model_freeze: bool
 
-    vocab_size: int
-    dropout: float
-    rms_norm_eps: float
-    muP_scale: float
+    # Solution Decoder Configuration
+    decoder_model_name: str  # Default: same as reason_model_name (set in __post_init__)
+    decoder_freeze: bool  # Freeze decoder backbone by default
+
+    # Builder-specific options
+    use_positional_query_init: bool  # Initialize concept queries with positional priors
 
     ntp_loss_weight: float
     concept_loss_weight: float
     recon_loss_weight: float
+
+    # Optional fields (must come after all required fields in dataclass)
+    reason_model_lora: Optional[Dict[str, Any]] = None
+    decoder_lora: Optional[Dict[str, Any]] = None
 
     def __post_init__(self):
         """Validate configuration parameters.
@@ -91,7 +119,7 @@ class NLCPV3Config:
         VALIDATION:
             - hidden_dim must be divisible by num_heads
             - len(level_lengths) must equal num_levels
-            - level_lengths should follow doubling pattern
+            - decoder_model_name defaults to reason_model_name if empty
         """
         if self.hidden_dim % self.num_heads != 0:
             raise ValueError(
@@ -104,6 +132,10 @@ class NLCPV3Config:
                 f"len(level_lengths) ({len(self.level_lengths)}) must equal "
                 f"num_levels ({self.num_levels})"
             )
+
+        # Default decoder_model_name to reason_model_name if not specified
+        if not self.decoder_model_name:
+            self.decoder_model_name = self.reason_model_name
 
     @property
     def head_dim(self) -> int:

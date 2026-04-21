@@ -61,6 +61,9 @@ model:
     order_loss_weight: 0.1
     # Ordering constraint margin
     order_margin: 1.0
+
+  # Builder-specific parameters
+  builder:
     # Query initialization mode (ablation option)
     # True: initialize queries with positional priors (DLCM-style segment bias)
     # False: random Xavier uniform initialization

@@ -1,29 +1,17 @@
-"""Integration test for ConceptPyramidBuilder.
+"""ConceptPyramidBuilder integration test.
 
-Loads config from YAML, initializes the real Qwen encoder from HuggingFace,
-and validates the full Builder pipeline on real data.
-
-Device is auto-detected via lmbase.utils.env_tools.get_device():
-  cuda > mps (Apple Silicon) > cpu
-
-COMMAND LINE USAGE:
-  # Run with config (auto-detects best available device)
-  cd /Users/sjia/Documents/AgenticFinLab/Projects/Reasoning-Autoregressive-Modeling
-  python3 examples/nlcpV3/utest/test_concept_builder.py \\
-      -c configs/nlcpV3/utest/test_concept_builder.yml
+Directly tests every component and pipeline step without unittest wrappers.
+Run with:
+    python3 examples/nlcpV3/utest/test_concept_builder.py \
+        -c configs/nlcpV3/utest/test_concept_builder.yml
 """
 
 import argparse
 import logging
 import sys
-import unittest
 from pathlib import Path
 
 import torch
-
-# =============================================================================
-# Path Setup
-# =============================================================================
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -40,600 +28,421 @@ from lmbase.utils.env_tools import get_device
 from ram.utils import load_config
 
 
-# =============================================================================
-# CLI Arguments
-# =============================================================================
-
-
 def parse_args():
-    """Parse command-line arguments."""
-    parser = argparse.ArgumentParser(
-        description="ConceptPyramidBuilder integration test"
-    )
+    parser = argparse.ArgumentParser(description="ConceptPyramidBuilder test")
     parser.add_argument(
-        "-c",
-        "--config",
-        type=str,
-        required=True,
-        help="Path to YAML config file",
+        "-c", "--config", type=str, required=True, help="Path to YAML config file"
     )
     return parser.parse_args()
 
 
-# =============================================================================
-# Config Builder from YAML
-# =============================================================================
-
-
-def build_nlcpv3_config_from_yaml(yaml_dict: dict) -> NLCPV3Config:
-    """Build NLCPV3Config from parsed YAML configuration.
-
-    Args:
-        yaml_dict: Configuration dictionary loaded from YAML file
-
-    Returns:
-        NLCPV3Config instance
-    """
+def build_nlcpv3_config_from_yaml(yaml_dict):
     m = yaml_dict["model"]
-    enc = m["encoder"]
+    rm = m["reason_model"]
     pyr = m["pyramid"]
     dec = m["decoder"]
+    bld = m["builder"]
     tr = yaml_dict["training"]
     lw = tr["loss_weights"]
-
     return NLCPV3Config(
         hidden_dim=pyr["hidden_dim"],
         num_heads=pyr["num_heads"],
         num_levels=pyr["num_levels"],
         level_lengths=pyr["level_lengths"],
         max_seq_len=pyr["max_seq_len"],
-        encoder_model_name=enc["encoder_model_name"],
-        encoder_num_layers=enc["encoder_num_layers"],
-        encoder_freeze=enc["encoder_freeze"],
-        vocab_size=dec["vocab_size"],
-        dropout=dec["dropout"],
-        rms_norm_eps=dec["rms_norm_eps"],
-        muP_scale=dec["muP_scale"],
+        reason_model_name=rm["reason_model_name"],
+        reason_model_num_layers=rm["reason_model_num_layers"],
+        reason_model_freeze=rm["reason_model_freeze"],
+        reason_model_lora=rm.get("reason_model_lora"),
+        decoder_model_name=dec.get("decoder_model_name", ""),
+        decoder_freeze=dec.get("decoder_freeze", True),
+        decoder_lora=dec.get("decoder_lora"),
+        use_positional_query_init=bld["use_positional_query_init"],
         ntp_loss_weight=lw["ntp_loss_weight"],
         concept_loss_weight=lw["concept_loss_weight"],
         recon_loss_weight=lw["recon_loss_weight"],
     )
 
 
-# =============================================================================
-# Main Test Class
-# =============================================================================
+def check(cond, msg):
+    if not cond:
+        raise AssertionError(f"FAIL: {msg}")
+    logging.info("PASS: %s", msg)
 
 
-class TestConceptPyramidBuilder(unittest.TestCase):
-    """Integration test for ConceptPyramidBuilder with real Qwen model.
+def test_constructor(builder, config):
+    """Test every component created in __init__."""
+    logging.info("\n=== Constructor Tests ===")
 
-    All tests run with a configurable batch_size (default 3).
-    Change self.batch_size in setUpClass to test with any B >= 1.
-    """
+    # Reason model
+    check(builder.reason_model is not None, "reason_model is not None")
+    check(hasattr(builder.reason_model, "config"), "reason_model has config")
+    check(
+        builder.reason_model_hidden_dim == builder.reason_model.config.hidden_size,
+        f"reason_model_hidden_dim={builder.reason_model_hidden_dim}",
+    )
 
-    # Configurable batch size for all tests. Change to 1, 2, 4, 8, etc.
+    # Tokenizer (built-in, paired with reason_model)
+    check(builder.tokenizer is not None, "tokenizer is not None")
+    check(builder.tokenizer.pad_token is not None, "tokenizer has pad_token")
+
+    # input_proj
+    check(builder.input_proj is not None, "input_proj exists")
+    check(
+        builder.input_proj.in_features == builder.reason_model_hidden_dim,
+        "input_proj.in_features == reason_model_hidden_dim",
+    )
+    check(
+        builder.input_proj.out_features == config.hidden_dim,
+        "input_proj.out_features == hidden_dim",
+    )
+
+    # concept_queries
+    check(
+        len(builder.concept_queries) == config.num_levels,
+        f"concept_queries count == {config.num_levels}",
+    )
+    for k, q in enumerate(builder.concept_queries):
+        expected = (config.level_lengths[k], config.hidden_dim)
+        check(q.shape == expected, f"concept_queries[{k}].shape == {expected}")
+        check(q.requires_grad, f"concept_queries[{k}] requires_grad")
+
+    # temperature
+    check(builder.temperature.shape == (1,), "temperature shape == (1,)")
+    check(builder.temperature.requires_grad, "temperature requires_grad")
+
+    # level_projs
+    check(
+        len(builder.level_projs) == config.num_levels,
+        f"level_projs count == {config.num_levels}",
+    )
+    for k, proj in enumerate(builder.level_projs):
+        check(
+            proj.in_features == config.hidden_dim,
+            f"level_projs[{k}].in_features == hidden_dim",
+        )
+        check(
+            proj.out_features == config.hidden_dim,
+            f"level_projs[{k}].out_features == hidden_dim",
+        )
+
+    # level_attn
+    check(
+        len(builder.level_attn) == config.num_levels,
+        f"level_attn count == {config.num_levels}",
+    )
+
+    # recon_decoder placeholder
+    check(builder.recon_decoder is None, "recon_decoder is None (placeholder)")
+
+    # Cache lists
+    check(isinstance(builder._cached_attentions, list), "_cached_attentions is list")
+    check(
+        isinstance(builder._cached_base_concepts, list), "_cached_base_concepts is list"
+    )
+
+    # Helpers
+    check(
+        builder.get_total_concepts() == sum(config.level_lengths),
+        f"get_total_concepts() == {sum(config.level_lengths)}",
+    )
+
+
+def test_encode_cot(builder, device, batch_size):
+    """Test encode_cot with batch (text and tensor inputs)."""
+    logging.info("\n=== encode_cot Tests ===")
+
+    texts = [f"Problem {i}: What is {i} + {i+1}?" for i in range(batch_size)]
+
+    # --- Test 1: text input (auto-tokenize) ---
+    enc_out = builder.encode_cot(texts)
+    check(isinstance(enc_out, EncoderOutput), "encode_cot(texts) returns EncoderOutput")
+    check(enc_out.hidden_states.dim() == 3, "hidden_states dim == 3")
+    check(
+        enc_out.hidden_states.shape[0] == batch_size,
+        f"hidden_states batch == {batch_size}",
+    )
+    check(
+        enc_out.hidden_states.shape[-1] == builder.reason_model_hidden_dim,
+        "hidden_states last_dim == reason_model_hidden_dim",
+    )
+
+    # --- Test 2: tensor input ---
+    tokens = builder.tokenizer(
+        texts, return_tensors="pt", padding=True, truncation=True, max_length=32
+    )
+    input_ids = tokens["input_ids"].to(device)
+    attention_mask = tokens["attention_mask"].to(device)
+
+    enc_out2 = builder.encode_cot(input_ids, attention_mask)
+    check(
+        isinstance(enc_out2, EncoderOutput),
+        "encode_cot(tensor) returns EncoderOutput",
+    )
+    check(
+        enc_out2.hidden_states.shape[0] == batch_size,
+        "encode_cot(tensor) batch correct",
+    )
+    # Same result as auto-tokenized
+    check(
+        torch.allclose(enc_out.hidden_states, enc_out2.hidden_states),
+        "auto-tokenize == manual tokenize",
+    )
+
+    return enc_out
+
+
+def test_forward(builder, device, config, batch_size):
+    """Test forward() full pyramid construction."""
+    logging.info("\n=== forward() Tests ===")
+
+    texts = [f"Solve {i}: compute {i} * {i+2}." for i in range(batch_size)]
+    enc_out = builder.encode_cot(texts)
+    H = enc_out.hidden_states
+    seq_len = H.shape[1]
+
+    # Build pyramid
+    output = builder(H)
+    check(isinstance(output, PyramidOutput), "forward returns PyramidOutput")
+
+    # Concepts count
+    check(
+        len(output.concepts) == config.num_levels,
+        f"concepts count == {config.num_levels}",
+    )
+
+    # Per-level shapes
+    for k, concepts in enumerate(output.concepts):
+        expected = (batch_size, config.level_lengths[k], config.hidden_dim)
+        check(concepts.shape == expected, f"concepts[{k}].shape == {expected}")
+
+    # LevelOutput fields
+    check(
+        len(output.level_outputs) == config.num_levels,
+        f"level_outputs count == {config.num_levels}",
+    )
+    for k, lo in enumerate(output.level_outputs):
+        Lk = config.level_lengths[k]
+        check(
+            lo.concepts.shape == (batch_size, Lk, config.hidden_dim),
+            f"level_outputs[{k}].concepts shape",
+        )
+        check(
+            lo.base_concepts.shape == (batch_size, Lk, config.hidden_dim),
+            f"level_outputs[{k}].base_concepts shape",
+        )
+        check(
+            lo.attention_weights.shape == (batch_size, Lk, seq_len),
+            f"level_outputs[{k}].attention_weights shape",
+        )
+        check(
+            lo.reconstruction.shape == (batch_size, seq_len, config.hidden_dim),
+            f"level_outputs[{k}].reconstruction shape",
+        )
+
+    # Residual decomposition: f_hat + f_rest == H_proj
+    recomposed = output.reconstructed_hidden + output.residual_hidden
+    diff = torch.abs(recomposed - output.projected_hidden).max().item()
+    check(diff < 1e-4, f"f_hat + f_rest == H_proj (max_diff={diff:.2e})")
+
+    # Hidden state shapes
+    for name, tensor in [
+        ("projected_hidden", output.projected_hidden),
+        ("reconstructed_hidden", output.reconstructed_hidden),
+        ("residual_hidden", output.residual_hidden),
+    ]:
+        check(
+            tensor.shape == (batch_size, seq_len, config.hidden_dim),
+            f"{name}.shape == ({batch_size}, {seq_len}, {config.hidden_dim})",
+        )
+
+    # PyramidOutput properties
+    check(output.num_levels == config.num_levels, "num_levels correct")
+    check(output.level_lengths == config.level_lengths, "level_lengths correct")
+    check(output.total_concepts == sum(config.level_lengths), "total_concepts correct")
+    check(
+        len(output.all_attentions) == config.num_levels, "all_attentions length correct"
+    )
+    check(
+        len(output.all_base_concepts) == config.num_levels,
+        "all_base_concepts length correct",
+    )
+    cat = output.cat_concepts()
+    check(
+        cat.shape == (batch_size, sum(config.level_lengths), config.hidden_dim),
+        "cat_concepts shape correct",
+    )
+
+    # Level 0: no refinement
+    check(
+        torch.allclose(
+            output.level_outputs[0].concepts, output.level_outputs[0].base_concepts
+        ),
+        "level 0 concepts == base_concepts (no refinement)",
+    )
+
+    # Attention softmax: sum to 1 per concept slot
+    for k, lo in enumerate(output.level_outputs):
+        attn_sum = lo.attention_weights.sum(dim=-1)
+        check(
+            torch.allclose(attn_sum, torch.ones_like(attn_sum), atol=1e-5),
+            f"level {k} attention sums to 1",
+        )
+
+    return output
+
+
+def test_forward_next_level(builder, device, config, batch_size):
+    """Test forward_next_level step-by-step."""
+    logging.info("\n=== forward_next_level() Tests ===")
+
+    texts = [f"Step {i}: calculate {i+1} * {i+2}." for i in range(batch_size)]
+    enc_out = builder.encode_cot(texts)
+    H = enc_out.hidden_states
+
+    # Sequential level extraction
+    builder.clear_cache()
+    prev_concepts = []
+    for k in range(config.num_levels):
+        level_out = builder.forward_next_level(
+            H, previous_level_concepts=prev_concepts, target_level_index=k
+        )
+        check(
+            isinstance(level_out, SingleLevelOutput),
+            f"level {k} returns SingleLevelOutput",
+        )
+        check(level_out.level_index == k, f"level {k} index correct")
+        check(
+            level_out.concepts.shape[0] == batch_size, f"level {k} batch size correct"
+        )
+        check(
+            level_out.concepts.shape[1] == config.level_lengths[k],
+            f"level {k} concept count correct",
+        )
+        check(
+            level_out.projected_hidden.shape == H.shape,
+            f"level {k} projected_hidden shape matches H",
+        )
+        prev_concepts.append(level_out.concepts)
+
+    check(
+        len(builder._cached_attentions) == config.num_levels,
+        "cache has num_levels attentions",
+    )
+    check(
+        len(builder._cached_base_concepts) == config.num_levels,
+        "cache has num_levels base_concepts",
+    )
+
+    # Clear cache
+    builder.clear_cache()
+    check(len(builder._cached_attentions) == 0, "clear_cache empties attentions")
+    check(len(builder._cached_base_concepts) == 0, "clear_cache empties base_concepts")
+
+
+def test_gsm8k_integration(builder, device, config, dataset, batch_size):
+    """Test end-to-end with GSM8K data."""
+    logging.info("\n=== GSM8K Integration Tests ===")
+
+    n = min(batch_size, len(dataset))
+    samples = [dataset[i] for i in range(n)]
+    cot_texts = [s.cot_answer for s in samples]
+
+    # Encode CoT via auto-tokenize
+    enc_out = builder.encode_cot(cot_texts)
+    check(isinstance(enc_out, EncoderOutput), "GSM8K encode_cot returns EncoderOutput")
+    check(enc_out.hidden_states.shape[0] == n, f"GSM8K hidden_states batch == {n}")
+    check(
+        enc_out.hidden_states.shape[-1] == builder.reason_model_hidden_dim,
+        "GSM8K hidden_states dim == reason_model_hidden_dim",
+    )
+
+    # Build pyramid
+    pyramid = builder(enc_out.hidden_states)
+    check(isinstance(pyramid, PyramidOutput), "GSM8K forward returns PyramidOutput")
+    check(len(pyramid.concepts) == config.num_levels, "GSM8K concepts count correct")
+    check(
+        pyramid.total_concepts == sum(config.level_lengths),
+        "GSM8K total_concepts correct",
+    )
+    check(pyramid.concepts[0].shape[0] == n, "GSM8K concept batch correct")
+    check(
+        pyramid.projected_hidden.shape[0] == n, "GSM8K projected_hidden batch correct"
+    )
+
+
+def test_gradient_flow(builder, device, batch_size):
+    """Test that gradients flow through all learnable parameters."""
+    logging.info("\n=== Gradient Flow Test ===")
+
+    texts = [f"Compute {i} + {i+1}." for i in range(batch_size)]
+    enc_out = builder.encode_cot(texts)
+
+    builder.train()
+    output = builder(enc_out.hidden_states)
+
+    loss = sum(c.sum() for c in output.concepts)
+    loss.backward()
+
+    check(builder.input_proj.weight.grad is not None, "input_proj has gradient")
+    check(builder.temperature.grad is not None, "temperature has gradient")
+    for k, q in enumerate(builder.concept_queries):
+        check(q.grad is not None, f"concept_queries[{k}] has gradient")
+    for k, proj in enumerate(builder.level_projs):
+        check(proj.weight.grad is not None, f"level_projs[{k}] has gradient")
+
+    builder.eval()
+    logging.info("PASS: all learnable parameters have gradients")
+
+
+def main():
+    args = parse_args()
+
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+
+    # Load config
+    config_path = Path(args.config)
+    if not config_path.is_absolute():
+        config_path = PROJECT_ROOT / config_path
+    if not config_path.exists():
+        raise FileNotFoundError(f"Config not found: {config_path}")
+
+    yaml_config = load_config(str(config_path))
+    nlcp_config = build_nlcpv3_config_from_yaml(yaml_config)
+
+    # Device
+    device = str(get_device("auto"))
+    logging.info("Device: %s", device)
+
+    # Batch size (configurable here)
     batch_size = 3
 
-    @classmethod
-    def setUpClass(cls):
-        """Load config, model, tokenizer, and dataset once for all tests."""
-        cls.args = parse_args()
+    # Load model (includes reason_model + tokenizer)
+    logging.info("Loading reason model: %s", nlcp_config.reason_model_name)
+    builder = ConceptPyramidBuilder(nlcp_config)
+    builder.to(device)
+    logging.info(
+        "Model loaded. reason_model_hidden_dim=%d", builder.reason_model_hidden_dim
+    )
+
+    # Load GSM8K
+    logging.info("Loading GSM8K dataset...")
+    from lmbase.dataset import registry
+
+    data_cfg = yaml_config["data"]
+    dataset = registry.get(data_cfg, split="train")
+    logging.info("GSM8K loaded: %d samples", len(dataset))
+
+    # Run all tests
+    test_constructor(builder, nlcp_config)
+    test_encode_cot(builder, device, batch_size)
+    test_forward(builder, device, nlcp_config, batch_size)
+    test_forward_next_level(builder, device, nlcp_config, batch_size)
+    test_gsm8k_integration(builder, device, nlcp_config, dataset, batch_size)
+    test_gradient_flow(builder, device, batch_size)
+
+    logging.info("\n=== ALL TESTS PASSED ===")
 
-        # Resolve config path
-        config_path = Path(cls.args.config)
-        if not config_path.is_absolute():
-            config_path = PROJECT_ROOT / config_path
-
-        if not config_path.exists():
-            raise FileNotFoundError(f"Config file not found: {config_path}")
-
-        # Load YAML config
-        cls.yaml_config = load_config(str(config_path))
-        cls.nlcp_config = build_nlcpv3_config_from_yaml(cls.yaml_config)
-
-        # Resolve device via lmbase auto-detection (cuda > mps > cpu)
-        cls.device = str(get_device("auto"))
-
-        logging.info("=" * 60)
-        logging.info("ConceptPyramidBuilder Integration Test")
-        logging.info("=" * 60)
-        logging.info("Encoder model: %s", cls.nlcp_config.encoder_model_name)
-        logging.info(
-            "Encoder layers: %s (use all if -1)", cls.nlcp_config.encoder_num_layers
-        )
-        logging.info("Concept dim D:  %d", cls.nlcp_config.hidden_dim)
-        logging.info("Num levels K:   %d", cls.nlcp_config.num_levels)
-        logging.info("Level lengths:  %s", cls.nlcp_config.level_lengths)
-        logging.info("Device:         %s (auto-detected)", cls.device)
-
-        # Load Builder with real model
-        logging.info("Loading model from HuggingFace...")
-        cls.builder = ConceptPyramidBuilder(cls.nlcp_config)
-        cls.builder.to(cls.device)
-        logging.info(
-            "Model loaded. encoder_hidden_dim=%d", cls.builder.encoder_hidden_dim
-        )
-
-        # Load tokenizer
-        from transformers import AutoTokenizer
-
-        cls.tokenizer = AutoTokenizer.from_pretrained(
-            cls.nlcp_config.encoder_model_name
-        )
-        if cls.tokenizer.pad_token is None:
-            cls.tokenizer.pad_token = cls.tokenizer.eos_token
-
-        # Load GSM8K dataset
-        logging.info("Loading GSM8K dataset...")
-        from lmbase.dataset import registry
-
-        data_cfg = cls.yaml_config["data"]
-        cls.dataset = registry.get(data_cfg, split="train")
-        logging.info("Loaded %d GSM8K samples", len(cls.dataset))
-
-        logging.info("=" * 60)
-
-    # =====================================================================
-    # Constructor & Config Tests
-    # =====================================================================
-
-    def test_encoder_loaded(self):
-        """Verify encoder is loaded from HuggingFace with correct hidden dim."""
-        self.assertIsNotNone(self.builder.encoder)
-        self.assertEqual(
-            self.builder.encoder_hidden_dim,
-            self.builder.encoder.config.hidden_size,
-        )
-
-    def test_input_proj_dimensions(self):
-        """Verify input_proj maps encoder_dim → concept_dim."""
-        self.assertEqual(
-            self.builder.input_proj.in_features,
-            self.builder.encoder_hidden_dim,
-        )
-        self.assertEqual(
-            self.builder.input_proj.out_features,
-            self.nlcp_config.hidden_dim,
-        )
-
-    def test_concept_queries_count(self):
-        """Verify correct number of query groups per level."""
-        self.assertEqual(
-            len(self.builder.concept_queries),
-            self.nlcp_config.num_levels,
-        )
-
-    def test_concept_queries_shapes(self):
-        """Verify query shapes [L_k, D] match config."""
-        for level_idx, queries in enumerate(self.builder.concept_queries):
-            expected_len = self.nlcp_config.level_lengths[level_idx]
-            self.assertEqual(
-                queries.shape,
-                (expected_len, self.nlcp_config.hidden_dim),
-                f"Level {level_idx} queries shape mismatch",
-            )
-
-    def test_temperature_is_learnable(self):
-        """Verify temperature is a learnable scalar."""
-        self.assertEqual(self.builder.temperature.shape, (1,))
-        self.assertTrue(self.builder.temperature.requires_grad)
-
-    def test_level_projs_count(self):
-        """Verify correct number of level-specific projections."""
-        self.assertEqual(
-            len(self.builder.level_projs),
-            self.nlcp_config.num_levels,
-        )
-
-    def test_recon_decoder_placeholder(self):
-        """Verify recon_decoder is None (future CoT reconstruction)."""
-        self.assertIsNone(self.builder.recon_decoder)
-
-    def test_total_concepts(self):
-        """Verify total concept count matches config."""
-        expected = sum(self.nlcp_config.level_lengths)
-        self.assertEqual(self.builder.get_total_concepts(), expected)
-
-    # =====================================================================
-    # encode_cot() Tests
-    # =====================================================================
-
-    def test_encode_cot_returns_encoder_output(self):
-        """Verify encode_cot returns EncoderOutput dataclass (batch=B)."""
-        texts = [
-            f"Sample question {i}: What is {i} + {i+1}?" for i in range(self.batch_size)
-        ]
-        tokens = self.tokenizer(
-            texts, return_tensors="pt", padding=True, truncation=True, max_length=32
-        )
-        input_ids = tokens["input_ids"].to(self.device)
-
-        output = self.builder.encode_cot(input_ids)
-        self.assertIsInstance(output, EncoderOutput)
-        self.assertEqual(output.hidden_states.shape[0], self.batch_size)
-
-    def test_encode_cot_shape(self):
-        """Verify encoded hidden states shape [B, L, D_encoder] for any B>=1."""
-        texts = [f"Query {i}: compute {i} * {i+2}." for i in range(self.batch_size)]
-        tokens = self.tokenizer(
-            texts, return_tensors="pt", padding=True, truncation=True, max_length=32
-        )
-        input_ids = tokens["input_ids"].to(self.device)
-
-        output = self.builder.encode_cot(input_ids)
-        self.assertEqual(output.hidden_states.dim(), 3)
-        self.assertEqual(output.hidden_states.shape[0], self.batch_size)
-        self.assertEqual(
-            output.hidden_states.shape[-1],
-            self.builder.encoder_hidden_dim,
-        )
-
-    def test_encode_cot_with_attention_mask(self):
-        """Verify encode_cot accepts attention_mask for batch=B."""
-        texts = [f"Problem {i}: Solve {i} + {i}." for i in range(self.batch_size)]
-        tokens = self.tokenizer(
-            texts,
-            return_tensors="pt",
-            padding=True,
-            truncation=True,
-            max_length=32,
-        )
-        input_ids = tokens["input_ids"].to(self.device)
-        attention_mask = tokens["attention_mask"].to(self.device)
-
-        output = self.builder.encode_cot(input_ids, attention_mask)
-        self.assertIsInstance(output, EncoderOutput)
-        self.assertEqual(output.hidden_states.shape[0], self.batch_size)
-
-    # =====================================================================
-    # forward() Tests — PyramidOutput
-    # =====================================================================
-
-    def test_forward_returns_pyramid_output(self):
-        """Verify forward returns PyramidOutput dataclass (batch=B)."""
-        texts = [f"Solve: {i} + {i+1} = ? Let's think." for i in range(self.batch_size)]
-        tokens = self.tokenizer(
-            texts, return_tensors="pt", padding=True, truncation=True, max_length=64
-        )
-        input_ids = tokens["input_ids"].to(self.device)
-
-        enc_out = self.builder.encode_cot(input_ids)
-        output = self.builder(enc_out.hidden_states)
-        self.assertIsInstance(output, PyramidOutput)
-        self.assertEqual(output.concepts[0].shape[0], self.batch_size)
-
-    def test_forward_concepts_count(self):
-        """Verify PyramidOutput contains all K levels (batch=B)."""
-        texts = [f"What is {i} times {i+2}?" for i in range(self.batch_size)]
-        tokens = self.tokenizer(
-            texts, return_tensors="pt", padding=True, truncation=True, max_length=32
-        )
-        input_ids = tokens["input_ids"].to(self.device)
-
-        enc_out = self.builder.encode_cot(input_ids)
-        output = self.builder(enc_out.hidden_states)
-        self.assertEqual(len(output.concepts), self.nlcp_config.num_levels)
-
-    def test_forward_concept_shapes(self):
-        """Verify each level's concept shape [B, L_k, D] for any B>=1."""
-        texts = [f"Calculate {i} divided by {i+1}." for i in range(self.batch_size)]
-        tokens = self.tokenizer(
-            texts, return_tensors="pt", padding=True, truncation=True, max_length=32
-        )
-        input_ids = tokens["input_ids"].to(self.device)
-
-        enc_out = self.builder.encode_cot(input_ids)
-        output = self.builder(enc_out.hidden_states)
-
-        for level_idx, concepts in enumerate(output.concepts):
-            expected_len = self.nlcp_config.level_lengths[level_idx]
-            self.assertEqual(
-                concepts.shape,
-                (self.batch_size, expected_len, self.nlcp_config.hidden_dim),
-                f"Level {level_idx} concept shape mismatch",
-            )
-
-    def test_forward_level_output_fields(self):
-        """Verify each LevelOutput has correct field shapes (batch=B)."""
-        texts = [f"Find the sum of {i} and {i+3}." for i in range(self.batch_size)]
-        tokens = self.tokenizer(
-            texts, return_tensors="pt", padding=True, truncation=True, max_length=32
-        )
-        input_ids = tokens["input_ids"].to(self.device)
-
-        enc_out = self.builder.encode_cot(input_ids)
-        output = self.builder(enc_out.hidden_states)
-        seq_len = enc_out.hidden_states.shape[1]
-
-        for level_idx, level_out in enumerate(output.level_outputs):
-            L_k = self.nlcp_config.level_lengths[level_idx]
-            with self.subTest(level=level_idx):
-                self.assertEqual(
-                    level_out.concepts.shape,
-                    (self.batch_size, L_k, self.nlcp_config.hidden_dim),
-                )
-                self.assertEqual(
-                    level_out.base_concepts.shape,
-                    (self.batch_size, L_k, self.nlcp_config.hidden_dim),
-                )
-                self.assertEqual(
-                    level_out.attention_weights.shape, (self.batch_size, L_k, seq_len)
-                )
-                self.assertEqual(
-                    level_out.reconstruction.shape,
-                    (self.batch_size, seq_len, self.nlcp_config.hidden_dim),
-                )
-
-    def test_forward_residual_property(self):
-        """Verify f_hat + f_rest = H_proj for any B>=1."""
-        texts = [f"Compute {i} * {i+1} + {i}." for i in range(self.batch_size)]
-        tokens = self.tokenizer(
-            texts, return_tensors="pt", padding=True, truncation=True, max_length=32
-        )
-        input_ids = tokens["input_ids"].to(self.device)
-
-        enc_out = self.builder.encode_cot(input_ids)
-        output = self.builder(enc_out.hidden_states)
-
-        recomposed = output.reconstructed_hidden + output.residual_hidden
-        diff = torch.abs(recomposed - output.projected_hidden).max()
-        self.assertLess(
-            diff.item(),
-            1e-4,
-            "f_hat + f_rest should equal H_proj",
-        )
-
-    def test_forward_pyramid_properties(self):
-        """Verify PyramidOutput metadata and convenience properties (batch=B)."""
-        texts = [f"What is {i} minus {i-1}?" for i in range(self.batch_size)]
-        tokens = self.tokenizer(
-            texts, return_tensors="pt", padding=True, truncation=True, max_length=32
-        )
-        input_ids = tokens["input_ids"].to(self.device)
-
-        enc_out = self.builder.encode_cot(input_ids)
-        output = self.builder(enc_out.hidden_states)
-
-        # Metadata
-        self.assertEqual(output.num_levels, self.nlcp_config.num_levels)
-        self.assertEqual(output.level_lengths, self.nlcp_config.level_lengths)
-
-        # total_concepts property
-        expected_total = sum(self.nlcp_config.level_lengths)
-        self.assertEqual(output.total_concepts, expected_total)
-
-        # all_attentions property
-        self.assertEqual(len(output.all_attentions), self.nlcp_config.num_levels)
-
-        # all_base_concepts property
-        self.assertEqual(len(output.all_base_concepts), self.nlcp_config.num_levels)
-
-        # cat_concepts
-        cat = output.cat_concepts()
-        self.assertEqual(
-            cat.shape,
-            (self.batch_size, expected_total, self.nlcp_config.hidden_dim),
-        )
-
-    def test_forward_level0_no_refinement(self):
-        """Verify level 0 concepts equal base concepts (batch=B)."""
-        texts = [f"Solve: {i} + {i} = ?" for i in range(self.batch_size)]
-        tokens = self.tokenizer(
-            texts, return_tensors="pt", padding=True, truncation=True, max_length=16
-        )
-        input_ids = tokens["input_ids"].to(self.device)
-
-        enc_out = self.builder.encode_cot(input_ids)
-        output = self.builder(enc_out.hidden_states)
-
-        level0 = output.level_outputs[0]
-        self.assertTrue(
-            torch.allclose(level0.concepts, level0.base_concepts),
-            "Level 0 should have no refinement",
-        )
-
-    def test_attention_weights_sum_to_one(self):
-        """Verify softmax attention sums to 1 per concept slot (batch=B)."""
-        texts = [f"Calculate {i} * {i+2}." for i in range(self.batch_size)]
-        tokens = self.tokenizer(
-            texts, return_tensors="pt", padding=True, truncation=True, max_length=16
-        )
-        input_ids = tokens["input_ids"].to(self.device)
-
-        enc_out = self.builder.encode_cot(input_ids)
-        output = self.builder(enc_out.hidden_states)
-
-        for level_idx, level_out in enumerate(output.level_outputs):
-            attn = level_out.attention_weights
-            attn_sum = attn.sum(dim=-1)
-            self.assertTrue(
-                torch.allclose(attn_sum, torch.ones_like(attn_sum), atol=1e-5),
-                f"Level {level_idx} attention should sum to 1",
-            )
-
-    # =====================================================================
-    # forward_next_level() Tests
-    # =====================================================================
-
-    def test_forward_next_level_returns_single_level_output(self):
-        """Verify forward_next_level returns SingleLevelOutput (batch=B)."""
-        texts = [f"What is {i} + {i+1}?" for i in range(self.batch_size)]
-        tokens = self.tokenizer(
-            texts, return_tensors="pt", padding=True, truncation=True, max_length=16
-        )
-        input_ids = tokens["input_ids"].to(self.device)
-
-        enc_out = self.builder.encode_cot(input_ids)
-        self.builder.clear_cache()
-
-        output = self.builder.forward_next_level(
-            enc_out.hidden_states,
-            previous_level_concepts=None,
-            target_level_index=0,
-        )
-        self.assertIsInstance(output, SingleLevelOutput)
-        self.assertEqual(output.level_index, 0)
-        self.assertEqual(output.concepts.shape[0], self.batch_size)
-
-    def test_forward_next_level_sequential_extraction(self):
-        """Verify level-by-level extraction on batch=B."""
-        texts = [f"Find the product of {i} and {i+2}." for i in range(self.batch_size)]
-        tokens = self.tokenizer(
-            texts, return_tensors="pt", padding=True, truncation=True, max_length=24
-        )
-        input_ids = tokens["input_ids"].to(self.device)
-
-        enc_out = self.builder.encode_cot(input_ids)
-        H = enc_out.hidden_states
-
-        self.builder.clear_cache()
-        prev_concepts = []
-        for k in range(self.nlcp_config.num_levels):
-            level_out = self.builder.forward_next_level(
-                H, previous_level_concepts=prev_concepts, target_level_index=k
-            )
-            prev_concepts.append(level_out.concepts)
-            self.assertIsInstance(level_out, SingleLevelOutput)
-            self.assertEqual(level_out.level_index, k)
-            self.assertEqual(level_out.concepts.shape[0], self.batch_size)
-            self.assertEqual(
-                level_out.concepts.shape[1],
-                self.nlcp_config.level_lengths[k],
-            )
-
-        self.assertEqual(
-            len(self.builder._cached_attentions),
-            self.nlcp_config.num_levels,
-        )
-
-    # =====================================================================
-    # Cache Tests
-    # =====================================================================
-
-    def test_clear_cache(self):
-        """Verify clear_cache resets internal state (batch=B)."""
-        texts = [f"What is {i} + {i}?" for i in range(self.batch_size)]
-        tokens = self.tokenizer(
-            texts, return_tensors="pt", padding=True, truncation=True, max_length=16
-        )
-        input_ids = tokens["input_ids"].to(self.device)
-
-        enc_out = self.builder.encode_cot(input_ids)
-        self.builder.clear_cache()
-        self.builder.forward_next_level(
-            enc_out.hidden_states,
-            previous_level_concepts=None,
-            target_level_index=0,
-        )
-        self.assertEqual(len(self.builder._cached_attentions), 1)
-
-        self.builder.clear_cache()
-        self.assertEqual(len(self.builder._cached_attentions), 0)
-        self.assertEqual(len(self.builder._cached_base_concepts), 0)
-
-    # =====================================================================
-    # GSM8K Integration Tests
-    # =====================================================================
-
-    def test_gsm8k_sample_encode_cot(self):
-        """Verify encode_cot works on real GSM8K CoT (batch=B)."""
-        n = min(self.batch_size, len(self.dataset))
-        samples = [self.dataset[i] for i in range(n)]
-        cot_texts = [s.cot_answer for s in samples]
-
-        tokens = self.tokenizer(
-            cot_texts,
-            return_tensors="pt",
-            padding=True,
-            truncation=True,
-            max_length=self.nlcp_config.max_seq_len,
-        )
-        input_ids = tokens["input_ids"].to(self.device)
-
-        output = self.builder.encode_cot(input_ids)
-        self.assertIsInstance(output, EncoderOutput)
-        self.assertEqual(output.hidden_states.shape[0], n)
-        self.assertEqual(
-            output.hidden_states.shape[-1],
-            self.builder.encoder_hidden_dim,
-        )
-
-    def test_gsm8k_sample_build_pyramid(self):
-        """Verify full pipeline: GSM8K → tokenize → encode → pyramid (batch=B)."""
-        n = min(self.batch_size, len(self.dataset))
-        samples = [self.dataset[i] for i in range(n)]
-        cot_texts = [s.cot_answer for s in samples]
-
-        tokens = self.tokenizer(
-            cot_texts,
-            return_tensors="pt",
-            padding=True,
-            truncation=True,
-            max_length=self.nlcp_config.max_seq_len,
-        )
-        input_ids = tokens["input_ids"].to(self.device)
-
-        enc_out = self.builder.encode_cot(input_ids)
-        pyramid = self.builder(enc_out.hidden_states)
-
-        self.assertIsInstance(pyramid, PyramidOutput)
-        self.assertEqual(len(pyramid.concepts), self.nlcp_config.num_levels)
-        self.assertEqual(pyramid.total_concepts, sum(self.nlcp_config.level_lengths))
-        self.assertEqual(pyramid.concepts[0].shape[0], n)
-
-    def test_gsm8k_batch_processing(self):
-        """Verify batch processing of multiple GSM8K samples (batch=B)."""
-        n = min(self.batch_size, len(self.dataset))
-        cot_texts = [self.dataset[i].cot_answer for i in range(n)]
-
-        tokens = self.tokenizer(
-            cot_texts,
-            return_tensors="pt",
-            padding=True,
-            truncation=True,
-            max_length=self.nlcp_config.max_seq_len,
-        )
-        input_ids = tokens["input_ids"].to(self.device)
-        attention_mask = tokens["attention_mask"].to(self.device)
-
-        enc_out = self.builder.encode_cot(input_ids, attention_mask)
-        pyramid = self.builder(enc_out.hidden_states)
-
-        self.assertEqual(pyramid.concepts[0].shape[0], n)
-        self.assertEqual(pyramid.projected_hidden.shape[0], n)
-
-    # =====================================================================
-    # Gradient Flow Test
-    # =====================================================================
-
-    def test_gradient_flow(self):
-        """Verify gradients flow through forward pass on batch=B."""
-        texts = [f"Compute {i} + {i+1}." for i in range(self.batch_size)]
-        tokens = self.tokenizer(
-            texts, return_tensors="pt", padding=True, truncation=True, max_length=16
-        )
-        input_ids = tokens["input_ids"].to(self.device)
-
-        self.builder.train()
-        enc_out = self.builder.encode_cot(input_ids)
-        output = self.builder(enc_out.hidden_states)
-
-        loss = sum(c.sum() for c in output.concepts)
-        loss.backward()
-
-        self.assertIsNotNone(self.builder.input_proj.weight.grad)
-        self.assertIsNotNone(self.builder.temperature.grad)
-        for queries in self.builder.concept_queries:
-            self.assertIsNotNone(queries.grad)
-
-        self.builder.eval()
-
-
-# =============================================================================
-# Entry Point
-# =============================================================================
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
-    unittest.main(verbosity=2)
+    main()
