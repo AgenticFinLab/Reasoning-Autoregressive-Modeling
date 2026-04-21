@@ -3,12 +3,19 @@
 USAGE:
     from nlcpV3 import NLCPV3Config, NLCPV3Model
 
-    # RECOMMENDED: Hybrid generator (combines best of 3 methods)
-    from nlcpV3 import HybridConceptGenerator
-    config = NLCPV3Config(...)
-    generator = HybridConceptGenerator(config, encoder_hidden_dim)
-    concepts, aux = generator(H_cot)  # Training
-    C_k, aux = generator(H, target_level_index=k, previous_level_concepts=[...])  # Inference
+    # RECOMMENDED: Concept Pyramid Builder (Phase 1 of two-phase architecture)
+    from nlcpV3 import ConceptPyramidBuilder
+    config = NLCPV3Config(
+        encoder_model_name="Qwen/Qwen2.5-0.5B",
+        encoder_freeze=False,  # Set True to freeze encoder
+        ...
+    )
+    builder = ConceptPyramidBuilder(config)  # Encoder created internally
+    enc_out = builder.encode_cot(cot_input_ids, attention_mask=cot_mask)
+    pyramid = builder(enc_out.hidden_states)  # Training: PyramidOutput
+    # pyramid.concepts: [C_0, ..., C_{K-1}]
+    # pyramid.level_outputs: List[LevelOutput]
+    # pyramid.reconstructed_hidden: for recon loss
 
     # Individual extractors (for standalone use / ablation studies)
     from nlcpV3 import (
@@ -30,14 +37,14 @@ DESIGN SOURCE:
     - Section 4: Inference
 
     Inspired by: docs/VAR.md
-    - VAR uses same codebook/φ for both training (VQ-VAE) and inference
-    - NLCP V3 unifies concept extraction and generation in one module
+    - VAR separates VQ-VAE (extraction) and Transformer (generation)
+    - NLCP V3 follows same principle: Builder (extraction) + Predictor (generation)
 
 MODULE STRUCTURE:
     - config: NLCPV3Config dataclass for all hyperparameters
     - encoder: Qwen2.5-based encoder for Q+CoT (train) / Q (inference)
-    - concept_generator: Training & inference methods
-        * Individual extractors (standalone, trainable classes)
+    - concept_hybrid_builder: Phase 1 — ConceptPyramidBuilder (training only)
+    - concept_generator: Individual extractors (standalone, ablation studies)
     - concept_transformer: VAR-style transformer with level-level causality
     - token_decoder: Decodes concepts directly to solution (NOT CoT!)
     - model: NLCPV3Model integrating all components
@@ -67,7 +74,13 @@ from nlcpV3.concept_generator import (
     # Inference generator
     AutoregressiveConceptGenerator,
 )
-from nlcpV3.concept_generator_hybrid import HybridConceptGenerator
+from nlcpV3.concept_hybrid_builder import (
+    ConceptPyramidBuilder,
+    EncoderOutput,
+    LevelOutput,
+    PyramidOutput,
+    SingleLevelOutput,
+)
 from nlcpV3.concept_transformer import ConceptTransformer
 from nlcpV3.token_decoder import SolutionDecoder
 from nlcpV3.model import NLCPV3Model
@@ -93,8 +106,13 @@ __all__ = [
     "CausalSoftPoolingConceptGenerator",
     # Inference generator
     "AutoregressiveConceptGenerator",
-    # Hybrid generator (recommended)
-    "HybridConceptGenerator",
+    # Concept Pyramid Builder (Phase 1: training only)
+    "ConceptPyramidBuilder",
+    # Builder output dataclasses
+    "EncoderOutput",
+    "LevelOutput",
+    "PyramidOutput",
+    "SingleLevelOutput",
     # Other components
     "ConceptTransformer",
     "SolutionDecoder",

@@ -1,4 +1,7 @@
-"""Comprehensive unit test for HybridConceptGenerator.
+"""Comprehensive unit test for ConceptPyramidBuilder.
+
+Tests the Concept Pyramid Builder (Phase 1 of the two-phase architecture).
+Based on hybrid-analysis.md: Concept Pyramid Architecture.
 
 USAGE:
     # Run from project root:
@@ -10,7 +13,7 @@ USAGE:
     python examples/nlcpV3/utest/test_hybrid_generator.py -c <config> --test gsm8k
 
 DESIGN SOURCE:
-    Reference: examples/nlcpV3/concept_generator_hybrid.py
+    Reference: examples/nlcpV3/concept_hybrid_builder.py
     Combines three best methods:
     1. ResidualAttentivePooling (coarse-to-fine backbone)
     2. MonotonicSoftAssignment (cross-attention bridge)
@@ -62,7 +65,7 @@ sys.path.insert(0, str(EXAMPLES_DIR))
 from lmbase.dataset import registry
 from nlcpV3.config import NLCPV3Config
 from nlcpV3.encoder import NLCPV3Encoder
-from nlcpV3.concept_generator_hybrid import HybridConceptGenerator
+from nlcpV3.concept_hybrid_builder import ConceptPyramidBuilder
 from ram.utils import load_config
 
 
@@ -220,7 +223,7 @@ def build_nlcpV3_config(config: dict) -> NLCPV3Config:
 
 
 def get_hybrid_generator_params(config: dict) -> dict:
-    """Extract HybridConceptGenerator parameters from config.
+    """Extract ConceptPyramidBuilder parameters from config.
 
     Args:
         config: Configuration dictionary from YAML file
@@ -261,8 +264,8 @@ def test_constructor(
     config: NLCPV3Config,
     hybrid_params: dict,
     results: TestResults,
-) -> HybridConceptGenerator:
-    """Test HybridConceptGenerator constructor and parameter initialization.
+) -> ConceptPyramidBuilder:
+    """Test ConceptPyramidBuilder constructor and parameter initialization.
 
     Args:
         config: NLCPV3Config instance
@@ -270,7 +273,7 @@ def test_constructor(
         results: TestResults tracker
 
     Returns:
-        Initialized HybridConceptGenerator
+        Initialized ConceptPyramidBuilder
     """
     print("\n--- Test: Constructor ---")
 
@@ -280,7 +283,7 @@ def test_constructor(
         order_margin = hybrid_params["order_margin"]
         use_positional_query_init = hybrid_params["use_positional_query_init"]
 
-        generator = HybridConceptGenerator(
+        generator = ConceptPyramidBuilder(
             config,
             encoder_hidden_dim,
             order_loss_weight,
@@ -348,7 +351,7 @@ def test_constructor(
 
 
 def test_training_mode(
-    generator: HybridConceptGenerator,
+    generator: ConceptPyramidBuilder,
     config: NLCPV3Config,
     results: TestResults,
     batch_size: int = 2,
@@ -446,7 +449,7 @@ def test_training_mode(
 
 
 def test_inference_mode(
-    generator: HybridConceptGenerator,
+    generator: ConceptPyramidBuilder,
     config: NLCPV3Config,
     results: TestResults,
     batch_size: int = 2,
@@ -527,7 +530,7 @@ def test_inference_mode(
 
 
 def test_forward_next_level(
-    generator: HybridConceptGenerator,
+    generator: ConceptPyramidBuilder,
     config: NLCPV3Config,
     results: TestResults,
     batch_size: int = 2,
@@ -579,7 +582,7 @@ def test_forward_next_level(
 
 
 def test_gradient_flow(
-    generator: HybridConceptGenerator,
+    generator: ConceptPyramidBuilder,
     config: NLCPV3Config,
     results: TestResults,
     batch_size: int = 2,
@@ -628,7 +631,7 @@ def test_gradient_flow(
 
 
 def test_edge_cases(
-    generator: HybridConceptGenerator,
+    generator: ConceptPyramidBuilder,
     config: NLCPV3Config,
     results: TestResults,
 ):
@@ -690,7 +693,7 @@ def test_gsm8k_integration(
         # Initialize encoder and generator
         encoder = NLCPV3Encoder(config)
         encoder_hidden_dim = encoder.model.config.hidden_size
-        generator = HybridConceptGenerator(
+        generator = ConceptPyramidBuilder(
             config,
             encoder_hidden_dim=encoder_hidden_dim,
             order_loss_weight=0.1,
@@ -774,7 +777,7 @@ def run_all_tests(config_path: str, specific_test: Optional[str]):
     # Run tests with terminal output captured to file
     with TerminalLogger(log_path):
         print("=" * 60)
-        print("HybridConceptGenerator Comprehensive Test Suite")
+        print("ConceptPyramidBuilder Comprehensive Test Suite")
         print("=" * 60)
 
         print(f"\nConfiguration:")
@@ -802,7 +805,7 @@ def run_all_tests(config_path: str, specific_test: Optional[str]):
                 return len(results.failed) == 0
 
             # Re-create generator for other tests using config parameters
-            generator = HybridConceptGenerator(
+            generator = ConceptPyramidBuilder(
                 config,
                 hybrid_params["encoder_hidden_dim"],
                 hybrid_params["order_loss_weight"],
@@ -851,7 +854,7 @@ def run_all_tests(config_path: str, specific_test: Optional[str]):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Test HybridConceptGenerator")
+    parser = argparse.ArgumentParser(description="Test ConceptPyramidBuilder")
     parser.add_argument(
         "-c", "--config", required=True, help="Path to configuration file"
     )
