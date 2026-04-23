@@ -37,6 +37,8 @@ from nlcpV3.concept_hybrid_builder import (
     PyramidOutput,
     SingleLevelOutput,
 )
+from nlcpV3.train_builder import compute_builder_loss
+from lmbase.dataset import registry
 from lmbase.utils.env_tools import get_device
 from ram.utils import load_config
 
@@ -58,7 +60,6 @@ def build_nlcpv3_config_from_yaml(yaml_dict):
     m = yaml_dict["model"]
     rm = m["reason_model"]
     pyr = m["pyramid"]
-    dec = m["decoder"]
     bld = m["builder"]
     tr = yaml_dict["training"]
     lw = tr["loss_weights"]
@@ -71,11 +72,9 @@ def build_nlcpv3_config_from_yaml(yaml_dict):
         reason_model_name=rm["reason_model_name"],
         reason_model_num_layers=rm["reason_model_num_layers"],
         reason_model_freeze=rm["reason_model_freeze"],
-        reason_model_lora=rm.get("reason_model_lora"),
-        decoder_model_name=dec.get("decoder_model_name", ""),
-        decoder_freeze=dec.get("decoder_freeze", True),
-        decoder_lora=dec.get("decoder_lora"),
+        reason_model_lora=rm["reason_model_lora"],
         use_positional_query_init=bld["use_positional_query_init"],
+        use_reasoning_loss=bld["use_reasoning_loss"],
         ntp_loss_weight=lw["ntp_loss_weight"],
         concept_loss_weight=lw["concept_loss_weight"],
         recon_loss_weight=lw["recon_loss_weight"],
@@ -118,7 +117,7 @@ def test_constructor(builder, config):
         - concept_queries has K levels with shapes [L_k, D]
         - temperature is a learnable scalar
         - level_projs and level_attn have K elements each
-        - recon_decoder is None (expected placeholder)
+        - back_proj exists when use_reasoning_loss=True, None otherwise
         - total_concepts matches sum(level_lengths)
     """
     logging.info("\n=== Constructor Tests ===")
@@ -200,14 +199,23 @@ def test_constructor(builder, config):
         len(builder.level_attn) == config.num_levels,
     )
 
-    # --- Solution Decoder Placeholder ---
-    # solution_decoder: interface-only, should be None until implemented.
-    log_check(
-        "solution_decoder is None (placeholder)", builder.solution_decoder is None
-    )
-
-    # --- Reconstruction Decoder Placeholder ---
-    log_check("recon_decoder is None (placeholder)", builder.recon_decoder is None)
+    # --- Back-Projection Layer (only when use_reasoning_loss=True) ---
+    if config.use_reasoning_loss:
+        log_check("back_proj exists", builder.back_proj is not None)
+        if builder.back_proj is not None:
+            log_check(
+                "back_proj.in == hidden_dim",
+                builder.back_proj.in_features == config.hidden_dim,
+            )
+            log_check(
+                "back_proj.out == reason_model_hidden_dim",
+                builder.back_proj.out_features == builder.reason_model_hidden_dim,
+            )
+            log_check("back_proj requires_grad", builder.back_proj.weight.requires_grad)
+    else:
+        log_check(
+            "back_proj is None (use_reasoning_loss=False)", builder.back_proj is None
+        )
 
     # --- Cache Lists ---
     log_check(
@@ -610,6 +618,159 @@ def test_gsm8k_integration(builder, device, config, dataset, batch_size):
     )
 
 
+def test_loss_breakdown(builder, config, device, batch_size):
+    """Display each loss component, its weight, and the weighted contribution.
+
+    PURPOSE:
+        Show a clear breakdown of all builder training losses so the
+        developer can verify that weights and magnitudes are reasonable.
+
+    WHAT IS DISPLAYED:
+        For each loss component:
+          - Raw (unweighted) loss value
+          - Weight from config
+          - Weighted contribution = raw × weight
+        Plus the total loss = sum of all weighted contributions.
+
+    LOSS COMPONENTS:
+        1. recon_loss     × recon_loss_weight   — CoT reconstruction
+        2. ordering_loss  × concept_loss_weight  — Intra-level ordering
+        3. residual_loss  × 0.01 (fixed)         — Clean decomposition
+        Total = (1) + (2) + (3)
+
+        When use_reasoning_loss=True and ntp_loss_weight > 0:
+        4. ntp_loss       × ntp_loss_weight     — Reasoning validation
+        Total = (1) + (2) + (3) + (4)
+    """
+    logging.info("\n=== Loss Breakdown ===")
+    logging.info(
+        "Purpose: Show raw loss, weight, and weighted contribution for each component"
+    )
+
+    # --- Build pyramid ---
+    texts = [f"What is {i} + {i+1}? The answer is {i+i+1}." for i in range(batch_size)]
+    builder.train()
+    enc_out = builder.encode_cot(texts)
+    H = enc_out.hidden_states
+    pyramid = builder(H)
+
+    # --- Compute base builder losses (recon + ordering + residual) ---
+    total_loss, loss_dict = compute_builder_loss(pyramid, config)
+
+    # Display each component
+    recon_raw = loss_dict["recon"]
+    ordering_raw = loss_dict["ordering"]
+    residual_raw = loss_dict["residual"]
+    total_raw = loss_dict["total"]
+
+    recon_w = config.recon_loss_weight
+    ordering_w = config.concept_loss_weight
+    residual_w = 0.01  # fixed small weight
+
+    recon_weighted = recon_raw * recon_w
+    ordering_weighted = ordering_raw * ordering_w
+    residual_weighted = residual_raw * residual_w
+
+    logging.info(
+        "  ┌─────────────────────────────────────────────────────────────────────┐"
+    )
+    logging.info(
+        "  │ Loss Component         │ Raw Value    │ Weight   │ Weighted Value  │"
+    )
+    logging.info(
+        "  ├─────────────────────────────────────────────────────────────────────┤"
+    )
+    logging.info(
+        "  │ recon_loss             │ %11.4f  │ %7.3f  │ %13.4f   │",
+        recon_raw,
+        recon_w,
+        recon_weighted,
+    )
+    logging.info(
+        "  │ ordering_loss          │ %11.4f  │ %7.3f  │ %13.4f   │",
+        ordering_raw,
+        ordering_w,
+        ordering_weighted,
+    )
+    logging.info(
+        "  │ residual_loss          │ %11.4f  │ %7.3f  │ %13.4f   │",
+        residual_raw,
+        residual_w,
+        residual_weighted,
+    )
+    logging.info(
+        "  ├─────────────────────────────────────────────────────────────────────┤"
+    )
+
+    # --- NTP loss (when enabled) ---
+    ntp_weighted = 0.0
+    if (
+        config.use_reasoning_loss
+        and config.ntp_loss_weight > 0
+        and builder.back_proj is not None
+    ):
+        questions = [f"What is {i} + {i+1}?" for i in range(batch_size)]
+        solutions = [str(i + i + 1) for i in range(batch_size)]
+        Q_tokens = builder.tokenizer(
+            questions,
+            return_tensors="pt",
+            padding=True,
+            truncation=True,
+            max_length=64,
+        )
+        sol_tokens = builder.tokenizer(
+            solutions,
+            return_tensors="pt",
+            padding=True,
+            truncation=True,
+            max_length=64,
+        )
+        ntp_loss = builder.compute_reasoning_loss(
+            pyramid,
+            Q_tokens["input_ids"].to(device),
+            Q_tokens["attention_mask"].to(device),
+            sol_tokens["input_ids"].to(device),
+        )
+        ntp_raw = ntp_loss.item()
+        ntp_w = config.ntp_loss_weight
+        ntp_weighted = ntp_raw * ntp_w
+        logging.info(
+            "  │ ntp_loss               │ %11.4f  │ %7.3f  │ %13.4f   │",
+            ntp_raw,
+            ntp_w,
+            ntp_weighted,
+        )
+        logging.info(
+            "  ├─────────────────────────────────────────────────────────────────────┤"
+        )
+        # Recompute total with NTP included
+        total_with_ntp = total_loss.item() + ntp_weighted
+    else:
+        total_with_ntp = total_loss.item()
+
+    logging.info(
+        "  │ TOTAL                  │             │          │ %13.4f   │",
+        total_with_ntp,
+    )
+    logging.info(
+        "  └─────────────────────────────────────────────────────────────────────┘"
+    )
+
+    # Sanity checks
+    expected_base_total = recon_weighted + ordering_weighted + residual_weighted
+    log_check(
+        "total ≈ sum of weighted components",
+        abs(total_raw - expected_base_total) < 1e-3,
+        f"total={total_raw:.4f}, sum={expected_base_total:.4f}",
+    )
+    log_check("recon_loss is finite", recon_raw == recon_raw)  # NaN check
+    log_check("ordering_loss is finite", ordering_raw == ordering_raw)
+    log_check("residual_loss >= 0", residual_raw >= 0)
+    log_check("total_loss is finite", total_raw == total_raw)
+
+    builder.eval()
+
+
 def test_gradient_flow(builder, device, batch_size):
     """Verify backpropagation reaches all learnable parameters.
 
@@ -683,7 +844,133 @@ def test_gradient_flow(builder, device, batch_size):
         "Expected WARN if freeze=True and no LoRA",
     )
 
+    # --- back_proj (only when use_reasoning_loss=True) ---
+    if builder.back_proj is not None:
+        bp_grad = builder.back_proj.weight.grad is not None
+        log_check("back_proj.weight has gradient", bp_grad)
+        if bp_grad:
+            log_value(
+                "back_proj.grad norm",
+                f"{builder.back_proj.weight.grad.norm().item():.4f}",
+            )
+
     builder.eval()
+
+
+def test_reasoning_loss(ntp_config, device, batch_size):
+    """Verify compute_reasoning_loss with use_reasoning_loss=True.
+
+    PURPOSE:
+        When use_reasoning_loss is enabled, the Builder creates back_proj
+        (D → D_encoder) and supports compute_reasoning_loss(). This test
+        verifies the full NTP pipeline: Q + concept pyramid → solution logits.
+
+    WHAT IS CHECKED:
+        - Builder with use_reasoning_loss=True has back_proj
+        - back_proj dimensions: in=hidden_dim, out=reason_model_hidden_dim
+        - back_proj.weight ≈ input_proj.weight.T (pseudo-inverse init)
+        - compute_reasoning_loss returns a scalar loss
+        - Loss is finite and positive
+        - Gradients flow through back_proj and input_proj after NTP backward
+    """
+    logging.info("\n=== Reasoning Loss Tests (use_reasoning_loss=True) ===")
+    logging.info("Purpose: Verify NTP reasoning loss pipeline with back_proj")
+
+    # Config is loaded from YAML with use_reasoning_loss=True
+    logging.info("  Creating builder from NTP config...")
+    ntp_builder = ConceptPyramidBuilder(ntp_config)
+    ntp_builder.to(device)
+
+    # --- back_proj existence and dimensions ---
+    log_check(
+        "back_proj exists (use_reasoning_loss=True)",
+        ntp_builder.back_proj is not None,
+    )
+    if ntp_builder.back_proj is not None:
+        log_check(
+            "back_proj.in_features == hidden_dim",
+            ntp_builder.back_proj.in_features == ntp_config.hidden_dim,
+            f"in={ntp_builder.back_proj.in_features}, expected={ntp_config.hidden_dim}",
+        )
+        log_check(
+            "back_proj.out_features == reason_model_hidden_dim",
+            ntp_builder.back_proj.out_features == ntp_builder.reason_model_hidden_dim,
+            f"out={ntp_builder.back_proj.out_features}, "
+            f"expected={ntp_builder.reason_model_hidden_dim}",
+        )
+
+        # --- Pseudo-inverse initialization check ---
+        # back_proj.weight should be initialized as input_proj.weight.T
+        weight_diff = (
+            (ntp_builder.back_proj.weight - ntp_builder.input_proj.weight.T)
+            .abs()
+            .max()
+            .item()
+        )
+        log_value(
+            "back_proj vs input_proj.T max_diff",
+            f"{weight_diff:.2e}",
+        )
+        log_check(
+            "back_proj initialized as input_proj.T (pseudo-inverse)",
+            weight_diff < 1e-6,
+            f"diff={weight_diff:.2e}",
+        )
+
+    # --- Full NTP pipeline ---
+    texts = [f"What is {i} + {i+1}? The answer is {i+i+1}." for i in range(batch_size)]
+    questions = [f"What is {i} + {i+1}?" for i in range(batch_size)]
+    solutions = [str(i + i + 1) for i in range(batch_size)]
+
+    ntp_builder.train()
+    enc_out = ntp_builder.encode_cot(texts)
+    H = enc_out.hidden_states
+    pyramid = ntp_builder(H)
+
+    # Tokenize Q and solution
+    Q_tokens = ntp_builder.tokenizer(
+        questions,
+        return_tensors="pt",
+        padding=True,
+        truncation=True,
+        max_length=ntp_config.max_seq_len,
+    )
+    sol_tokens = ntp_builder.tokenizer(
+        solutions,
+        return_tensors="pt",
+        padding=True,
+        truncation=True,
+        max_length=ntp_config.max_seq_len,
+    )
+
+    ntp_loss = ntp_builder.compute_reasoning_loss(
+        pyramid,
+        Q_tokens["input_ids"].to(device),
+        Q_tokens["attention_mask"].to(device),
+        sol_tokens["input_ids"].to(device),
+    )
+    log_value("NTP loss value", f"{ntp_loss.item():.4f}")
+    log_check("NTP loss is finite", torch.isfinite(ntp_loss))
+    log_check("NTP loss is positive", ntp_loss.item() > 0)
+
+    # --- Gradient flow through NTP ---
+    ntp_loss.backward()
+    bp_grad = ntp_builder.back_proj.weight.grad is not None
+    log_check("back_proj receives gradient from NTP loss", bp_grad)
+    if bp_grad:
+        log_value(
+            "back_proj.grad norm",
+            f"{ntp_builder.back_proj.weight.grad.norm().item():.4f}",
+        )
+    ip_grad = ntp_builder.input_proj.weight.grad is not None
+    log_check("input_proj receives gradient from NTP loss", ip_grad)
+    if ip_grad:
+        log_value(
+            "input_proj.grad norm",
+            f"{ntp_builder.input_proj.weight.grad.norm().item():.4f}",
+        )
+
+    ntp_builder.eval()
 
 
 def main():
@@ -705,8 +992,8 @@ def main():
     device = str(get_device("auto"))
     logging.info("Device: %s", device)
 
-    # Batch size (configurable here)
-    batch_size = 3
+    # Batch size from training config
+    batch_size = yaml_config["training"]["batch_size"]
 
     # Load model (includes reason_model + tokenizer)
     logging.info("Loading reason model: %s", nlcp_config.reason_model_name)
@@ -718,10 +1005,8 @@ def main():
 
     # Load GSM8K
     logging.info("Loading GSM8K dataset...")
-    from lmbase.dataset import registry
-
     data_cfg = yaml_config["data"]
-    dataset = registry.get(data_cfg, split="train")
+    dataset = registry.get(data_cfg, split=data_cfg["split"])
     logging.info("GSM8K loaded: %d samples", len(dataset))
 
     # Run all diagnostic tests
@@ -731,7 +1016,17 @@ def main():
     test_forward(builder, device, nlcp_config, batch_size)
     test_forward_next_level(builder, device, nlcp_config, batch_size)
     test_gsm8k_integration(builder, device, nlcp_config, dataset, batch_size)
+    test_loss_breakdown(builder, nlcp_config, device, batch_size)
     test_gradient_flow(builder, device, batch_size)
+
+    # Load NTP config and test reasoning loss if use_reasoning_loss is False
+    # in the current config (otherwise it was already tested above)
+    if not nlcp_config.use_reasoning_loss:
+        ntp_config_path = config_path.parent / "test_concept_builder_ntp.yml"
+        if ntp_config_path.exists():
+            ntp_yaml = load_config(str(ntp_config_path))
+            ntp_config = build_nlcpv3_config_from_yaml(ntp_yaml)
+            test_reasoning_loss(ntp_config, device, batch_size)
 
     logging.info("\n=== ALL DIAGNOSTIC TESTS COMPLETE ===")
     logging.info(

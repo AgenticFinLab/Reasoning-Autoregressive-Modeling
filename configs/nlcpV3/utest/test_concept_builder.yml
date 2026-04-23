@@ -60,23 +60,14 @@ model:
     level_lengths: [1, 2, 4, 8, 16, 32]
     max_seq_len: 512
 
-  # Solution decoder configuration (for future Predictor / Solution generation)
-  # This uses the same base model but loaded with AutoModelForCausalLM
-  # (includes lm_head for autoregressive generation).
-  # Currently interface-only — decoder is not yet implemented.
-  decoder:
-    # decoder_model_name defaults to reason_model_name if empty
-    decoder_model_name: ""
-    decoder_freeze: true
-    # LoRA configuration for solution decoder (null = no LoRA)
-    decoder_lora: null
-
   # Builder-specific parameters
   builder:
     # Query initialization mode (ablation option)
     # True: initialize queries with positional priors (DLCM-style segment bias)
     # False: random Xavier uniform initialization
     use_positional_query_init: true
+    # Enable NTP reasoning loss: Q + concept pyramid → solution validation.
+    use_reasoning_loss: false
 
 # Training configuration (minimal for testing)
 training:
@@ -86,6 +77,20 @@ training:
   weight_decay: 0.01
 
   # Loss weights for training objectives
+  # ─────────────────────────────────────────────────────────
+  # ntp_loss_weight:
+  #   NTP / reasoning loss. When use_reasoning_loss=True, the Builder
+  #   computes cross-entropy on solution tokens given Q + concept pyramid.
+  #   [test value: 1.0 — non-zero to verify NTP code path in unit tests]
+  #
+  # concept_loss_weight:
+  #   Intra-level ordering loss. Encourages concepts within each level
+  #   to attend to sequential CoT positions (Gaussian soft targets).
+  #
+  # recon_loss_weight:
+  #   CoT reconstruction loss. MSE between pyramid-reconstructed hidden
+  #   states and the original projected CoT hidden states.
+  # ─────────────────────────────────────────────────────────
   loss_weights:
     ntp_loss_weight: 1.0
     concept_loss_weight: 0.1

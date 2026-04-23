@@ -49,40 +49,42 @@ class NLCPV3Config:
 
         Reason Model Configuration:
             reason_model_name: HuggingFace model name for the decoder-only
-                Transformer used as both CoT feature extractor and Solution
-                generator. Builder uses AutoModel backbone; Predictor uses
-                lm_head for autoregressive generation.
+                Transformer. Loaded as AutoModelForCausalLM (includes lm_head)
+                so a single model serves BOTH roles:
+                (1) Backbone: CoT hidden state extraction (encode_cot)
+                (2) lm_head: NTP / reasoning loss on solution tokens
             reason_model_num_layers: Number of layers to use (-1 = all)
             reason_model_freeze: Whether to freeze backbone parameters
             reason_model_lora: Optional LoRA config dict for reason_model.
                 If non-None, applies PEFT LoRA adapters to the backbone.
                 Example: {"r": 8, "lora_alpha": 16, "target_modules": ["q_proj", "v_proj"]}
 
-        Solution Decoder Configuration:
-            decoder_model_name: HuggingFace model name for the solution decoder.
-                This is the SAME base model as reason_model but loaded with
-                AutoModelForCausalLM (includes lm_head). Used for Solution
-                generation from Q + concept pyramid. Can differ from
-                reason_model_name for model distillation scenarios.
-            decoder_freeze: Whether to freeze the decoder backbone parameters
-            decoder_lora: Optional LoRA config dict for the solution decoder.
-                If non-None, applies PEFT LoRA adapters.
-            vocab_size: Derived from decoder_model_name.config.vocab_size
-                (no manual setting needed — the pretrained model defines its
-                own vocabulary size)
-            dropout / rms_norm_eps / muP_scale: Derived from the pretrained
-                model's config. Not set manually — the model already defines
-                its own normalization epsilon, dropout, etc.
-
         Builder Options:
             use_positional_query_init: If True, initialize concept queries with
                 positional priors (hybrid-analysis.md Section 6). This biases
                 C_{k,j} toward the j-th segment of the sequence.
+            use_reasoning_loss: If True, enable NTP / reasoning loss during
+                Builder training. Adds back_proj (D → D_encoder) and computes
+                cross-entropy on solution tokens given Q + concept pyramid.
+                This validates that the extracted pyramid supports effective
+                reasoning — arguably more important than recon_loss alone.
+                When False, only recon_loss + ordering_loss + residual_loss are used.
 
         Loss Weights:
-            ntp_loss_weight: Weight for next-token prediction loss
-            concept_loss_weight: Weight for concept extraction/generation loss
-            recon_loss_weight: Weight for reconstruction loss
+            ntp_loss_weight: Weight for NTP / reasoning loss.
+                The reason_model (AutoModelForCausalLM) includes lm_head.
+                Given Q + concept pyramid, can it generate the correct solution?
+                This is the essential validation: a pyramid that reconstructs
+                CoT hidden states but cannot support reasoning is useless.
+                Currently 0.0 in configs (not yet implemented in training loop).
+            concept_loss_weight: Weight for concept ordering loss.
+                Encourages concepts within each level to attend to sequential
+                positions in the CoT (intra-level ordering constraint via Gaussian
+                soft targets on attention weights).
+            recon_loss_weight: Weight for CoT reconstruction loss.
+                Measures MSE between the pyramid-reconstructed hidden states
+                (f_hat_K = sum_k A_k^T @ C_k_base) and the projected CoT hidden
+                states. Ensures the pyramid preserves CoT information.
     """
 
     hidden_dim: int
@@ -95,20 +97,26 @@ class NLCPV3Config:
     reason_model_num_layers: int
     reason_model_freeze: bool
 
-    # Solution Decoder Configuration
-    decoder_model_name: str  # Default: same as reason_model_name (set in __post_init__)
-    decoder_freeze: bool  # Freeze decoder backbone by default
-
     # Builder-specific options
     use_positional_query_init: bool  # Initialize concept queries with positional priors
+    use_reasoning_loss: bool  # Enable NTP reasoning loss (Q + pyramid → solution)
 
+    # ntp_loss: NTP / reasoning loss. The reason_model includes lm_head
+    # so it can generate solutions from Q + concept pyramid. This loss
+    # validates that the pyramid supports effective reasoning.
+    # Currently 0.0 (not yet implemented in training loop).
     ntp_loss_weight: float
+
+    # concept_loss: Intra-level ordering loss. Encourages concepts within
+    # each level to attend to sequential CoT positions (Gaussian soft targets).
     concept_loss_weight: float
+
+    # recon_loss: CoT reconstruction loss. MSE between pyramid-reconstructed
+    # hidden states and the original projected CoT hidden states.
     recon_loss_weight: float
 
     # Optional fields (must come after all required fields in dataclass)
     reason_model_lora: Optional[Dict[str, Any]] = None
-    decoder_lora: Optional[Dict[str, Any]] = None
 
     def __post_init__(self):
         """Validate configuration parameters.
@@ -119,7 +127,6 @@ class NLCPV3Config:
         VALIDATION:
             - hidden_dim must be divisible by num_heads
             - len(level_lengths) must equal num_levels
-            - decoder_model_name defaults to reason_model_name if empty
         """
         if self.hidden_dim % self.num_heads != 0:
             raise ValueError(
@@ -132,10 +139,6 @@ class NLCPV3Config:
                 f"len(level_lengths) ({len(self.level_lengths)}) must equal "
                 f"num_levels ({self.num_levels})"
             )
-
-        # Default decoder_model_name to reason_model_name if not specified
-        if not self.decoder_model_name:
-            self.decoder_model_name = self.reason_model_name
 
     @property
     def head_dim(self) -> int:

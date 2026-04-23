@@ -40,11 +40,17 @@ KEY DESIGN PRINCIPLES (hybrid-analysis.md):
     6. Builder-Predictor separation: Section 4   — Builder for groundtruth, Predictor for generation
 
 ENCODER INTEGRATION (hybrid-analysis.md Section 1.2):
-    self.reason_model is the decoder-only Transformer (e.g., Qwen).
-    We use its AutoModel backbone (not ForCausalLM) to extract CoT
-    hidden states. This is the SAME model that generates Solution
-    tokens — the Builder uses its backbone, the Predictor uses its
-    lm_head (or a separate head) for generation.
+    self.reason_model is loaded as AutoModelForCausalLM (e.g., Qwen2.5
+    with lm_head). A SINGLE model serves both roles:
+      (1) Encoding: reason_model.model (backbone) → CoT hidden states
+      (2) Decoding: reason_model (full) → solution token logits via lm_head
+    No separate solution_decoder is needed. The lm_head enables
+    NTP / reasoning loss to validate that the concept pyramid
+    supports effective reasoning.
+
+    When use_reasoning_loss=True, back_proj (D → D_encoder) is added to
+    map concept embeddings back to the model's input space. The NTP loss
+    is computed as: Q + back_proj(concepts) → reason_model → solution logits.
 
     Usage:
         from nlcpV3.config import NLCPV3Config
@@ -99,9 +105,7 @@ from typing import Optional, List, Dict, Any, Union
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from transformers import AutoModel, AutoTokenizer
-
-# AutoModelForCausalLM: needed by _init_solution_decoder() when implemented
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from nlcpV3.config import NLCPV3Config
 
@@ -333,20 +337,25 @@ class ConceptPyramidBuilder(nn.Module):
         forward_next_level():  One level at a time (sequential / debugging)
 
     ATTRIBUTES:
-        reason_model: The decoder-only Transformer backbone (e.g., Qwen).
-            Loaded via AutoModel for CoT hidden state extraction.
+        reason_model: The decoder-only Transformer (e.g., Qwen), loaded as
+            AutoModelForCausalLM. Used for BOTH:
+            (1) CoT hidden state extraction via its backbone (model.model)
+            (2) Solution generation via its lm_head (future NTP loss)
+            This is the SINGLE model around which the architecture is built:
+            extract concepts from CoT, then generate solutions from Q + concepts.
             Can be frozen, pruned, or LoRA-adapted via config.
             Initialized by _init_reason_model().
         tokenizer: Tokenizer paired with reason_model for text encoding.
-        solution_decoder: The decoder-only Transformer + lm_head for
-            Solution generation (Q + concept pyramid → Solution).
-            Loaded via AutoModelForCausalLM. Currently interface-only.
-            Initialized by _init_solution_decoder().
         input_proj: Projection from reason_model hidden_dim to concept_dim
+        input_proj_norm: LayerNorm after input_proj for numerical stability
         concept_queries: Learnable queries per level [K levels]
         temperature: Learnable attention temperature
         level_projs: Level-specific output projections
         level_attn: Cross-attention layers for refinement
+        back_proj: Optional projection from concept_dim back to encoder_dim
+            Only created when use_reasoning_loss=True. Used to map concept
+            embeddings into the model's input space for NTP reasoning loss.
+            Initialized as transpose of input_proj (pseudo-inverse).
     """
 
     def __init__(
@@ -358,8 +367,9 @@ class ConceptPyramidBuilder(nn.Module):
         PRINCIPLE (hybrid-analysis.md Section 4.1, Section 1.2):
             The Builder extracts groundtruth concepts from CoT using the
             SAME decoder-only model that will later generate the Solution.
-            This is not a separate encoder — it is the reason_model's
-            Transformer backbone (AutoModel) producing hidden states.
+            The reason_model is loaded as AutoModelForCausalLM so it has
+            both the backbone (for CoT feature extraction) and the lm_head
+            (for future NTP / reasoning loss computation).
 
         PURPOSE:
             Initialize all components for concept pyramid extraction,
@@ -367,7 +377,7 @@ class ConceptPyramidBuilder(nn.Module):
             so they participate in end-to-end training.
 
         METHOD:
-            - Load pretrained reason_model via AutoModel.from_pretrained()
+            - Load pretrained reason_model via AutoModelForCausalLM
             - Load paired tokenizer via AutoTokenizer.from_pretrained()
             - Optionally freeze reason_model via config.reason_model_freeze
             - Derive reason_model_hidden_dim from model config
@@ -380,43 +390,42 @@ class ConceptPyramidBuilder(nn.Module):
                 Uses config.reason_model_num_layers for layer pruning.
                 Uses config.reason_model_lora for optional LoRA adaptation.
                 Uses config.use_positional_query_init for query init mode.
-                Uses config.decoder_model_name / decoder_freeze / decoder_lora
-                for the solution decoder (currently interface-only).
         """
         super().__init__()
         self.config = config
         self.use_positional_query_init = config.use_positional_query_init
 
         # =================================================================
-        # Component 0: Reason Model (decoder-only Transformer backbone)
+        # Component 0: Reason Model (decoder-only Transformer + lm_head)
         # =================================================================
+        # PRINCIPLE: One model, two roles:
+        #   (1) Encoding: reason_model.model(CoT) → H_CoT [B, L, D_reason]
+        #       The backbone produces hidden states for concept extraction.
+        #   (2) Decoding: reason_model(Q + concept_embeds) → logits [B, L, V]
+        #       The lm_head enables NTP / reasoning loss on solution tokens.
+        # This is why we load AutoModelForCausalLM instead of AutoModel.
         self.reason_model, self.tokenizer, self.reason_model_hidden_dim = (
             self._init_reason_model(config)
         )
 
         # =================================================================
-        # Component 0.5: Solution Decoder (decoder-only Transformer + lm_head)
+        # Component 1: Projection (encoder_dim → concept_dim) + LayerNorm
         # =================================================================
         # PRINCIPLE (hybrid-analysis.md Section 1.2):
-        #   The solution decoder is the reason_model loaded with lm_head
-        #   (AutoModelForCausalLM) for autoregressive Solution generation.
-        #   Q + concept pyramid → Solution is a decoding process using
-        #   this model's lm_head. See _init_solution_decoder().
-        # NOTE: Currently None (interface-only). Will be set to a module
-        #   when the decoder is fully implemented.
-        self.solution_decoder: Optional[nn.Module] = None
-
-        # =================================================================
-        # Component 1: Projection (encoder_dim → concept_dim)
-        # =================================================================
-        # PRINCIPLE (hybrid-analysis.md Section 1.2):
-        #   H_proj = Linear(H_CoT) ∈ ℝ^{B×L×D}
+        #   H_proj = LayerNorm(Linear(H_CoT)) ∈ ℝ^{B×L×D}
         #   This is the "CoT information to decompose" via residual flow.
-        # PURPOSE: Project reason_model output to the concept dimension D.
-        # METHOD: Linear layer [D_reason → D].
+        # PURPOSE: Project reason_model output to the concept dimension D,
+        #   then normalize to unit scale. Without LayerNorm, the encoder
+        #   hidden states have large magnitudes (std ~10, max ~200 for
+        #   Qwen2.5), causing the random pyramid to explode (reconstructed
+        #   std ~200 vs projected std ~12, making recon_loss ~44000).
+        #   LayerNorm stabilizes the input to the residual decomposition,
+        #   ensuring recon_loss starts at a reasonable magnitude.
+        # METHOD: Linear layer [D_reason → D] followed by LayerNorm(D).
         #   Input:  [B, L, D_reason]
-        #   Output: [B, L, D]
+        #   Output: [B, L, D] (normalized to mean=0, std≈1 per token)
         self.input_proj = nn.Linear(self.reason_model_hidden_dim, config.hidden_dim)
+        self.input_proj_norm = nn.LayerNorm(config.hidden_dim)
 
         # =================================================================
         # Component 2: Learnable Concept Queries (Query Expansion)
@@ -502,38 +511,28 @@ class ConceptPyramidBuilder(nn.Module):
         self._cached_base_concepts: List[torch.Tensor] = []
 
         # =================================================================
-        # Component 6: CoT Reconstruction Decoder (Placeholder)
+        # Component 6: Back-Projection (concept_dim → encoder_dim)
         # =================================================================
-        # PRINCIPLE (hybrid-analysis.md Section 5.1.1, extended):
-        #   f_hat_K = Σ_k R_k reconstructs H_proj [B, L, D] in concept space.
-        #   To reconstruct CoT tokens, we need to map from concept space
-        #   back to token vocabulary: [B, L, D] → [B, L, V].
+        # PRINCIPLE: When use_reasoning_loss is enabled, we need to inject
+        #   concept pyramid embeddings into the reason_model for NTP.
+        #   The model operates in D_encoder space, but concepts are in D space.
+        #   back_proj maps D → D_encoder, bridging this dimension gap.
         #
-        #   This is a non-trivial mapping because:
-        #   (1) Length: 63 concepts → L tokens (L may be 500+)
-        #   (2) Dimension: D (concept) vs D_encoder (token encoder space)
-        #   (3) Structure: compressed semantic units → sequential language
+        # INITIALIZATION: back_proj.weight is initialized as the transpose
+        #   of input_proj.weight (pseudo-inverse). This gives a natural
+        #   starting point: if input_proj maps H_CoT → H_proj, then
+        #   back_proj approximately maps H_proj → H_CoT.
+        #   back_proj is then free to learn during training.
         #
-        #   The residual flow's attention matrices A_k already handle
-        #   length expansion: f_hat_K = Σ_k A_k^T @ C_k_base [B, L, D].
-        #   The remaining challenge is dimension conversion (D → D_encoder)
-        #   and token prediction (D_encoder → V).
-        #
-        # TODO: Implement CoT reconstruction from concept pyramid.
-        #   Options under consideration:
-        #   - f_hat_K + back_proj + pretrained lm_head
-        #   - Cross-attention expansion from concepts to positions
-        #   - Tied projection (pseudo-inverse of input_proj)
-        #
-        # PURPOSE: Validate that concept pyramid preserves CoT information
-        #   by enabling token-level reconstruction (external loss).
-        # METHOD: Currently None (placeholder). Will be set to a module
-        #   that maps reconstructed hidden states to CoT token logits.
-        #
-        # DIMENSION FLOW (future implementation):
-        #   Input:  f_hat_K [B, L, D] or concepts [B, ΣL_k, D]
-        #   Output: CoT logits [B, L, vocab_size]
-        self.recon_decoder: Optional[nn.Module] = None
+        # DIMENSION FLOW:
+        #   Input:  concepts [B, total_C, D]
+        #   Output: concept_embeds [B, total_C, D_encoder]
+        if config.use_reasoning_loss:
+            self.back_proj = nn.Linear(
+                config.hidden_dim, self.reason_model_hidden_dim, bias=False
+            )
+        else:
+            self.back_proj = None
 
         self._init_weights()
 
@@ -542,36 +541,32 @@ class ConceptPyramidBuilder(nn.Module):
     # =====================================================================
 
     def _init_reason_model(self, config: NLCPV3Config) -> tuple:
-        """Initialize reason_model (backbone), tokenizer, and hidden_dim.
+        """Initialize reason_model (backbone + lm_head), tokenizer, and hidden_dim.
 
         PRINCIPLE (hybrid-analysis.md Section 1.2):
-            H_CoT = ReasonModel(CoT). We use AutoModel (the backbone)
-            to extract hidden states, NOT AutoModelForCausalLM which adds
-            lm_head. This is the SAME underlying model that generates
-            Solution tokens — we just use its backbone for feature extraction.
+            The reason_model serves DUAL roles in the architecture:
+              (1) Encoding: backbone produces CoT hidden states for concept extraction
+              (2) Decoding: lm_head enables NTP / reasoning loss on solution tokens
+            We load AutoModelForCausalLM (includes lm_head) so a single model
+            handles both roles. No separate solution_decoder is needed.
+
+            For encoding, we access the backbone via reason_model.model
+            (which is the Qwen2Model inside AutoModelForCausalLM).
+            For decoding, we use the full reason_model which includes lm_head.
 
         PURPOSE:
             Encapsulate reason_model initialization with support for:
-            (1) Loading pretrained backbone (AutoModel)
+            (1) Loading pretrained model (AutoModelForCausalLM)
             (2) Loading paired tokenizer
             (3) Optional layer pruning (reason_model_num_layers)
             (4) Optional parameter freezing (reason_model_freeze)
             (5) Optional LoRA fine-tuning (reason_model_lora)
 
-        METHOD:
-            1. Load AutoModel backbone from config.reason_model_name
-            2. Load paired tokenizer; set pad_token = eos_token if missing
-            3. If reason_model_lora is configured, apply PEFT LoRA adapters
-            4. If reason_model_freeze=True, freeze all backbone parameters
-               (LoRA adapters remain trainable even if base is frozen)
-            5. If reason_model_num_layers > 0, prune layers
-            6. Derive reason_model_hidden_dim from model config
-
         CRITICAL:
-            Use AutoModel (Qwen2Model), NOT AutoModelForCausalLM.
-            ForCausalLM adds lm_head for token prediction which we
-            don't need here — we only need hidden states for concept
-            extraction. The lm_head is used by solution_decoder instead.
+            Use AutoModelForCausalLM (not AutoModel) because:
+            - We need the lm_head for NTP / reasoning loss computation
+            - A single model serves both encoding and decoding roles
+            - This avoids maintaining a separate solution_decoder copy
 
         Args:
             config: NLCPV3Config with reason_model_* parameters.
@@ -579,8 +574,9 @@ class ConceptPyramidBuilder(nn.Module):
         Returns:
             Tuple of (reason_model, tokenizer, hidden_dim)
         """
-        # Step 1: Load pretrained backbone (AutoModel, NOT ForCausalLM)
-        reason_model = AutoModel.from_pretrained(config.reason_model_name)
+        # Step 1: Load pretrained model with lm_head
+        # AutoModelForCausalLM = backbone (Qwen2Model) + lm_head
+        reason_model = AutoModelForCausalLM.from_pretrained(config.reason_model_name)
         # hidden_dim: D_reason (e.g., 896 for Qwen2.5-0.5B)
         hidden_dim = reason_model.config.hidden_size
 
@@ -633,117 +629,65 @@ class ConceptPyramidBuilder(nn.Module):
         # Step 5: Prune layers if specified
         # PURPOSE: Reduce computation by using fewer Transformer layers.
         #   reason_model_num_layers=-1 means use ALL layers (no pruning).
+        #
+        # Layer access paths for AutoModelForCausalLM:
+        #   Plain:         reason_model.model.layers
+        #   PEFT-wrapped:  reason_model.base_model.model.layers
         if config.reason_model_num_layers > 0:
-            if hasattr(reason_model, "layers") and config.reason_model_num_layers < len(
-                reason_model.layers
-            ):
-                reason_model.layers = reason_model.layers[
-                    : config.reason_model_num_layers
-                ]
-            elif (
-                hasattr(reason_model, "model")
-                and hasattr(reason_model.model, "layers")
-                and config.reason_model_num_layers < len(reason_model.model.layers)
-            ):
-                reason_model.model.layers = reason_model.model.layers[
-                    : config.reason_model_num_layers
-                ]
-            elif (
-                hasattr(reason_model, "base_model")
-                and hasattr(reason_model.base_model, "model")
-                and hasattr(reason_model.base_model.model, "layers")
-                and config.reason_model_num_layers
-                < len(reason_model.base_model.model.layers)
-            ):
-                # PEFT-wrapped model: layers are under base_model.model
-                reason_model.base_model.model.layers = (
-                    reason_model.base_model.model.layers[
-                        : config.reason_model_num_layers
-                    ]
+            layers_pruned = False
+            # Try all known access paths for the transformer layers
+            for obj in [
+                reason_model,
+                getattr(reason_model, "model", None),
+                getattr(getattr(reason_model, "base_model", None), "model", None),
+            ]:
+                if obj is not None and hasattr(obj, "layers"):
+                    if config.reason_model_num_layers < len(obj.layers):
+                        obj.layers = obj.layers[: config.reason_model_num_layers]
+                        layers_pruned = True
+                        break
+            if not layers_pruned:
+                import warnings
+
+                warnings.warn(
+                    f"Could not find layers to prune in {type(reason_model).__name__}. "
+                    f"Requested {config.reason_model_num_layers} layers."
                 )
 
         return reason_model, tokenizer, hidden_dim
 
-    def _init_solution_decoder(
-        self, config: NLCPV3Config
-    ) -> Optional[nn.Module]:  # noqa: ARG002
-        """Initialize solution decoder (AutoModelForCausalLM + lm_head).
+    def _get_backbone(self) -> nn.Module:
+        """Get the Transformer backbone from reason_model for encoding.
 
-        PRINCIPLE (hybrid-analysis.md Section 1.2):
-            The solution decoder uses the SAME base decoder-only model
-            (e.g., Qwen) but loaded with AutoModelForCausalLM to include
-            the lm_head. This enables autoregressive Solution generation:
-                Q + concept pyramid → Solution tokens
-            The decoder's forward pass receives concept-conditioned
-            representations and generates Solution tokens step by step.
+        PRINCIPLE:
+            reason_model is loaded as AutoModelForCausalLM, which wraps
+            the backbone (Qwen2Model) inside `reason_model.model`.
+            For CoT feature extraction we only need the backbone — the
+            lm_head is reserved for NTP / reasoning loss computation.
 
         PURPOSE:
-            Provide a dedicated decoder module for Solution generation
-            with support for:
-            (1) Loading pretrained decoder (AutoModelForCausalLM)
-            (2) Optional LoRA fine-tuning (decoder_lora)
-            (3) Optional parameter freezing (decoder_freeze)
+            Provide consistent access to the backbone regardless of
+            whether the model is PEFT-wrapped or not.
 
-        CURRENT STATUS: INTERFACE ONLY — not yet implemented.
-            This method returns None and serves as the specification
-            for the solution decoder. Full implementation will follow
-            the Predictor design (Phase 2 of the architecture).
-
-        METHOD (future implementation):
-            1. Load AutoModelForCausalLM from decoder_model_name
-               (defaults to reason_model_name if empty)
-            2. If decoder_lora is configured, apply PEFT LoRA adapters
-            3. If decoder_freeze=True, freeze backbone parameters
-            4. The lm_head is used for autoregressive token generation:
-               logits = lm_head(concept_conditioned_hidden) → [B, L, V]
-
-        DIMENSION FLOW (future implementation):
-            Input:  Concept-conditioned hidden states [B, L, D_reason]
-            Output: Solution token logits [B, L, V]
-
-        Args:
-            config: NLCPV3Config with decoder_* parameters.
+        Access paths:
+            Plain model:         reason_model.model  (Qwen2Model)
+            PEFT-wrapped model:  reason_model.base_model.model  (Qwen2Model)
 
         Returns:
-            None (placeholder). Will return the decoder module
-            when implemented.
+            The Transformer backbone module (e.g., Qwen2Model)
         """
-        # TODO: Implement solution decoder.
-        #   Full implementation requires:
-        #   (1) Concept-to-decoder input preparation
-        #   (2) Concept-conditioned prefix for autoregressive generation
-        #   (3) Integration with Predictor training objective
-        #   When ready, uncomment the code below:
-        #
-        # decoder_name = config.decoder_model_name or config.reason_model_name
-        # decoder = AutoModelForCausalLM.from_pretrained(decoder_name)
-        #
-        # # Apply LoRA if configured
-        # if config.decoder_lora is not None:
-        #     from peft import LoraConfig, get_peft_model
-        #     lora_cfg = LoraConfig(
-        #         r=config.decoder_lora.get("r", 8),
-        #         lora_alpha=config.decoder_lora.get("lora_alpha", 16),
-        #         target_modules=config.decoder_lora.get(
-        #             "target_modules", ["q_proj", "v_proj"]
-        #         ),
-        #         lora_dropout=config.decoder_lora.get("lora_dropout", 0.05),
-        #         bias=config.decoder_lora.get("bias", "none"),
-        #     )
-        #     decoder = get_peft_model(decoder, lora_cfg)
-        #
-        # # Freeze backbone if specified
-        # if config.decoder_freeze:
-        #     for param in decoder.parameters():
-        #         param.requires_grad = False
-        #     if config.decoder_lora is not None:
-        #         for name, param in decoder.named_parameters():
-        #             if "lora_" in name:
-        #                 param.requires_grad = True
-        #
-        # return decoder
-
-        return None
+        if hasattr(self.reason_model, "base_model"):
+            # PEFT-wrapped: reason_model.base_model.model
+            inner = self.reason_model.base_model
+            if hasattr(inner, "model"):
+                return inner.model  # Qwen2Model under PEFT
+            return inner
+        elif hasattr(self.reason_model, "model"):
+            # Plain AutoModelForCausalLM: reason_model.model
+            return self.reason_model.model  # Qwen2Model
+        else:
+            # Fallback (shouldn't happen for standard HF models)
+            return self.reason_model
 
     def _init_weights(self):
         """Initialize weights.
@@ -812,6 +756,12 @@ class ConceptPyramidBuilder(nn.Module):
             nn.init.xavier_uniform_(proj.weight)  # [D, D]
             nn.init.zeros_(proj.bias)  # [D]
 
+        # Back-projection: initialize as transpose of input_proj (pseudo-inverse)
+        # This gives a natural starting point where back_proj ≈ input_proj^{-1}
+        if self.back_proj is not None:
+            with torch.no_grad():
+                self.back_proj.weight.copy_(self.input_proj.weight.T.clone())
+
     def encode_cot(
         self,
         inputs: Union[List[str], torch.Tensor],
@@ -821,10 +771,10 @@ class ConceptPyramidBuilder(nn.Module):
         """Encode CoT using the reason_model's Transformer backbone.
 
         PRINCIPLE (hybrid-analysis.md Section 1.2):
-            H_CoT = ReasonModel(CoT). The reason_model's backbone produces
-            token-level hidden states, analogous to DLCM's encoder. Both
-            extract per-token features from text for subsequent attentive
-            pooling.
+            H_CoT = ReasonModel(CoT). We use reason_model.model (the
+            backbone, NOT the full AutoModelForCausalLM) to produce
+            hidden states. The lm_head is NOT used here — it is used
+            later for NTP / reasoning loss on solution tokens.
 
         PURPOSE:
             Extract token-level features from CoT. Accepts either raw text
@@ -833,7 +783,7 @@ class ConceptPyramidBuilder(nn.Module):
         METHOD:
             - If inputs is List[str]: auto-tokenize via self.tokenizer
             - If inputs is torch.Tensor: use directly as token IDs
-            - Forward through self.reason_model backbone
+            - Forward through reason_model.model (backbone only)
             - Extract last hidden state as H_CoT
 
         DIMENSION FLOW:
@@ -871,25 +821,128 @@ class ConceptPyramidBuilder(nn.Module):
             if attention_mask is not None:
                 attention_mask = attention_mask.to(input_ids.device)
 
-        # Forward through reason_model backbone
-        if hasattr(self.reason_model, "model") or hasattr(self.reason_model, "config"):
-            outputs = self.reason_model(
-                input_ids=input_ids,  # [B, L]
-                attention_mask=attention_mask,  # [B, L]
-                output_hidden_states=True,
-            )
-            # Extract last hidden state: [B, L, D_reason]
-            if hasattr(outputs, "last_hidden_state"):
-                hidden = outputs.last_hidden_state  # [B, L, D_reason]
-            elif hasattr(outputs, "hidden_states"):
-                hidden = outputs.hidden_states[-1]  # [B, L, D_reason]
-            else:
-                hidden = outputs[0]  # [B, L, D_reason]
+        # Forward through backbone only (NOT the full AutoModelForCausalLM)
+        # reason_model is AutoModelForCausalLM = model (backbone) + lm_head
+        # We only need hidden states from the backbone for concept extraction.
+        # The lm_head is reserved for NTP / reasoning loss computation.
+        backbone = self._get_backbone()
+        outputs = backbone(
+            input_ids=input_ids,  # [B, L]
+            attention_mask=attention_mask,  # [B, L]
+            output_hidden_states=True,
+        )
+        # Extract last hidden state: [B, L, D_reason]
+        if hasattr(outputs, "last_hidden_state"):
+            hidden = outputs.last_hidden_state  # [B, L, D_reason]
+        elif hasattr(outputs, "hidden_states") and outputs.hidden_states is not None:
+            hidden = outputs.hidden_states[-1]  # [B, L, D_reason]
         else:
-            # Custom model — direct forward call
-            hidden = self.reason_model(input_ids)  # [B, L, D_reason]
+            hidden = outputs[0]  # [B, L, D_reason]
 
         return EncoderOutput(hidden_states=hidden)  # [B, L, D_reason]
+
+    def compute_reasoning_loss(
+        self,
+        pyramid: PyramidOutput,
+        question_ids: torch.Tensor,
+        question_attention_mask: torch.Tensor,
+        solution_ids: torch.Tensor,
+    ) -> torch.Tensor:
+        """Compute NTP / reasoning loss: Q + concept pyramid → solution.
+
+        PRINCIPLE:
+            The concept pyramid extracted from CoT must support effective
+            reasoning. This loss validates that by feeding Q + concept
+            embeddings into the reason_model's lm_head and computing
+            cross-entropy on solution tokens.
+
+            Data flow:
+                1. Concatenate concepts (all levels) → [B, total_C, D]
+                2. back_proj: concepts [B, total_C, D] → [B, total_C, D_encoder]
+                3. embed Q tokens: [B, L_Q, D_encoder]
+                4. Concatenate: [concept_embeds; Q_embeds] → [B, total_C+L_Q, D_encoder]
+                5. Forward through reason_model (full, includes lm_head)
+                6. Cross-entropy on solution portion of the output logits
+
+        PURPOSE:
+            Validate that the concept pyramid supports reasoning. A pyramid
+            that perfectly reconstructs CoT hidden states but cannot produce
+            the correct solution is useless.
+
+        Args:
+            pyramid: PyramidOutput from forward()
+            question_ids: Token IDs for the question [B, L_Q]
+            question_attention_mask: Attention mask for question [B, L_Q]
+            solution_ids: Token IDs for the solution (target) [B, L_S]
+
+        Returns:
+            Scalar NTP loss (cross-entropy on solution tokens)
+        """
+        assert (
+            self.back_proj is not None
+        ), "back_proj is None — set use_reasoning_loss=True in config"
+
+        device = question_ids.device
+        batch_size = question_ids.shape[0]
+
+        # Step 1: Concatenate all concept levels
+        concepts = pyramid.cat_concepts()  # [B, total_C, D]
+
+        # Step 2: Back-project concepts to encoder dimension
+        concept_embeds = self.back_proj(concepts)  # [B, total_C, D_encoder]
+
+        # Step 3: Get Q token embeddings from the model's embed_tokens
+        backbone = self._get_backbone()
+        embed_layer = backbone.get_input_embeddings()  # embed_tokens
+        Q_embeds = embed_layer(question_ids)  # [B, L_Q, D_encoder]
+
+        # Step 4: Concatenate concept embeddings + Q embeddings
+        #   [concept_embeds; Q_embeds] as input to the decoder
+        decoder_input_embeds = torch.cat(
+            [concept_embeds, Q_embeds], dim=1
+        )  # [B, total_C + L_Q, D_encoder]
+
+        # Attention mask: concepts are all valid (no padding),
+        # then append the question attention mask
+        concept_mask = torch.ones(
+            batch_size,
+            concept_embeds.shape[1],
+            device=device,
+            dtype=question_attention_mask.dtype,
+        )  # [B, total_C]
+        decoder_attention_mask = torch.cat(
+            [concept_mask, question_attention_mask], dim=1
+        )  # [B, total_C + L_Q]
+
+        # Step 5: Forward through reason_model (full, includes lm_head)
+        #   Use inputs_embeds instead of input_ids since we provide embeddings directly
+        outputs = self.reason_model(
+            inputs_embeds=decoder_input_embeds,
+            attention_mask=decoder_attention_mask,
+        )
+        logits = outputs.logits  # [B, total_C + L_Q, V]
+
+        # Step 6: Compute cross-entropy on the solution tokens
+        #   We only care about the logits at positions after Q
+        #   The solution should be predicted autoregressively at the
+        #   Q token positions (teacher-forcing: shift left)
+        #   So we take logits at Q positions → predict solution tokens
+        L_Q = question_ids.shape[1]
+        total_C = concept_embeds.shape[1]
+
+        # Logits at Q positions predict the solution tokens (shifted)
+        solution_logits = logits[:, total_C:, :]  # [B, L_Q, V]
+
+        # Use solution_ids as target (same length as Q for teacher-forcing)
+        # The model should predict solution tokens at each Q position
+        L_min = min(solution_logits.shape[1], solution_ids.shape[1])
+        ntp_loss = F.cross_entropy(
+            solution_logits[:, :L_min, :].reshape(-1, solution_logits.shape[-1]),
+            solution_ids[:, :L_min].reshape(-1),
+            ignore_index=-100,  # ignore padding tokens
+        )
+
+        return ntp_loss
 
     def forward(
         self,
@@ -937,10 +990,10 @@ class ConceptPyramidBuilder(nn.Module):
         # Step 1: Project encoder hidden states to concept dimension
         # =================================================================
         # PRINCIPLE (hybrid-analysis.md Section 1.2):
-        #   H_proj = Linear(H_CoT) — "CoT information to decompose"
-        # PURPOSE: Map encoder output to concept space D.
-        # METHOD: Linear projection.
-        projected_hidden = self.input_proj(encoder_hidden_states)
+        #   H_proj = LayerNorm(Linear(H_CoT)) — "CoT information to decompose"
+        # PURPOSE: Map encoder output to concept space D, then normalize.
+        # METHOD: Linear projection + LayerNorm.
+        projected_hidden = self.input_proj_norm(self.input_proj(encoder_hidden_states))
         # projected_hidden: [B, L, D]
 
         # =================================================================
@@ -1155,8 +1208,8 @@ class ConceptPyramidBuilder(nn.Module):
         # Step 1: Project encoder hidden states
         # =================================================================
         # PRINCIPLE (hybrid-analysis.md Section 1.2):
-        #   H_proj = Linear(H_CoT)
-        projected_hidden = self.input_proj(encoder_hidden_states)
+        #   H_proj = LayerNorm(Linear(H_CoT))
+        projected_hidden = self.input_proj_norm(self.input_proj(encoder_hidden_states))
         # projected_hidden: [B, L, D]
 
         # =================================================================

@@ -1685,7 +1685,7 @@ LTT:      Context → [Fusion] → Latent Thoughts → Answer
 **[CAT: Core] [REL: High]**
 
 **Paper**: "Inference-Time Rethinking with Latent Thought Vectors for Math Reasoning"  
-**Link**: https://arxiv.org/abs/2502.05171
+**Link**: https://arxiv.org/abs/2602.06584
 
 #### Summary
 Proposes iterative self-correction during inference using latent thought vectors, enabling the model to detect and fix reasoning errors without generating explicit correction text.

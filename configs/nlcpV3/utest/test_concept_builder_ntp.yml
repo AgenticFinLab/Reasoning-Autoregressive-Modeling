@@ -1,0 +1,72 @@
+# =============================================================================
+# NLCP V3 ConceptPyramidBuilder Test Configuration — NTP Reasoning Loss
+# =============================================================================
+# Purpose: Configuration for test_concept_builder.py with use_reasoning_loss=True
+# Usage:
+#   python examples/nlcpV3/utest/test_concept_builder.py \
+#       -c configs/nlcpV3/utest/test_concept_builder_ntp.yml
+# =============================================================================
+
+# Data configuration for GSM8K integration tests
+data:
+  data_name: "GSM8K"
+  data_path: "EXPERIMENT/data/GSM8K"
+  split: "train"
+  subset: ""
+
+# Environment configuration
+environment:
+  dotenv_path: ".env"
+  seed: 42
+  dataloader_num_workers: 0
+  device_map:
+    model:
+      device: "auto"
+      priority: 1
+
+# Model configuration — NTP reasoning loss enabled
+model:
+  # Reason model configuration (Qwen decoder-only Transformer)
+  reason_model:
+    reason_model_name: "Qwen/Qwen2.5-0.5B"
+    reason_model_num_layers: -1
+    reason_model_freeze: false
+    reason_model_lora: null
+
+  # Concept pyramid configuration
+  pyramid:
+    hidden_dim: 256
+    num_heads: 8
+    num_levels: 6
+    level_lengths: [1, 2, 4, 8, 16, 32]
+    max_seq_len: 512
+
+  # Builder-specific parameters
+  builder:
+    use_positional_query_init: true
+    # Enable NTP reasoning loss: adds back_proj + compute_reasoning_loss()
+    use_reasoning_loss: true
+
+# Training configuration (minimal for testing)
+training:
+  batch_size: 4
+  num_epochs: 1
+  learning_rate: 1.0e-4
+  weight_decay: 0.01
+
+  # Loss weights for training objectives
+  loss_weights:
+    ntp_loss_weight: 1.0
+    concept_loss_weight: 0.1
+    recon_loss_weight: 0.1
+
+# Log configuration
+log:
+  save_folder: "EXPERIMENT/nlcpV3/utest/concept_builder_ntp"
+  checkpoint_path: "EXPERIMENT/nlcpV3/utest/concept_builder_ntp/checkpoints"
+  log_path: "EXPERIMENT/nlcpV3/utest/concept_builder_ntp/logs"
+  log_level: "INFO"
+
+# Evaluation configuration (disabled for testing)
+evaluation:
+  enabled: false

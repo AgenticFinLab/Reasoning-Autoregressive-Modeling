@@ -1,0 +1,93 @@
+# =============================================================================
+# NLCP V3 Builder Training Configuration
+# Model: Qwen2.5-3B | Pyramid: 5-level
+# Dataset: GSM8K
+# =============================================================================
+
+# Data configuration
+data:
+  data_name: "GSM8K"
+  data_path: "EXPERIMENT/data/GSM8K"
+  split: "train"
+  subset: ""
+
+# Environment configuration
+environment:
+  dotenv_path: ".env"
+  seed: 42
+  dataloader_num_workers: 0
+  device_map:
+    model:
+      device: "auto"
+      priority: 1
+
+# Model configuration
+model:
+  reason_model:
+    reason_model_name: "Qwen/Qwen2.5-3B"
+    reason_model_num_layers: -1
+    reason_model_freeze: true
+    reason_model_lora: null
+
+  pyramid:
+    hidden_dim: 512
+    num_heads: 8
+    num_levels: 5
+    level_lengths: [1, 2, 4, 8, 16]
+    max_seq_len: 512
+
+  builder:
+    use_positional_query_init: true
+    # Enable NTP reasoning loss: Q + concept pyramid → solution validation.
+    # When True, adds back_proj (D → D_encoder) and computes cross-entropy
+    # on solution tokens. Set ntp_loss_weight > 0 to activate.
+    use_reasoning_loss: false
+
+# Training configuration
+training:
+  batch_size: 1
+  num_epochs: 10
+  learning_rate: 5e-05
+  weight_decay: 0.01
+  warmup_ratio: 0.1
+  gradient_clip: 1.0
+  log_step_interval: 10
+  checkpoint_step_interval: 500
+  eval_step_interval: 0
+  resume: ""
+
+  # Loss weights for training objectives
+  # ─────────────────────────────────────────────────────────
+  # Loss semantics (reference: config.py, train_builder.py):
+  #
+  # ntp_loss_weight:
+  #   NTP / reasoning loss. When use_reasoning_loss=True, the Builder
+  #   computes cross-entropy on solution tokens given Q + concept pyramid
+  #   (via back_proj). This validates that the pyramid supports effective
+  #   reasoning — arguably more important than recon_loss alone.
+  #   Set to 0.0 to disable, or >0 to enable (e.g., 1.0).
+  #
+  # concept_loss_weight:
+  #   Intra-level ordering loss. Encourages concepts within each level
+  #   to attend to sequential positions in the CoT (Gaussian soft targets
+  #   on attention weights). NOT a reconstruction loss — it is a structural
+  #   regularizer that enforces ordered concept extraction within each
+  #   granularity level.
+  #
+  # recon_loss_weight:
+  #   CoT reconstruction loss. MSE between the pyramid-reconstructed
+  #   hidden states (f_hat_K = sum_k A_k^T @ C_k_base) and the original
+  #   projected CoT hidden states. Ensures the pyramid preserves CoT
+  #   information — the primary supervision signal for the Builder.
+  # ─────────────────────────────────────────────────────────
+  loss_weights:
+    ntp_loss_weight: 0.0
+    concept_loss_weight: 0.1
+    recon_loss_weight: 1.0
+
+# Log configuration
+log:
+  save_folder: "EXPERIMENT/nlcpV3/builder/GSM8K_Qwen2.5-3B_5level"
+  checkpoint_path: "EXPERIMENT/nlcpV3/builder/GSM8K_Qwen2.5-3B_5level/checkpoints"
+  log_path: "EXPERIMENT/nlcpV3/builder/GSM8K_Qwen2.5-3B_5level/logs"
+  log_level: "INFO"
