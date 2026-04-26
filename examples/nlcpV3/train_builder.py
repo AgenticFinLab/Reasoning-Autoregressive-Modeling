@@ -68,7 +68,7 @@ sys.path.insert(0, str(PROJECT_ROOT / "examples"))
 
 from nlcpV3.config import NLCPV3Config
 from nlcpV3.concept_hybrid_builder import ConceptPyramidBuilder, PyramidOutput
-from lmbase.dataset import registry
+from nlcpV3.data_loader import NLCPV3DataLoader
 from lmbase.utils.env_tools import get_device
 from ram.utils import load_config, setup_environment
 
@@ -82,33 +82,6 @@ def parse_args():
         "--resume", type=str, default="", help="Path to checkpoint to resume from"
     )
     return parser.parse_args()
-
-
-def build_nlcpv3_config_from_yaml(yaml_dict: dict) -> NLCPV3Config:
-    """Build NLCPV3Config from YAML dict."""
-    m = yaml_dict["model"]
-    rm = m["reason_model"]
-    pyr = m["pyramid"]
-    bld = m["builder"]
-    tr = yaml_dict["training"]
-    lw = tr["loss_weights"]
-
-    return NLCPV3Config(
-        hidden_dim=pyr["hidden_dim"],
-        num_heads=pyr["num_heads"],
-        num_levels=pyr["num_levels"],
-        level_lengths=pyr["level_lengths"],
-        max_seq_len=pyr["max_seq_len"],
-        reason_model_name=rm["reason_model_name"],
-        reason_model_num_layers=rm["reason_model_num_layers"],
-        reason_model_freeze=rm["reason_model_freeze"],
-        reason_model_lora=rm["reason_model_lora"],
-        use_positional_query_init=bld["use_positional_query_init"],
-        use_reasoning_loss=bld["use_reasoning_loss"],
-        ntp_loss_weight=lw["ntp_loss_weight"],
-        concept_loss_weight=lw["concept_loss_weight"],
-        recon_loss_weight=lw["recon_loss_weight"],
-    )
 
 
 def compute_builder_loss(
@@ -197,47 +170,30 @@ def compute_builder_loss(
 def create_dataloader(
     data_cfg: dict,
     batch_size: int,
-    num_workers: int = 0,
-    include_solution: bool = False,
+    num_workers: int,
+    include_solution: bool,
+    shuffle: bool,
+    drop_last: bool,
 ):
-    """Create GSM8K dataloader with CoT text extraction.
+    """Create NLCP V3 dataloader using NLCPV3DataLoader.
 
     Args:
-        data_cfg: Dataset configuration dict.
+        data_cfg: Dataset configuration dict for lmbase registry.
         batch_size: Batch size.
         num_workers: Number of data loading workers.
         include_solution: If True, also extract groundtruth solutions
             (needed for NTP / reasoning loss).
+        shuffle: Whether to shuffle the dataset.
+        drop_last: Whether to drop incomplete final batches.
     """
-    dataset = registry.get(data_cfg, split=data_cfg.get("split", "train"))
-
-    def collate_fn(batch):
-        """Collate batch samples into dict with question, cot_answer, and optionally groundtruth."""
-        questions = []
-        cot_texts = []
-        solutions = [] if include_solution else None
-        for sample in batch:
-            questions.append(sample.get("question", ""))
-            cot_texts.append(sample.get("cot_answer", ""))
-            if include_solution:
-                solutions.append(sample.get("groundtruth", ""))
-        result = {
-            "questions": questions,
-            "cot_texts": cot_texts,
-        }
-        if include_solution:
-            result["solutions"] = solutions
-        return result
-
-    dataloader = DataLoader(
-        dataset,
+    return NLCPV3DataLoader(
+        data_cfg=data_cfg,
         batch_size=batch_size,
-        shuffle=True,
-        collate_fn=collate_fn,
-        drop_last=True,
+        include_solution=include_solution,
+        shuffle=shuffle,
+        drop_last=drop_last,
         num_workers=num_workers,
     )
-    return dataloader
 
 
 def save_checkpoint(
@@ -345,7 +301,7 @@ def train_builder(config: dict):
     # Build NLCPV3Config and Builder
     # =================================================================
     logger.info("[1] Building NLCPV3Config...")
-    nlcp_config = build_nlcpv3_config_from_yaml(config)
+    nlcp_config = NLCPV3Config.from_yaml(config)
     logger.info(f"    reason_model: {nlcp_config.reason_model_name}")
     logger.info(f"    hidden_dim: {nlcp_config.hidden_dim}")
     logger.info(f"    num_levels: {nlcp_config.num_levels}")
@@ -387,10 +343,12 @@ def train_builder(config: dict):
     dataloader = create_dataloader(
         data_cfg,
         batch_size=batch_size,
-        num_workers=env_cfg.get("dataloader_num_workers", 0),
+        num_workers=env_cfg["dataloader_num_workers"],
         include_solution=use_reasoning,
+        shuffle=data_cfg["shuffle"],
+        drop_last=data_cfg["drop_last"],
     )
-    logger.info(f"    Dataset: {data_cfg.get('data_name', 'unknown')}")
+    logger.info(f"    Dataset: {data_cfg['data_name']}")
     logger.info(f"    Batches per epoch: {len(dataloader)}")
     logger.info(f"    Batch size: {batch_size}")
 
@@ -450,44 +408,16 @@ def train_builder(config: dict):
                 global_step += 1
                 continue
 
-            cot_texts = batch["cot_texts"]
-            questions = batch["questions"]
-
-            # Encode CoT
-            enc_out = builder.encode_cot(cot_texts)
-            H = enc_out.hidden_states  # [B, L, D_encoder]
-
-            # Forward: build pyramid
-            pyramid = builder(H)
+            # Forward: build pyramid from BuilderInput (Q, CoT, Solution)
+            # All processing happens internally: tokenize → encode_cot → build pyramid
+            pyramid = builder(batch)
 
             # Compute reconstruction + ordering + residual loss
             total_loss, loss_dict = compute_builder_loss(pyramid, nlcp_config)
 
             # Compute NTP / reasoning loss if enabled
             if use_reasoning:
-                solutions = batch["solutions"]
-                # Tokenize Q and solution for NTP
-                Q_tokens = builder.tokenizer(
-                    questions,
-                    return_tensors="pt",
-                    padding=True,
-                    truncation=True,
-                    max_length=nlcp_config.max_seq_len,
-                )
-                sol_tokens = builder.tokenizer(
-                    solutions,
-                    return_tensors="pt",
-                    padding=True,
-                    truncation=True,
-                    max_length=nlcp_config.max_seq_len,
-                )
-                question_ids = Q_tokens["input_ids"].to(device)
-                question_mask = Q_tokens["attention_mask"].to(device)
-                solution_ids = sol_tokens["input_ids"].to(device)
-
-                ntp_loss = builder.compute_reasoning_loss(
-                    pyramid, question_ids, question_mask, solution_ids
-                )
+                ntp_loss = builder.compute_reasoning_loss(pyramid)
                 total_loss = total_loss + nlcp_config.ntp_loss_weight * ntp_loss
                 loss_dict["ntp"] = ntp_loss.item()
                 loss_dict["total"] = total_loss.item()

@@ -64,8 +64,7 @@ ENCODER INTEGRATION (hybrid-analysis.md Section 1.2):
         # Reason model + tokenizer are created internally
         # builder.reason_model_hidden_dim is derived from the loaded model
 
-        # Stage 1: Encode CoT → EncoderOutput (accepts text or tokens)
-        enc_out = builder.encode_cot(cot_texts)  # auto-tokenize
+        # Stage 1: Encode CoT → EncoderOutput (requires pre-tokenized input_ids)
         enc_out = builder.encode_cot(cot_input_ids, attention_mask=cot_mask)
         # enc_out.hidden_states: [B, L, D_encoder]
 
@@ -100,7 +99,7 @@ REFERENCES:
 
 import math
 from dataclasses import dataclass
-from typing import Optional, List, Dict, Any, Union
+from typing import Any, Dict, List, Optional
 
 import torch
 import torch.nn as nn
@@ -108,6 +107,7 @@ import torch.nn.functional as F
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from nlcpV3.config import NLCPV3Config
+from nlcpV3.data_loader import BuilderInput
 
 
 # =========================================================================
@@ -236,6 +236,12 @@ class PyramidOutput:
             exact decomposition (Section 2.1).
         num_levels: Number of levels K
         level_lengths: Concepts per level [L_0, L_1, ..., L_{K-1}]
+        q_input_ids: Question token IDs stored from BuilderInput [B, L_Q]
+            Used by compute_reasoning_loss() for NTP / reasoning loss.
+        q_attention_mask: Question attention mask [B, L_Q]
+        solution_input_ids: Solution token IDs stored from BuilderInput [B, L_Sol]
+            Used by compute_reasoning_loss() as NTP target.
+        solution_attention_mask: Solution attention mask [B, L_Sol]
     """
 
     concepts: List[torch.Tensor]  # [C_0, ..., C_{K-1}], each [B, L_k, D]
@@ -245,6 +251,11 @@ class PyramidOutput:
     residual_hidden: torch.Tensor  # [B, L, D] — f_rest_K
     num_levels: int  # K
     level_lengths: List[int]  # [L_0, L_1, ..., L_{K-1}]
+    # NEW: Q and Solution tokens from BuilderInput, carried for reasoning loss
+    q_input_ids: Optional[torch.Tensor] = None  # [B, L_Q]
+    q_attention_mask: Optional[torch.Tensor] = None  # [B, L_Q]
+    solution_input_ids: Optional[torch.Tensor] = None  # [B, L_Sol]
+    solution_attention_mask: Optional[torch.Tensor] = None  # [B, L_Sol]
 
     @property
     def total_concepts(self) -> int:
@@ -764,9 +775,8 @@ class ConceptPyramidBuilder(nn.Module):
 
     def encode_cot(
         self,
-        inputs: Union[List[str], torch.Tensor],
+        input_ids: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
-        max_length: Optional[int] = None,
     ) -> EncoderOutput:
         """Encode CoT using the reason_model's Transformer backbone.
 
@@ -777,49 +787,29 @@ class ConceptPyramidBuilder(nn.Module):
             later for NTP / reasoning loss on solution tokens.
 
         PURPOSE:
-            Extract token-level features from CoT. Accepts either raw text
-            (auto-tokenized internally) or pre-tokenized tensors.
+            Extract token-level features from CoT input_ids.
+            Tokenization is handled by forward() — this method only
+            accepts pre-tokenized input_ids.
 
         METHOD:
-            - If inputs is List[str]: auto-tokenize via self.tokenizer
-            - If inputs is torch.Tensor: use directly as token IDs
             - Forward through reason_model.model (backbone only)
             - Extract last hidden state as H_CoT
 
         DIMENSION FLOW:
-            Input:  texts [B] (strings)  OR  input_ids [B, L] (token IDs)
+            Input:  input_ids [B, L] (token IDs)
                     attention_mask [B, L] (optional, 0=pad, 1=valid)
             Output: EncoderOutput with hidden_states [B, L, D_reason]
 
         Args:
-            inputs: Either a list of text strings or token ID tensor [B, L]
-            attention_mask: Attention mask [B, L] (optional, used when
-                inputs is a tensor). Ignored when inputs is text.
-            max_length: Max sequence length for auto-tokenization (used
-                when inputs is text). Defaults to self.config.max_seq_len.
+            input_ids: Token ID tensor [B, L].
+            attention_mask: Attention mask [B, L] (optional).
 
         Returns:
             EncoderOutput with hidden_states: [B, L, D_reason]
         """
-        # Auto-tokenize if text strings are provided
-        if isinstance(inputs, list) and len(inputs) > 0 and isinstance(inputs[0], str):
-            if max_length is None:
-                max_length = self.config.max_seq_len
-            tokens = self.tokenizer(
-                inputs,
-                return_tensors="pt",
-                padding=True,
-                truncation=True,
-                max_length=max_length,
-            )
-            input_ids = tokens["input_ids"].to(
-                next(self.reason_model.parameters()).device
-            )
-            attention_mask = tokens["attention_mask"].to(input_ids.device)
-        else:
-            input_ids = inputs  # [B, L]
-            if attention_mask is not None:
-                attention_mask = attention_mask.to(input_ids.device)
+        # Move attention_mask to same device as input_ids
+        if attention_mask is not None:
+            attention_mask = attention_mask.to(input_ids.device)
 
         # Forward through backbone only (NOT the full AutoModelForCausalLM)
         # reason_model is AutoModelForCausalLM = model (backbone) + lm_head
@@ -844,9 +834,6 @@ class ConceptPyramidBuilder(nn.Module):
     def compute_reasoning_loss(
         self,
         pyramid: PyramidOutput,
-        question_ids: torch.Tensor,
-        question_attention_mask: torch.Tensor,
-        solution_ids: torch.Tensor,
     ) -> torch.Tensor:
         """Compute NTP / reasoning loss: Q + concept pyramid → solution.
 
@@ -870,10 +857,9 @@ class ConceptPyramidBuilder(nn.Module):
             the correct solution is useless.
 
         Args:
-            pyramid: PyramidOutput from forward()
-            question_ids: Token IDs for the question [B, L_Q]
-            question_attention_mask: Attention mask for question [B, L_Q]
-            solution_ids: Token IDs for the solution (target) [B, L_S]
+            pyramid: PyramidOutput from forward(). Must have q_input_ids,
+                q_attention_mask, solution_input_ids populated (automatically
+                set when forward() receives a BuilderInput with these fields).
 
         Returns:
             Scalar NTP loss (cross-entropy on solution tokens)
@@ -881,6 +867,16 @@ class ConceptPyramidBuilder(nn.Module):
         assert (
             self.back_proj is not None
         ), "back_proj is None — set use_reasoning_loss=True in config"
+        assert (
+            pyramid.q_input_ids is not None
+        ), "pyramid.q_input_ids is None — forward() must receive BuilderInput with questions"
+        assert (
+            pyramid.solution_input_ids is not None
+        ), "pyramid.solution_input_ids is None — forward() must receive BuilderInput with solutions"
+
+        question_ids = pyramid.q_input_ids
+        question_attention_mask = pyramid.q_attention_mask
+        solution_ids = pyramid.solution_input_ids
 
         device = question_ids.device
         batch_size = question_ids.shape[0]
@@ -946,9 +942,90 @@ class ConceptPyramidBuilder(nn.Module):
 
     def forward(
         self,
+        inputs: BuilderInput,
+    ) -> PyramidOutput:
+        """Build concept pyramid from structured Q/CoT/Solution text input.
+
+        PRINCIPLE:
+            The Builder's forward() receives RAW TEXT for Q, CoT, and Solution
+            and handles ALL internal processing including tokenization:
+            (1) Tokenize CoT text → encode_cot() → H_CoT
+            (2) Project H_CoT to concept dimension → H_proj
+            (3) Build concept pyramid via residual decomposition
+            (4) Tokenize Q and Solution → attach to PyramidOutput
+
+        PURPOSE:
+            This is the MAIN entry point for training. The caller (e.g.,
+            train_builder.py) only provides raw text — all tokenization,
+            encoding, and pyramid building happens internally.
+
+        DIMENSION FLOW:
+            Input:  BuilderInput with:
+                      questions [B] (text strings)
+                      cot_answers [B] (text strings)
+                      solutions [B] (text strings, optional)
+            Step 1: tokenizer(cot_answers) → encode_cot() → H_CoT [B, L, D_encoder]
+            Step 2: _build_pyramid_from_hidden_states(H_CoT) → PyramidOutput
+            Step 3: tokenizer(questions) → attach q_input_ids to PyramidOutput
+            Step 4: tokenizer(solutions) → attach solution_input_ids to PyramidOutput
+            Output: PyramidOutput with concepts + q_input_ids + solution_input_ids
+
+        Args:
+            inputs: BuilderInput with raw text for Q, CoT, Solution.
+
+        Returns:
+            PyramidOutput containing concepts, level_outputs, and Q/Solution tokens.
+        """
+        # Determine device from model parameters
+        device = next(self.reason_model.parameters()).device
+
+        # Step 1: Tokenize CoT text and encode through reason_model backbone
+        cot_tokens = self.tokenizer(
+            inputs.cot_answers,
+            return_tensors="pt",
+            padding=True,
+            truncation=True,
+            max_length=self.config.max_seq_len,
+        )
+        enc_out = self.encode_cot(
+            cot_tokens["input_ids"].to(device),
+            attention_mask=cot_tokens["attention_mask"].to(device),
+        )
+        # enc_out.hidden_states: [B, L_CoT, D_encoder]
+
+        # Step 2: Build pyramid from encoded CoT hidden states
+        pyramid = self._build_pyramid_from_hidden_states(enc_out.hidden_states)
+
+        # Step 3: Tokenize Q and attach to PyramidOutput for reasoning loss
+        q_tokens = self.tokenizer(
+            inputs.questions,
+            return_tensors="pt",
+            padding=True,
+            truncation=True,
+            max_length=self.config.max_seq_len,
+        )
+        pyramid.q_input_ids = q_tokens["input_ids"].to(device)
+        pyramid.q_attention_mask = q_tokens["attention_mask"].to(device)
+
+        # Step 4: Tokenize Solution and attach to PyramidOutput (if provided)
+        if inputs.has_solution:
+            sol_tokens = self.tokenizer(
+                inputs.solutions,
+                return_tensors="pt",
+                padding=True,
+                truncation=True,
+                max_length=self.config.max_seq_len,
+            )
+            pyramid.solution_input_ids = sol_tokens["input_ids"].to(device)
+            pyramid.solution_attention_mask = sol_tokens["attention_mask"].to(device)
+
+        return pyramid
+
+    def _build_pyramid_from_hidden_states(
+        self,
         encoder_hidden_states: torch.Tensor,
     ) -> PyramidOutput:
-        """Build concept pyramid from CoT hidden states (all levels).
+        """Build concept pyramid from pre-computed CoT hidden states.
 
         PRINCIPLE (hybrid-analysis.md Section 4.1):
             The Builder extracts groundtruth concepts level by level using
@@ -959,29 +1036,14 @@ class ConceptPyramidBuilder(nn.Module):
             (4) Updates residual: H_rest_{k+1} = H_rest_k - R_k
 
         PURPOSE:
-            Extract all K levels of concepts in one forward pass.
-            Used during training to build groundtruth concept pyramids.
-
-        METHOD:
-            Iterate k=0..K-1, applying soft attention + residual flow
-            + cross-attention refinement at each level. Collect all
-            per-level data into LevelOutput objects, wrap into PyramidOutput.
-
-        DIMENSION FLOW:
-            Input:  encoder_hidden_states [B, L, D_encoder]
-            Output: PyramidOutput with concepts, level_outputs, etc.
+            Core pyramid-building logic. Used by forward() after CoT encoding.
+            Can also be called directly with pre-computed hidden states.
 
         Args:
             encoder_hidden_states: CoT hidden states [B, L, D_encoder]
-                from self.reason_model or pre-computed via encode_cot()
 
         Returns:
-            PyramidOutput containing:
-                concepts: [C_0, ..., C_{K-1}], each [B, L_k, D]
-                level_outputs: [LevelOutput_0, ..., LevelOutput_{K-1}]
-                projected_hidden: [B, L, D]
-                reconstructed_hidden: [B, L, D]
-                residual_hidden: [B, L, D]
+            PyramidOutput without Q/Solution fields (added by forward()).
         """
         batch_size, seq_len, _ = encoder_hidden_states.shape
         # batch_size: B, seq_len: L, _: D_encoder

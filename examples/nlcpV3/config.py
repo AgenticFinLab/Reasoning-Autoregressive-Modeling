@@ -118,6 +118,39 @@ class NLCPV3Config:
     # Optional fields (must come after all required fields in dataclass)
     reason_model_lora: Optional[Dict[str, Any]] = None
 
+    @classmethod
+    def from_yaml(cls, yaml_dict: dict) -> "NLCPV3Config":
+        """Construct NLCPV3Config from a nested YAML dict.
+
+        The YAML structure is:
+          model.pyramid:       hidden_dim, num_heads, num_levels, ...
+          model.reason_model:  reason_model_name, reason_model_num_layers, ...
+          model.builder:       use_positional_query_init, use_reasoning_loss
+          training.loss_weights: ntp_loss_weight, concept_loss_weight, ...
+        """
+        m = yaml_dict["model"]
+        rm = m["reason_model"]
+        pyr = m["pyramid"]
+        bld = m["builder"]
+        tr = yaml_dict["training"]
+        lw = tr["loss_weights"]
+        return cls(
+            hidden_dim=pyr["hidden_dim"],
+            num_heads=pyr["num_heads"],
+            num_levels=pyr["num_levels"],
+            level_lengths=pyr["level_lengths"],
+            max_seq_len=pyr["max_seq_len"],
+            reason_model_name=rm["reason_model_name"],
+            reason_model_num_layers=rm["reason_model_num_layers"],
+            reason_model_freeze=rm["reason_model_freeze"],
+            reason_model_lora=rm["reason_model_lora"],
+            use_positional_query_init=bld["use_positional_query_init"],
+            use_reasoning_loss=bld["use_reasoning_loss"],
+            ntp_loss_weight=lw["ntp_loss_weight"],
+            concept_loss_weight=lw["concept_loss_weight"],
+            recon_loss_weight=lw["recon_loss_weight"],
+        )
+
     def __post_init__(self):
         """Validate configuration parameters.
 

@@ -3,8 +3,7 @@
 # =============================================================================
 # Purpose: Configuration for test_concept_builder.py with use_reasoning_loss=True
 # Usage:
-#   python examples/nlcpV3/utest/test_concept_builder.py \
-#       -c configs/nlcpV3/utest/test_concept_builder_ntp.yml
+#   python examples/nlcpV3/utest/test_concept_builder.py  -c configs/nlcpV3/utest/test_concept_builder_ntp.yml
 # =============================================================================
 
 # Data configuration for GSM8K integration tests

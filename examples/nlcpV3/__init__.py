@@ -11,8 +11,14 @@ USAGE:
         ...
     )
     builder = ConceptPyramidBuilder(config)  # Encoder created internally
-    enc_out = builder.encode_cot(cot_input_ids, attention_mask=cot_mask)
-    pyramid = builder(enc_out.hidden_states)  # Training: PyramidOutput
+    # Using BuilderInput: forward() handles ALL tokenization internally
+    from nlcpV3.data_loader import BuilderInput
+    batch_input = BuilderInput(
+        questions=["What is 2+2?"],
+        cot_answers=["Let me think... 2+2=4"],
+        solutions=["4"],
+    )
+    pyramid = builder(batch_input)  # Training: PyramidOutput
     # pyramid.concepts: [C_0, ..., C_{K-1}]
     # pyramid.level_outputs: List[LevelOutput]
     # pyramid.reconstructed_hidden: for recon loss
@@ -81,6 +87,7 @@ from nlcpV3.concept_hybrid_builder import (
     PyramidOutput,
     SingleLevelOutput,
 )
+from nlcpV3.data_loader import BuilderInput
 from nlcpV3.concept_transformer import ConceptTransformer
 from nlcpV3.token_decoder import SolutionDecoder
 from nlcpV3.model import NLCPV3Model
@@ -108,7 +115,8 @@ __all__ = [
     "AutoregressiveConceptGenerator",
     # Concept Pyramid Builder (Phase 1: training only)
     "ConceptPyramidBuilder",
-    # Builder output dataclasses
+    # Builder input / output dataclasses
+    "BuilderInput",
     "EncoderOutput",
     "LevelOutput",
     "PyramidOutput",

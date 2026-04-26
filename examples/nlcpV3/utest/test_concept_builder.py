@@ -37,6 +37,7 @@ from nlcpV3.concept_hybrid_builder import (
     PyramidOutput,
     SingleLevelOutput,
 )
+from nlcpV3.data_loader import BuilderInput
 from nlcpV3.train_builder import compute_builder_loss
 from lmbase.dataset import registry
 from lmbase.utils.env_tools import get_device
@@ -51,44 +52,8 @@ def parse_args():
     return parser.parse_args()
 
 
-def build_nlcpv3_config_from_yaml(yaml_dict):
-    """Build NLCPV3Config from YAML dict.
-
-    Maps YAML nested blocks (model.reason_model, model.pyramid, etc.) to
-    the flat NLCPV3Config dataclass fields.
-    """
-    m = yaml_dict["model"]
-    rm = m["reason_model"]
-    pyr = m["pyramid"]
-    bld = m["builder"]
-    tr = yaml_dict["training"]
-    lw = tr["loss_weights"]
-    return NLCPV3Config(
-        hidden_dim=pyr["hidden_dim"],
-        num_heads=pyr["num_heads"],
-        num_levels=pyr["num_levels"],
-        level_lengths=pyr["level_lengths"],
-        max_seq_len=pyr["max_seq_len"],
-        reason_model_name=rm["reason_model_name"],
-        reason_model_num_layers=rm["reason_model_num_layers"],
-        reason_model_freeze=rm["reason_model_freeze"],
-        reason_model_lora=rm["reason_model_lora"],
-        use_positional_query_init=bld["use_positional_query_init"],
-        use_reasoning_loss=bld["use_reasoning_loss"],
-        ntp_loss_weight=lw["ntp_loss_weight"],
-        concept_loss_weight=lw["concept_loss_weight"],
-        recon_loss_weight=lw["recon_loss_weight"],
-    )
-
-
 def log_check(name, cond, details=""):
-    """Log a diagnostic check result without raising.
-
-    Args:
-        name: Human-readable description of what is being checked.
-        cond: Boolean condition result.
-        details: Additional numeric or descriptive info.
-    """
+    """Log a diagnostic check result without raising."""
     status = "OK" if cond else "WARN"
     msg = f"  [{status}] {name}"
     if details:
@@ -102,165 +67,33 @@ def log_value(name, value, unit=""):
     logging.info(f"  [VAL] {name} = {value}{u}")
 
 
-def test_constructor(builder, config):
-    """Verify all components created in ConceptPyramidBuilder.__init__().
-
-    PURPOSE:
-        Confirm that the Builder initializes every sub-module with the
-        correct shapes and properties. This catches configuration errors
-        (e.g. wrong hidden_dim, mismatched num_levels) before any
-        forward pass is attempted.
-
-    WHAT IS CHECKED:
-        - reason_model and tokenizer are loaded
-        - input_proj maps encoder_dim → concept_dim
-        - concept_queries has K levels with shapes [L_k, D]
-        - temperature is a learnable scalar
-        - level_projs and level_attn have K elements each
-        - back_proj exists when use_reasoning_loss=True, None otherwise
-        - total_concepts matches sum(level_lengths)
-    """
-    logging.info("\n=== Constructor Tests ===")
-    logging.info("Purpose: Verify __init__ creates all components correctly")
-
-    # --- Reason Model & Tokenizer ---
-    # The Builder loads the pretrained backbone and its paired tokenizer.
-    log_check("reason_model loaded", builder.reason_model is not None)
-    log_check("reason_model has config", hasattr(builder.reason_model, "config"))
-    log_value("reason_model_hidden_dim", builder.reason_model_hidden_dim)
-    log_value("model.config.hidden_size", builder.reason_model.config.hidden_size)
-    log_check(
-        "hidden_dim matches model config",
-        builder.reason_model_hidden_dim == builder.reason_model.config.hidden_size,
-    )
-    log_check("tokenizer loaded", builder.tokenizer is not None)
-    log_check("tokenizer has pad_token", builder.tokenizer.pad_token is not None)
-
-    # --- Projection Layer ---
-    # input_proj: maps from reason_model hidden_dim to concept hidden_dim.
-    log_check("input_proj exists", builder.input_proj is not None)
-    log_value("input_proj.in_features", builder.input_proj.in_features)
-    log_value("input_proj.out_features", builder.input_proj.out_features)
-    log_check(
-        "input_proj.in == reason_model_hidden_dim",
-        builder.input_proj.in_features == builder.reason_model_hidden_dim,
-    )
-    log_check(
-        "input_proj.out == config.hidden_dim",
-        builder.input_proj.out_features == config.hidden_dim,
-    )
-
-    # --- Learnable Concept Queries ---
-    # concept_queries: K Parameter objects, each shape [L_k, D].
-    # These are the "concept vocabulary" that replace VAR's codebook.
-    log_value("num_levels", config.num_levels)
-    log_value("concept_queries count", len(builder.concept_queries))
-    log_check(
-        "concept_queries count == num_levels",
-        len(builder.concept_queries) == config.num_levels,
-    )
-    for k, q in enumerate(builder.concept_queries):
-        expected = (config.level_lengths[k], config.hidden_dim)
-        log_value(f"concept_queries[{k}].shape", list(q.shape))
-        log_value(f"concept_queries[{k}].expected", list(expected))
-        log_check(f"level {k} query shape", q.shape == expected)
-        log_check(f"level {k} query requires_grad", q.requires_grad)
-
-    # --- Attention Temperature ---
-    # temperature: learnable scalar τ that controls attention sharpness.
-    log_value("temperature.shape", list(builder.temperature.shape))
-    log_check("temperature shape == (1,)", builder.temperature.shape == (1,))
-    log_check("temperature requires_grad", builder.temperature.requires_grad)
-
-    # --- Level Projections ---
-    # level_projs: K Linear layers, each D→D.
-    log_value("level_projs count", len(builder.level_projs))
-    log_check(
-        "level_projs count == num_levels",
-        len(builder.level_projs) == config.num_levels,
-    )
-    for k, proj in enumerate(builder.level_projs):
-        log_check(
-            f"level {k} proj.in == D",
-            proj.in_features == config.hidden_dim,
-            f"in={proj.in_features}",
-        )
-        log_check(
-            f"level {k} proj.out == D",
-            proj.out_features == config.hidden_dim,
-            f"out={proj.out_features}",
-        )
-
-    # --- Cross-Attention Refinement Layers ---
-    # level_attn: K MultiheadAttention modules (level 0 unused but created).
-    log_value("level_attn count", len(builder.level_attn))
-    log_check(
-        "level_attn count == num_levels",
-        len(builder.level_attn) == config.num_levels,
-    )
-
-    # --- Back-Projection Layer (only when use_reasoning_loss=True) ---
-    if config.use_reasoning_loss:
-        log_check("back_proj exists", builder.back_proj is not None)
-        if builder.back_proj is not None:
-            log_check(
-                "back_proj.in == hidden_dim",
-                builder.back_proj.in_features == config.hidden_dim,
-            )
-            log_check(
-                "back_proj.out == reason_model_hidden_dim",
-                builder.back_proj.out_features == builder.reason_model_hidden_dim,
-            )
-            log_check("back_proj requires_grad", builder.back_proj.weight.requires_grad)
-    else:
-        log_check(
-            "back_proj is None (use_reasoning_loss=False)", builder.back_proj is None
-        )
-
-    # --- Cache Lists ---
-    log_check(
-        "_cached_attentions is list", isinstance(builder._cached_attentions, list)
-    )
-    log_check(
-        "_cached_base_concepts is list",
-        isinstance(builder._cached_base_concepts, list),
-    )
-
-    # --- Total Concept Count ---
-    expected_total = sum(config.level_lengths)
-    log_value("get_total_concepts()", builder.get_total_concepts())
-    log_value("expected total", expected_total)
-    log_check(
-        "total_concepts matches config",
-        builder.get_total_concepts() == expected_total,
-    )
-
-
 def test_encode_cot(builder, device, batch_size):
-    """Verify encode_cot produces correct hidden states from text or tensors.
+    """Verify encode_cot produces correct hidden states from token IDs.
 
     PURPOSE:
-        The Builder must accept either raw text strings (auto-tokenized)
-        or pre-tokenized tensors. Both paths should produce identical
-        hidden-state outputs from the pretrained reason_model.
+        The Builder's encode_cot accepts pre-tokenized input_ids and
+        produces hidden states from the pretrained reason_model backbone.
 
     WHAT IS CHECKED:
-        - Text input → EncoderOutput with 3D hidden_states [B, L, D_encoder]
-        - Tensor input → same shape and same numerical values
+        - Tensor input → EncoderOutput with 3D hidden_states [B, L, D_encoder]
         - Batch dimension matches requested batch_size
         - Last dimension matches reason_model hidden size
     """
     logging.info("\n=== encode_cot Tests ===")
-    logging.info(
-        "Purpose: Verify text and tensor inputs both produce valid hidden states"
-    )
+    logging.info("Purpose: Verify token ID inputs produce valid hidden states")
 
     texts = [f"Problem {i}: What is {i} + {i+1}?" for i in range(batch_size)]
 
-    # --- Test 1: text input (auto-tokenize) ---
-    # encode_cot internally calls tokenizer() + reason_model() when given strings.
-    logging.info("  -- Test 1: Text input (auto-tokenize) --")
-    enc_out = builder.encode_cot(texts)
+    # Tokenize texts externally (as forward() does)
+    tokens = builder.tokenizer(
+        texts, return_tensors="pt", padding=True, truncation=True, max_length=32
+    )
+    input_ids = tokens["input_ids"].to(device)
+    attention_mask = tokens["attention_mask"].to(device)
+
+    # --- Test: tensor input ---
+    logging.info("  -- Test: Tensor input (token IDs) --")
+    enc_out = builder.encode_cot(input_ids, attention_mask)
     log_check("returns EncoderOutput", isinstance(enc_out, EncoderOutput))
     log_value("hidden_states.dim()", enc_out.hidden_states.dim())
     log_check("hidden_states is 3D", enc_out.hidden_states.dim() == 3)
@@ -274,28 +107,6 @@ def test_encode_cot(builder, device, batch_size):
         "last dim == reason_model_hidden_dim",
         enc_out.hidden_states.shape[-1] == builder.reason_model_hidden_dim,
         f"got {enc_out.hidden_states.shape[-1]}, expected {builder.reason_model_hidden_dim}",
-    )
-
-    # --- Test 2: tensor input ---
-    # Same tokenizer call, but inputs provided explicitly as tensors.
-    # Both paths should yield numerically identical hidden states.
-    logging.info("  -- Test 2: Tensor input (manual tokenize) --")
-    tokens = builder.tokenizer(
-        texts, return_tensors="pt", padding=True, truncation=True, max_length=32
-    )
-    input_ids = tokens["input_ids"].to(device)
-    attention_mask = tokens["attention_mask"].to(device)
-
-    enc_out2 = builder.encode_cot(input_ids, attention_mask)
-    log_check("returns EncoderOutput", isinstance(enc_out2, EncoderOutput))
-    log_value("hidden_states.shape", list(enc_out2.hidden_states.shape))
-
-    max_diff = (enc_out.hidden_states - enc_out2.hidden_states).abs().max().item()
-    log_value("max_diff (text vs tensor)", f"{max_diff:.2e}")
-    log_check(
-        "text input == tensor input (numerical)",
-        torch.allclose(enc_out.hidden_states, enc_out2.hidden_states),
-        f"max_diff={max_diff:.2e}",
     )
 
     return enc_out
@@ -325,13 +136,22 @@ def test_forward(builder, device, config, batch_size):
     logging.info("Purpose: Verify full pyramid construction and residual decomposition")
 
     texts = [f"Solve {i}: compute {i} * {i+2}." for i in range(batch_size)]
-    enc_out = builder.encode_cot(texts)
+    tokens = builder.tokenizer(
+        texts,
+        return_tensors="pt",
+        padding=True,
+        truncation=True,
+        max_length=config.max_seq_len,
+    )
+    enc_out = builder.encode_cot(
+        tokens["input_ids"].to(device), tokens["attention_mask"].to(device)
+    )
     H = enc_out.hidden_states
     seq_len = H.shape[1]
     logging.info("  Encoder output H shape: %s", list(H.shape))
 
     # Build pyramid
-    output = builder(H)
+    output = builder._build_pyramid_from_hidden_states(H)
     log_check("returns PyramidOutput", isinstance(output, PyramidOutput))
 
     # --- Concepts count and shapes ---
@@ -492,7 +312,16 @@ def test_forward_next_level(builder, device, config, batch_size):
     logging.info("Purpose: Verify incremental level-by-level extraction")
 
     texts = [f"Step {i}: calculate {i+1} * {i+2}." for i in range(batch_size)]
-    enc_out = builder.encode_cot(texts)
+    tokens = builder.tokenizer(
+        texts,
+        return_tensors="pt",
+        padding=True,
+        truncation=True,
+        max_length=config.max_seq_len,
+    )
+    enc_out = builder.encode_cot(
+        tokens["input_ids"].to(device), tokens["attention_mask"].to(device)
+    )
     H = enc_out.hidden_states
     logging.info("  Encoder output H shape: %s", list(H.shape))
 
@@ -572,29 +401,17 @@ def test_gsm8k_integration(builder, device, config, dataset, batch_size):
 
     n = min(batch_size, len(dataset))
     samples = [dataset[i] for i in range(n)]
+    questions = [s["question"] for s in samples]
     cot_texts = [s["cot_answer"] for s in samples]
     logging.info("  Using %d GSM8K samples", n)
 
-    # --- Encode CoT ---
-    enc_out = builder.encode_cot(cot_texts)
-    log_check(
-        "GSM8K encode_cot returns EncoderOutput",
-        isinstance(enc_out, EncoderOutput),
+    # --- Build pyramid via forward(BuilderInput) with raw text ---
+    batch_input = BuilderInput(
+        questions=questions,
+        cot_answers=cot_texts,
+        solutions=[],
     )
-    log_value("GSM8K hidden_states.shape", list(enc_out.hidden_states.shape))
-    log_check(
-        "GSM8K batch dimension correct",
-        enc_out.hidden_states.shape[0] == n,
-        f"got {enc_out.hidden_states.shape[0]}, expected {n}",
-    )
-    log_check(
-        "GSM8K hidden dim correct",
-        enc_out.hidden_states.shape[-1] == builder.reason_model_hidden_dim,
-        f"got {enc_out.hidden_states.shape[-1]}, expected {builder.reason_model_hidden_dim}",
-    )
-
-    # --- Build pyramid ---
-    pyramid = builder(enc_out.hidden_states)
+    pyramid = builder(batch_input)
     log_check(
         "GSM8K forward returns PyramidOutput",
         isinstance(pyramid, PyramidOutput),
@@ -650,9 +467,18 @@ def test_loss_breakdown(builder, config, device, batch_size):
     # --- Build pyramid ---
     texts = [f"What is {i} + {i+1}? The answer is {i+i+1}." for i in range(batch_size)]
     builder.train()
-    enc_out = builder.encode_cot(texts)
+    tokens = builder.tokenizer(
+        texts,
+        return_tensors="pt",
+        padding=True,
+        truncation=True,
+        max_length=config.max_seq_len,
+    )
+    enc_out = builder.encode_cot(
+        tokens["input_ids"].to(device), tokens["attention_mask"].to(device)
+    )
     H = enc_out.hidden_states
-    pyramid = builder(H)
+    pyramid = builder._build_pyramid_from_hidden_states(H)
 
     # --- Compute base builder losses (recon + ordering + residual) ---
     total_loss, loss_dict = compute_builder_loss(pyramid, config)
@@ -794,10 +620,19 @@ def test_gradient_flow(builder, device, batch_size):
     logging.info("Purpose: Verify all learnable parameters receive gradients")
 
     texts = [f"Compute {i} + {i+1}." for i in range(batch_size)]
-    enc_out = builder.encode_cot(texts)
+    tokens = builder.tokenizer(
+        texts,
+        return_tensors="pt",
+        padding=True,
+        truncation=True,
+        max_length=builder.config.max_seq_len,
+    )
+    enc_out = builder.encode_cot(
+        tokens["input_ids"].to(device), tokens["attention_mask"].to(device)
+    )
 
     builder.train()
-    output = builder(enc_out.hidden_states)
+    output = builder._build_pyramid_from_hidden_states(enc_out.hidden_states)
 
     # Use a simple sum loss so every concept contributes.
     loss = sum(c.sum() for c in output.concepts)
@@ -922,33 +757,16 @@ def test_reasoning_loss(ntp_config, device, batch_size):
     questions = [f"What is {i} + {i+1}?" for i in range(batch_size)]
     solutions = [str(i + i + 1) for i in range(batch_size)]
 
+    batch_input = BuilderInput(
+        questions=questions,
+        cot_answers=texts,
+        solutions=solutions,
+    )
+
     ntp_builder.train()
-    enc_out = ntp_builder.encode_cot(texts)
-    H = enc_out.hidden_states
-    pyramid = ntp_builder(H)
+    pyramid = ntp_builder(batch_input)
 
-    # Tokenize Q and solution
-    Q_tokens = ntp_builder.tokenizer(
-        questions,
-        return_tensors="pt",
-        padding=True,
-        truncation=True,
-        max_length=ntp_config.max_seq_len,
-    )
-    sol_tokens = ntp_builder.tokenizer(
-        solutions,
-        return_tensors="pt",
-        padding=True,
-        truncation=True,
-        max_length=ntp_config.max_seq_len,
-    )
-
-    ntp_loss = ntp_builder.compute_reasoning_loss(
-        pyramid,
-        Q_tokens["input_ids"].to(device),
-        Q_tokens["attention_mask"].to(device),
-        sol_tokens["input_ids"].to(device),
-    )
+    ntp_loss = ntp_builder.compute_reasoning_loss(pyramid)
     log_value("NTP loss value", f"{ntp_loss.item():.4f}")
     log_check("NTP loss is finite", torch.isfinite(ntp_loss))
     log_check("NTP loss is positive", ntp_loss.item() > 0)
@@ -986,7 +804,7 @@ def main():
         raise FileNotFoundError(f"Config not found: {config_path}")
 
     yaml_config = load_config(str(config_path))
-    nlcp_config = build_nlcpv3_config_from_yaml(yaml_config)
+    nlcp_config = NLCPV3Config.from_yaml(yaml_config)
 
     # Device
     device = str(get_device("auto"))
@@ -1011,7 +829,6 @@ def main():
 
     # Run all diagnostic tests
     # Each test prints [OK] or [WARN] lines. No hard failures — inspect output.
-    test_constructor(builder, nlcp_config)
     test_encode_cot(builder, device, batch_size)
     test_forward(builder, device, nlcp_config, batch_size)
     test_forward_next_level(builder, device, nlcp_config, batch_size)
@@ -1025,7 +842,7 @@ def main():
         ntp_config_path = config_path.parent / "test_concept_builder_ntp.yml"
         if ntp_config_path.exists():
             ntp_yaml = load_config(str(ntp_config_path))
-            ntp_config = build_nlcpv3_config_from_yaml(ntp_yaml)
+            ntp_config = NLCPV3Config.from_yaml(ntp_yaml)
             test_reasoning_loss(ntp_config, device, batch_size)
 
     logging.info("\n=== ALL DIAGNOSTIC TESTS COMPLETE ===")

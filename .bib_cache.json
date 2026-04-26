@@ -1,0 +1,1468 @@
+{
+  "2412.01831": {
+    "title": "Influence of Skill and Knowledge of Programmers on Program Behavior Visualization by CS Unplugged",
+    "authors": [
+      "Sumika Jinnouchi",
+      "Masateru Tsunoda"
+    ],
+    "comment": "2 pages, 3 figures, 2 tables",
+    "year": "2024"
+  },
+  "2404.02905": {
+    "title": "Visual Autoregressive Modeling: Scalable Image Generation via Next-Scale Prediction",
+    "authors": [
+      "Keyu Tian",
+      "Yi Jiang",
+      "Zehuan Yuan",
+      "Bingyue Peng",
+      "Liwei Wang"
+    ],
+    "comment": "Demo website: https://var.vision/",
+    "year": "2024"
+  },
+  "2602.08984": {
+    "title": "Next Concept Prediction in Discrete Latent Space Leads to Stronger Language Models",
+    "authors": [
+      "Yuliang Liu",
+      "Yunchong Song",
+      "Yixuan Wang",
+      "Kewen Ge",
+      "Alex Lamb",
+      "Qipeng Guo",
+      "Kai Chen",
+      "Bowen Zhou",
+      "Zhouhan Lin"
+    ],
+    "comment": "",
+    "year": "2026"
+  },
+  "2402.07754": {
+    "title": "Diffusion of Thoughts: Chain-of-Thought Reasoning in Diffusion Language Models",
+    "authors": [
+      "Jiacheng Ye",
+      "Shansan Gong",
+      "Liheng Chen",
+      "Lin Zheng",
+      "Jiahui Gao",
+      "Han Shi",
+      "Chuan Wu",
+      "Xin Jiang",
+      "Zhenguo Li",
+      "Wei Bi",
+      "Lingpeng Kong"
+    ],
+    "comment": "NeurIPS 2024",
+    "year": "2024"
+  },
+  "2502.03275": {
+    "title": "Token Assorted: Mixing Latent and Text Tokens for Improved Language Model Reasoning",
+    "authors": [
+      "DiJia Su",
+      "Hanlin Zhu",
+      "Yingchen Xu",
+      "Jiantao Jiao",
+      "Yuandong Tian",
+      "Qinqing Zheng"
+    ],
+    "comment": "",
+    "year": "2025"
+  },
+  "2504.19095": {
+    "title": "Efficient Reasoning for LLMs through Speculative Chain-of-Thought",
+    "authors": [
+      "Jikai Wang",
+      "Juntao Li",
+      "Jianye Hou",
+      "Bowen Yan",
+      "Lijun Wu",
+      "Min Zhang"
+    ],
+    "comment": "",
+    "year": "2025"
+  },
+  "2510.04573": {
+    "title": "LaDiR: Latent Diffusion Enhances LLMs for Text Reasoning",
+    "authors": [
+      "Haoqiang Kang",
+      "Yizhe Zhang",
+      "Nikki Lijing Kuang",
+      "Nicklas Majamaki",
+      "Navdeep Jaitly",
+      "Yi-An Ma",
+      "Lianhui Qin"
+    ],
+    "comment": "",
+    "year": "2025"
+  },
+  "2512.24617": {
+    "title": "Dynamic Large Concept Models: Latent Reasoning in an Adaptive Semantic Space",
+    "authors": [
+      "Xingwei Qu",
+      "Shaowen Wang",
+      "Zihao Huang",
+      "Kai Hua",
+      "Fan Yin",
+      "Rui-Jie Zhu",
+      "Jundong Zhou",
+      "Qiyang Min",
+      "Zihao Wang",
+      "Yizhi Li",
+      "Tianyu Zhang",
+      "He Xing",
+      "Zheng Zhang",
+      "Yuxuan Song",
+      "Tianyu Zheng",
+      "Zhiyuan Zeng",
+      "Chenghua Lin",
+      "Ge Zhang",
+      "Wenhao Huang"
+    ],
+    "comment": "",
+    "year": "2025"
+  },
+  "2412.06769": {
+    "title": "Training Large Language Models to Reason in a Continuous Latent Space",
+    "authors": [
+      "Shibo Hao",
+      "Sainbayar Sukhbaatar",
+      "DiJia Su",
+      "Xian Li",
+      "Zhiting Hu",
+      "Jason Weston",
+      "Yuandong Tian"
+    ],
+    "comment": "Accepted to COLM 2025",
+    "year": "2024"
+  },
+  "2502.17416": {
+    "title": "Reasoning with Latent Thoughts: On the Power of Looped Transformers",
+    "authors": [
+      "Nikunj Saunshi",
+      "Nishanth Dikkala",
+      "Zhiyuan Li",
+      "Sanjiv Kumar",
+      "Sashank J. Reddi"
+    ],
+    "comment": "ICLR 2025",
+    "year": "2025"
+  },
+  "2510.07358": {
+    "title": "Encode, Think, Decode: Scaling test-time reasoning with recursive latent thoughts",
+    "authors": [
+      "Yeskendir Koishekenov",
+      "Aldo Lipani",
+      "Nicola Cancedda"
+    ],
+    "comment": "",
+    "year": "2025"
+  },
+  "2502.12134": {
+    "title": "SoftCoT: Soft Chain-of-Thought for Efficient Reasoning with LLMs",
+    "authors": [
+      "Yige Xu",
+      "Xu Guo",
+      "Zhiwei Zeng",
+      "Chunyan Miao"
+    ],
+    "comment": "Camera-ready for ACL 2025 (main conference)",
+    "year": "2025"
+  },
+  "2307.15337": {
+    "title": "Skeleton-of-Thought: Prompting LLMs for Efficient Parallel Generation",
+    "authors": [
+      "Xuefei Ning",
+      "Zinan Lin",
+      "Zixuan Zhou",
+      "Zifu Wang",
+      "Huazhong Yang",
+      "Yu Wang"
+    ],
+    "comment": "In ICLR'24",
+    "year": "2023"
+  },
+  "2509.26314": {
+    "title": "Latent Thinking Optimization: Your Latent Reasoning Language Model Secretly Encodes Reward Signals in Its Latent Thoughts",
+    "authors": [
+      "Hanwen Du",
+      "Yuxin Dong",
+      "Xia Ning"
+    ],
+    "comment": "",
+    "year": "2025"
+  },
+  "2602.08783": {
+    "title": "Dynamics Within Latent Chain-of-Thought: An Empirical Study of Causal Structure",
+    "authors": [
+      "Zirui Li",
+      "Xuefeng Bai",
+      "Kehai Chen",
+      "Yizhi Li",
+      "Jian Yang",
+      "Chenghua Lin",
+      "Min Zhang"
+    ],
+    "comment": "22 pages, Accepted to ICLR 2026 Latent & Implicit Thinking Workshop",
+    "year": "2026"
+  },
+  "2602.11549": {
+    "title": "Native Reasoning Models: Training Language Models to Reason on Unverifiable Data",
+    "authors": [
+      "Yuanfu Wang",
+      "Zhixuan Liu",
+      "Xiangtian Li",
+      "Chaochao Lu",
+      "Chao Yang"
+    ],
+    "comment": "Accepted at ICLR 2026. Code available at https://github.com/sharkwyf/native-reasoning-models",
+    "year": "2026"
+  },
+  "2602.04246": {
+    "title": "CoLT: Reasoning with Chain of Latent Tool Calls",
+    "authors": [
+      "Fangwei Zhu",
+      "Zhifang Sui"
+    ],
+    "comment": "",
+    "year": "2026"
+  },
+  "2511.16885": {
+    "title": "Improving Latent Reasoning in LLMs via Soft Concept Mixing",
+    "authors": [
+      "Kang Wang",
+      "Xiangyu Duan",
+      "Tianyi Du"
+    ],
+    "comment": "7 pages, 3 figures",
+    "year": "2025"
+  },
+  "2404.19737": {
+    "title": "Better & Faster Large Language Models via Multi-token Prediction",
+    "authors": [
+      "Fabian Gloeckle",
+      "Badr Youbi Idrissi",
+      "Baptiste Rozi\u00e8re",
+      "David Lopez-Paz",
+      "Gabriel Synnaeve"
+    ],
+    "comment": "",
+    "year": "2024"
+  },
+  "2512.07558": {
+    "title": "ReLaX: Reasoning with Latent Exploration for Large Reasoning Models",
+    "authors": [
+      "Shimin Zhang",
+      "Xianwei Chen",
+      "Yufan Shen",
+      "Ziyuan Ye",
+      "Jibin Wu"
+    ],
+    "comment": "",
+    "year": "2025"
+  },
+  "2603.04948": {
+    "title": "$\\nabla$-Reasoner: LLM Reasoning via Test-Time Gradient Descent in Latent Space",
+    "authors": [
+      "Peihao Wang",
+      "Ruisi Cai",
+      "Zhen Wang",
+      "Hongyuan Mei",
+      "Qiang Liu",
+      "Pan Li",
+      "Zhangyang Wang"
+    ],
+    "comment": "ICLR 2026",
+    "year": "2026"
+  },
+  "2602.08332": {
+    "title": "Latent Reasoning with Supervised Thinking States",
+    "authors": [
+      "Ido Amos",
+      "Avi Caciularu",
+      "Mor Geva",
+      "Amir Globerson",
+      "Jonathan Herzig",
+      "Lior Shani",
+      "Idan Szpektor"
+    ],
+    "comment": "",
+    "year": "2026"
+  },
+  "2602.09670": {
+    "title": "Talking with the Latents -- how to convert your LLM into an astronomer",
+    "authors": [
+      "Ilay Kamai",
+      "Marc-Huertas Company",
+      "Mike J. Smith",
+      "Hagai B. Perets"
+    ],
+    "comment": "",
+    "year": "2026"
+  },
+  "2502.02378": {
+    "title": "Excited States of the Uniform Electron Gas",
+    "authors": [
+      "Pierre-Fran\u00e7ois Loos"
+    ],
+    "comment": "7 pages, 4 figures",
+    "year": "2025"
+  },
+  "2506.06555": {
+    "title": "Machine learning non-Markovian two-level quantum noise spectroscopy",
+    "authors": [
+      "Juan Manuel Scarpetta",
+      "John Henry Reina",
+      "Morten Hjorth-Jensen"
+    ],
+    "comment": "",
+    "year": "2025"
+  },
+  "2512.21711": {
+    "title": "Do Latent Tokens Think? A Causal and Adversarial Analysis of Chain-of-Continuous-Thought",
+    "authors": [
+      "Yuyi Zhang",
+      "Boyu Tang",
+      "Tianjie Ju",
+      "Sufeng Duan",
+      "Gongshen Liu"
+    ],
+    "comment": "13 pages, 5 figures",
+    "year": "2025"
+  },
+  "2601.06123": {
+    "title": "Latent Space Communication via K-V Cache Alignment",
+    "authors": [
+      "Lucio M. Dery",
+      "Zohar Yahav",
+      "Henry Prior",
+      "Qixuan Feng",
+      "Jiajun Shen",
+      "Arthur Szlam"
+    ],
+    "comment": "15 pages, 6 figures, 4 tables",
+    "year": "2026"
+  },
+  "2601.21598": {
+    "title": "Beyond Imitation: Reinforcement Learning for Active Latent Planning",
+    "authors": [
+      "Zhi Zheng",
+      "Wee Sun Lee"
+    ],
+    "comment": "",
+    "year": "2026"
+  },
+  "2602.06584": {
+    "title": "Inference-Time Rethinking with Latent Thought Vectors for Math Reasoning",
+    "authors": [
+      "Deqian Kong",
+      "Minglu Zhao",
+      "Aoyang Qin",
+      "Bo Pang",
+      "Chenxin Tao",
+      "David Hartmann",
+      "Edouardo Honig",
+      "Dehong Xu",
+      "Amit Kumar",
+      "Matt Sarte",
+      "Chuan Li",
+      "Jianwen Xie",
+      "Ying Nian Wu"
+    ],
+    "comment": "",
+    "year": "2026"
+  },
+  "2602.08220": {
+    "title": "Pretraining with Token-Level Adaptive Latent Chain-of-Thought",
+    "authors": [
+      "Boyi Zeng",
+      "Yiqin Hao",
+      "He Li",
+      "Shixiang Song",
+      "Feichen Song",
+      "Zitong Wang",
+      "Siyuan Huang",
+      "Yi Xu",
+      "ZiWei He",
+      "Xinbing Wang",
+      "Zhouhan Lin"
+    ],
+    "comment": "15pages",
+    "year": "2026"
+  },
+  "2502.05171": {
+    "title": "Scaling up Test-Time Compute with Latent Reasoning: A Recurrent Depth Approach",
+    "authors": [
+      "Jonas Geiping",
+      "Sean McLeish",
+      "Neel Jain",
+      "John Kirchenbauer",
+      "Siddharth Singh",
+      "Brian R. Bartoldson",
+      "Bhavya Kailkhura",
+      "Abhinav Bhatele",
+      "Tom Goldstein"
+    ],
+    "comment": "The model is available at https://huggingface.co/tomg-group-umd/huginn-0125. Code and data recipe can be found at https://github.com/seal-rg/recurrent-pretraining",
+    "year": "2025"
+  },
+  "2604.02029": {
+    "title": "The Latent Space: Foundation, Evolution, Mechanism, Ability, and Outlook",
+    "authors": [
+      "Xinlei Yu",
+      "Zhangquan Chen",
+      "Yongbo He",
+      "Tianyu Fu",
+      "Cheng Yang",
+      "Chengming Xu",
+      "Yue Ma",
+      "Xiaobin Hu",
+      "Zhe Cao",
+      "Jie Xu",
+      "Guibin Zhang",
+      "Jiale Tao",
+      "Jiayi Zhang",
+      "Siyuan Ma",
+      "Kaituo Feng",
+      "Haojie Huang",
+      "Youxing Li",
+      "Ronghao Chen",
+      "Huacan Wang",
+      "Chenglin Wu",
+      "Zikun Su",
+      "Xiaogang Xu",
+      "Kelu Yao",
+      "Kun Wang",
+      "Chen Gao",
+      "Yue Liao",
+      "Ruqi Huang",
+      "Tao Jin",
+      "Cheng Tan",
+      "Jiangning Zhang",
+      "Wenqi Ren",
+      "Yanwei Fu",
+      "Yong Liu",
+      "Yu Wang",
+      "Xiangyu Yue",
+      "Yu-Gang Jiang",
+      "Shuicheng Yan"
+    ],
+    "comment": "",
+    "year": "2026"
+  },
+  "2408.00655": {
+    "title": "SentenceVAE: Enable Next-sentence Prediction for Large Language Models with Faster Speed, Higher Accuracy and Longer Context",
+    "authors": [
+      "Hongjun An",
+      "Yifan Chen",
+      "Zhe Sun",
+      "Xuelong Li"
+    ],
+    "comment": "update the article",
+    "year": "2024"
+  },
+  "2506.11752": {
+    "title": "DART: Distilling Autoregressive Reasoning to Silent Thought",
+    "authors": [
+      "Nan Jiang",
+      "Ziming Wu",
+      "De-Chuan Zhan",
+      "Fuming Lai",
+      "Shaobing Lian"
+    ],
+    "comment": "",
+    "year": "2025"
+  },
+  "2211.17192": {
+    "title": "Fast Inference from Transformers via Speculative Decoding",
+    "authors": [
+      "Yaniv Leviathan",
+      "Matan Kalman",
+      "Yossi Matias"
+    ],
+    "comment": "ICML 2023 Oral",
+    "year": "2022"
+  },
+  "2502.12949": {
+    "title": "Efficient Learning Under Density Shift in Incremental Settings Using Cram\u00e9r-Rao-Based Regularization",
+    "authors": [
+      "Behraj Khan",
+      "Behroz Mirza",
+      "Nouman Durrani",
+      "Tahir Syed"
+    ],
+    "comment": "It is the older version of our this paper arXiv:2502.15756. So this is the duplicate older version mistakenly uploaded. There are mistakes in the method part of this paper",
+    "year": "2025"
+  },
+  "2412.08821": {
+    "title": "Large Concept Models: Language Modeling in a Sentence Representation Space",
+    "authors": [
+      "LCM team",
+      "Lo\u00efc Barrault",
+      "Paul-Ambroise Duquenne",
+      "Maha Elbayad",
+      "Artyom Kozhevnikov",
+      "Belen Alastruey",
+      "Pierre Andrews",
+      "Mariano Coria",
+      "Guillaume Couairon",
+      "Marta R. Costa-juss\u00e0",
+      "David Dale",
+      "Hady Elsahar",
+      "Kevin Heffernan",
+      "Jo\u00e3o Maria Janeiro",
+      "Tuan Tran",
+      "Christophe Ropers",
+      "Eduardo S\u00e1nchez",
+      "Robin San Roman",
+      "Alexandre Mourachko",
+      "Safiyyah Saleem",
+      "Holger Schwenk"
+    ],
+    "comment": "49 pages",
+    "year": "2024"
+  },
+  "2512.21323": {
+    "title": "Parallel Token Prediction for Language Models",
+    "authors": [
+      "Felix Draxler",
+      "Justus Will",
+      "Farrin Marouf Sofian",
+      "Theofanis Karaletsos",
+      "Sameer Singh",
+      "Stephan Mandt"
+    ],
+    "comment": "Accepted at ICLR 2026",
+    "year": "2025"
+  },
+  "2212.09462": {
+    "title": "Latent Diffusion for Language Generation",
+    "authors": [
+      "Justin Lovelace",
+      "Varsha Kishore",
+      "Chao Wan",
+      "Eliot Shekhtman",
+      "Kilian Q. Weinberger"
+    ],
+    "comment": "NeurIPS 2023",
+    "year": "2022"
+  },
+  "2205.14217": {
+    "title": "Diffusion-LM Improves Controllable Text Generation",
+    "authors": [
+      "Xiang Lisa Li",
+      "John Thickstun",
+      "Ishaan Gulrajani",
+      "Percy Liang",
+      "Tatsunori B. Hashimoto"
+    ],
+    "comment": "",
+    "year": "2022"
+  },
+  "2506.21734": {
+    "title": "Hierarchical Reasoning Model",
+    "authors": [
+      "Guan Wang",
+      "Jin Li",
+      "Yuhao Sun",
+      "Xing Chen",
+      "Changling Liu",
+      "Yue Wu",
+      "Meng Lu",
+      "Sen Song",
+      "Yasin Abbasi Yadkori"
+    ],
+    "comment": "",
+    "year": "2025"
+  },
+  "2502.06171": {
+    "title": "A Synthetic Data-Driven Radiology Foundation Model for Pan-tumor Clinical Diagnosis",
+    "authors": [
+      "Wenhui Lei",
+      "Hanyu Chen",
+      "Zitian Zhang",
+      "Luyang Luo",
+      "Qiong Xiao",
+      "Yannian Gu",
+      "Peng Gao",
+      "Yankai Jiang",
+      "Ci Wang",
+      "Guangtao Wu",
+      "Tongjia Xu",
+      "Yingjie Zhang",
+      "Pranav Rajpurkar",
+      "Xiaofan Zhang",
+      "Shaoting Zhang",
+      "Zhenning Wang"
+    ],
+    "comment": "63 pages, 7 figures",
+    "year": "2025"
+  },
+  "2502.09992": {
+    "title": "Large Language Diffusion Models",
+    "authors": [
+      "Shen Nie",
+      "Fengqi Zhu",
+      "Zebin You",
+      "Xiaolu Zhang",
+      "Jingyang Ou",
+      "Jun Hu",
+      "Jun Zhou",
+      "Yankai Lin",
+      "Ji-Rong Wen",
+      "Chongxuan Li"
+    ],
+    "comment": "",
+    "year": "2025"
+  },
+  "2410.13640": {
+    "title": "Latent Space Chain-of-Embedding Enables Output-free LLM Self-Evaluation",
+    "authors": [
+      "Yiming Wang",
+      "Pei Zhang",
+      "Baosong Yang",
+      "Derek F. Wong",
+      "Rui Wang"
+    ],
+    "comment": "Accepted by ICLR 2025",
+    "year": "2024"
+  },
+  "2505.17505": {
+    "title": "L-MTP: Leap Multi-Token Prediction Beyond Adjacent Context for Large Language Models",
+    "authors": [
+      "Xiaohao Liu",
+      "Xiaobo Xia",
+      "Weixiang Zhao",
+      "Manyi Zhang",
+      "Xianzhi Yu",
+      "Xiu Su",
+      "Shuo Yang",
+      "See-Kiong Ng",
+      "Tat-Seng Chua"
+    ],
+    "comment": "Accepted by NeurIPS 2025. Codes are available at https://github.com/Xiaohao-Liu/L-MTP",
+    "year": "2025"
+  },
+  "2403.10444": {
+    "title": "Block Verification Accelerates Speculative Decoding",
+    "authors": [
+      "Ziteng Sun",
+      "Uri Mendlovic",
+      "Yaniv Leviathan",
+      "Asaf Aharoni",
+      "Jae Hun Ro",
+      "Ahmad Beirami",
+      "Ananda Theertha Suresh"
+    ],
+    "comment": "",
+    "year": "2024"
+  },
+  "2410.14157": {
+    "title": "Beyond Autoregression: Discrete Diffusion for Complex Reasoning and Planning",
+    "authors": [
+      "Jiacheng Ye",
+      "Jiahui Gao",
+      "Shansan Gong",
+      "Lin Zheng",
+      "Xin Jiang",
+      "Zhenguo Li",
+      "Lingpeng Kong"
+    ],
+    "comment": "ICLR 2025",
+    "year": "2024"
+  },
+  "2502.08482": {
+    "title": "Enhancing Auto-regressive Chain-of-Thought through Loop-Aligned Reasoning",
+    "authors": [
+      "Qifan Yu",
+      "Zhenyu He",
+      "Sijie Li",
+      "Xun Zhou",
+      "Jun Zhang",
+      "Jingjing Xu",
+      "Di He"
+    ],
+    "comment": "work in progress",
+    "year": "2025"
+  },
+  "2501.19324": {
+    "title": "Reward-Guided Speculative Decoding for Efficient LLM Reasoning",
+    "authors": [
+      "Baohao Liao",
+      "Yuhui Xu",
+      "Hanze Dong",
+      "Junnan Li",
+      "Christof Monz",
+      "Silvio Savarese",
+      "Doyen Sahoo",
+      "Caiming Xiong"
+    ],
+    "comment": "17 pages",
+    "year": "2025"
+  },
+  "2408.04220": {
+    "title": "Diffusion Guided Language Modeling",
+    "authors": [
+      "Justin Lovelace",
+      "Varsha Kishore",
+      "Yiwei Chen",
+      "Kilian Q. Weinberger"
+    ],
+    "comment": "ACL Findings 2024",
+    "year": "2024"
+  },
+  "2505.22757": {
+    "title": "Pre-Training Curriculum for Multi-Token Prediction in Language Models",
+    "authors": [
+      "Ansar Aynetdinov",
+      "Alan Akbik"
+    ],
+    "comment": "Accepted to ACL 2025 (Main)",
+    "year": "2025"
+  },
+  "2411.18462": {
+    "title": "Draft Model Knows When to Stop: Self-Verification Speculative Decoding for Long-Form Generation",
+    "authors": [
+      "Ziyin Zhang",
+      "Jiahao Xu",
+      "Tian Liang",
+      "Xingyu Chen",
+      "Zhiwei He",
+      "Rui Wang",
+      "Zhaopeng Tu"
+    ],
+    "comment": "EMNLP 2025",
+    "year": "2024"
+  },
+  "2305.14788": {
+    "title": "Adapting Language Models to Compress Contexts",
+    "authors": [
+      "Alexis Chevalier",
+      "Alexander Wettig",
+      "Anirudh Ajith",
+      "Danqi Chen"
+    ],
+    "comment": "Accepted to EMNLP 2023; added results for Llama-2-7B model",
+    "year": "2023"
+  },
+  "2506.16975": {
+    "title": "Latent Concept Disentanglement in Transformer-based Language Models",
+    "authors": [
+      "Guan Zhe Hong",
+      "Bhavya Vasudeva",
+      "Vatsal Sharan",
+      "Cyrus Rashtchian",
+      "Prabhakar Raghavan",
+      "Rina Panigrahy"
+    ],
+    "comment": "",
+    "year": "2025"
+  },
+  "2411.05902": {
+    "title": "Autoregressive Models in Vision: A Survey",
+    "authors": [
+      "Jing Xiong",
+      "Gongye Liu",
+      "Lun Huang",
+      "Chengyue Wu",
+      "Taiqiang Wu",
+      "Yao Mu",
+      "Yuan Yao",
+      "Hui Shen",
+      "Zhongwei Wan",
+      "Jinfa Huang",
+      "Chaofan Tao",
+      "Shen Yan",
+      "Huaxiu Yao",
+      "Lingpeng Kong",
+      "Hongxia Yang",
+      "Mi Zhang",
+      "Guillermo Sapiro",
+      "Jiebo Luo",
+      "Ping Luo",
+      "Ngai Wong"
+    ],
+    "comment": "The paper is accepted by TMLR",
+    "year": "2024"
+  },
+  "2512.01278": {
+    "title": "Accelerating Large-Scale Reasoning Model Inference with Sparse Self-Speculative Decoding",
+    "authors": [
+      "Yilong Zhao",
+      "Jiaming Tang",
+      "Kan Zhu",
+      "Zihao Ye",
+      "Chi-Chih Chang",
+      "Chaofan Lin",
+      "Jongseok Park",
+      "Guangxuan Xiao",
+      "Mohamed S. Abdelfattah",
+      "Mingyu Gao",
+      "Baris Kasikci",
+      "Song Han",
+      "Ion Stoica"
+    ],
+    "comment": "",
+    "year": "2025"
+  },
+  "2307.06945": {
+    "title": "In-context Autoencoder for Context Compression in a Large Language Model",
+    "authors": [
+      "Tao Ge",
+      "Jing Hu",
+      "Lei Wang",
+      "Xun Wang",
+      "Si-Qing Chen",
+      "Furu Wei"
+    ],
+    "comment": "v4: Final camera ready for ICLR'24",
+    "year": "2023"
+  },
+  "2511.15244": {
+    "title": "Context Cascade Compression: Exploring the Upper Limits of Text Compression",
+    "authors": [
+      "Fanfan Liu",
+      "Haibo Qiu"
+    ],
+    "comment": "",
+    "year": "2025"
+  },
+  "2510.13117": {
+    "title": "On the Reasoning Abilities of Masked Diffusion Language Models",
+    "authors": [
+      "Anej Svete",
+      "Ashish Sabharwal"
+    ],
+    "comment": "",
+    "year": "2025"
+  },
+  "2510.12164": {
+    "title": "A Survey on Parallel Reasoning",
+    "authors": [
+      "Ziqi Wang",
+      "Boye Niu",
+      "Zipeng Gao",
+      "Zhi Zheng",
+      "Tong Xu",
+      "Linghui Meng",
+      "Zhongli Li",
+      "Jing Liu",
+      "Yilong Chen",
+      "Chen Zhu",
+      "Hua Wu",
+      "Haifeng Wang",
+      "Enhong Chen"
+    ],
+    "comment": "",
+    "year": "2025"
+  },
+  "2304.08467": {
+    "title": "Learning to Compress Prompts with Gist Tokens",
+    "authors": [
+      "Jesse Mu",
+      "Xiang Lisa Li",
+      "Noah Goodman"
+    ],
+    "comment": "NeurIPS 2023, 26 pages. Version 3 updates preprint to camera-ready version and clarifies some writing in places",
+    "year": "2023"
+  },
+  "2510.08554": {
+    "title": "Improving Reasoning for Diffusion Language Models via Group Diffusion Policy Optimization",
+    "authors": [
+      "Kevin Rojas",
+      "Jiahe Lin",
+      "Kashif Rasul",
+      "Anderson Schneider",
+      "Yuriy Nevmyvaka",
+      "Molei Tao",
+      "Wei Deng"
+    ],
+    "comment": "",
+    "year": "2025"
+  },
+  "2506.15882": {
+    "title": "Fractional Reasoning via Latent Steering Vectors Improves Inference Time Compute",
+    "authors": [
+      "Sheng Liu",
+      "Tianlang Chen",
+      "Pan Lu",
+      "Haotian Ye",
+      "Yizheng Chen",
+      "Lei Xing",
+      "James Zou"
+    ],
+    "comment": "18 pages, 5 figures, Project website: https://shengliu66.github.io/fractreason/",
+    "year": "2025"
+  },
+  "2507.03704": {
+    "title": "Controlling Thinking Speed in Reasoning Models",
+    "authors": [
+      "Zhengkai Lin",
+      "Zhihang Fu",
+      "Ze Chen",
+      "Chao Chen",
+      "Liang Xie",
+      "Wenxiao Wang",
+      "Deng Cai",
+      "Zheng Wang",
+      "Jieping Ye"
+    ],
+    "comment": "NeurIPS 2025 Spotlight",
+    "year": "2025"
+  },
+  "2505.17697": {
+    "title": "Activation Control for Efficiently Eliciting Long Chain-of-thought Ability of Language Models",
+    "authors": [
+      "Zekai Zhao",
+      "Qi Liu",
+      "Kun Zhou",
+      "Zihan Liu",
+      "Yifei Shao",
+      "Zhiting Hu",
+      "Biwei Huang"
+    ],
+    "comment": "",
+    "year": "2025"
+  },
+  "2505.18962": {
+    "title": "System-1.5 Reasoning: Traversal in Language and Latent Spaces with Dynamic Shortcuts",
+    "authors": [
+      "Xiaoqiang Wang",
+      "Suyuchen Wang",
+      "Yun Zhu",
+      "Bang Liu"
+    ],
+    "comment": "Work in progress",
+    "year": "2025"
+  },
+  "2505.18454": {
+    "title": "Hybrid Latent Reasoning via Reinforcement Learning",
+    "authors": [
+      "Zhenrui Yue",
+      "Bowen Jin",
+      "Huimin Zeng",
+      "Honglei Zhuang",
+      "Zhen Qin",
+      "Jinsung Yoon",
+      "Lanyu Shang",
+      "Jiawei Han",
+      "Dong Wang"
+    ],
+    "comment": "NeurIPS 2025",
+    "year": "2025"
+  },
+  "2511.13223": {
+    "title": "TokenSqueeze: Performance-Preserving Compression for Reasoning LLMs",
+    "authors": [
+      "Yuxiang Zhang",
+      "Zhengxu Yu",
+      "Weihang Pan",
+      "Zhongming Jin",
+      "Qiang Fu",
+      "Deng Cai",
+      "Binbin Lin",
+      "Jieping Ye"
+    ],
+    "comment": "Accepted to NeurIPS 2025",
+    "year": "2025"
+  },
+  "2505.16552": {
+    "title": "Think Silently, Think Fast: Dynamic Latent Compression of LLM Reasoning Chains",
+    "authors": [
+      "Wenhui Tan",
+      "Jiaze Li",
+      "Jianzhong Ju",
+      "Zhenbo Luo",
+      "Ruihua Song",
+      "Jian Luan"
+    ],
+    "comment": "15 pages, 8 figures",
+    "year": "2025"
+  },
+  "2505.13866": {
+    "title": "Reasoning Path Compression: Compressing Generation Trajectories for Efficient LLM Reasoning",
+    "authors": [
+      "Jiwon Song",
+      "Dongwon Jo",
+      "Yulhwa Kim",
+      "Jae-Joon Kim"
+    ],
+    "comment": "",
+    "year": "2025"
+  },
+  "2310.05736": {
+    "title": "LLMLingua: Compressing Prompts for Accelerated Inference of Large Language Models",
+    "authors": [
+      "Huiqiang Jiang",
+      "Qianhui Wu",
+      "Chin-Yew Lin",
+      "Yuqing Yang",
+      "Lili Qiu"
+    ],
+    "comment": "Accepted at EMNLP 2023",
+    "year": "2023"
+  },
+  "2405.13792": {
+    "title": "xRAG: Extreme Context Compression for Retrieval-augmented Generation with One Token",
+    "authors": [
+      "Xin Cheng",
+      "Xun Wang",
+      "Xingxing Zhang",
+      "Tao Ge",
+      "Si-Qing Chen",
+      "Furu Wei",
+      "Huishuai Zhang",
+      "Dongyan Zhao"
+    ],
+    "comment": "Neurips 2024",
+    "year": "2024"
+  },
+  "2508.12587": {
+    "title": "Multimodal Chain of Continuous Thought for Latent-Space Reasoning in Vision-Language Models",
+    "authors": [
+      "Tan-Hanh Pham",
+      "Chris Ngo"
+    ],
+    "comment": "",
+    "year": "2025"
+  },
+  "2512.06690": {
+    "title": "Think-While-Generating: On-the-Fly Reasoning for Personalized Long-Form Generation",
+    "authors": [
+      "Chengbing Wang",
+      "Yang Zhang",
+      "Wenjie Wang",
+      "Xiaoyan Zhao",
+      "Fuli Feng",
+      "Xiangnan He",
+      "Tat-Seng Chua"
+    ],
+    "comment": "Published as a conference paper at ICLR 2026",
+    "year": "2025"
+  },
+  "2510.23925": {
+    "title": "Latent Chain-of-Thought for Visual Reasoning",
+    "authors": [
+      "Guohao Sun",
+      "Hang Hua",
+      "Jian Wang",
+      "Jiebo Luo",
+      "Sohail Dianat",
+      "Majid Rabbani",
+      "Raghuveer Rao",
+      "Zhiqiang Tao"
+    ],
+    "comment": "NeurIPS 2025",
+    "year": "2025"
+  },
+  "2505.13308": {
+    "title": "Seek in the Dark: Reasoning via Test-Time Instance-Level Policy Gradient in Latent Space",
+    "authors": [
+      "Hengli Li",
+      "Chenxi Li",
+      "Tong Wu",
+      "Xuekai Zhu",
+      "Yuxuan Wang",
+      "Zhaoxin Yu",
+      "Eric Hanchen Jiang",
+      "Song-Chun Zhu",
+      "Zixia Jia",
+      "Ying Nian Wu",
+      "Zilong Zheng"
+    ],
+    "comment": "",
+    "year": "2025"
+  },
+  "2510.02312": {
+    "title": "KaVa: Latent Reasoning via Compressed KV-Cache Distillation",
+    "authors": [
+      "Anna Kuzina",
+      "Maciej Pioro",
+      "Paul N. Whatmough",
+      "Babak Ehteshami Bejnordi"
+    ],
+    "comment": "Preprint. Under Review",
+    "year": "2025"
+  },
+  "2603.03475": {
+    "title": "When Shallow Wins: Silent Failures and the Depth-Accuracy Paradox in Latent Reasoning",
+    "authors": [
+      "Subramanyam Sahoo",
+      "Aman Chadha",
+      "Vinija Jain",
+      "Divya Chaudhary"
+    ],
+    "comment": "Accepted at ICLR 2026 Workshop on Latent & Implicit Thinking - Going Beyond CoT Reasoning. 19 Pages and 5 Figures",
+    "year": "2026"
+  },
+  "2510.25741": {
+    "title": "Scaling Latent Reasoning via Looped Language Models",
+    "authors": [
+      "Rui-Jie Zhu",
+      "Zixuan Wang",
+      "Kai Hua",
+      "Tianyu Zhang",
+      "Ziniu Li",
+      "Haoran Que",
+      "Boyi Wei",
+      "Zixin Wen",
+      "Fan Yin",
+      "He Xing",
+      "Lu Li",
+      "Jiajun Shi",
+      "Kaijing Ma",
+      "Shanda Li",
+      "Taylor Kergan",
+      "Andrew Smith",
+      "Xingwei Qu",
+      "Mude Hui",
+      "Bohong Wu",
+      "Qiyang Min",
+      "Hongzhi Huang",
+      "Xun Zhou",
+      "Wei Ye",
+      "Jiaheng Liu",
+      "Jian Yang",
+      "Yunfeng Shi",
+      "Chenghua Lin",
+      "Enduo Zhao",
+      "Tianle Cai",
+      "Ge Zhang",
+      "Wenhao Huang",
+      "Yoshua Bengio",
+      "Jason Eshraghian"
+    ],
+    "comment": "",
+    "year": "2025"
+  },
+  "2505.23648": {
+    "title": "Continuous Chain of Thought Enables Parallel Exploration and Reasoning",
+    "authors": [
+      "Halil Alperen Gozeten",
+      "M. Emrullah Ildiz",
+      "Xuechen Zhang",
+      "Hrayr Harutyunyan",
+      "Ankit Singh Rawat",
+      "Samet Oymak"
+    ],
+    "comment": "ICLR 2026",
+    "year": "2025"
+  },
+  "2411.08706": {
+    "title": "Searching Latent Program Spaces",
+    "authors": [
+      "Matthew V Macfarlane",
+      "Clement Bonnet"
+    ],
+    "comment": "NeurIPS 2025 spotlight. Code available at https://github.com/clement-bonnet/lpn",
+    "year": "2024"
+  },
+  "2602.11451": {
+    "title": "LoopFormer: Elastic-Depth Looped Transformers for Latent Reasoning via Shortcut Modulation",
+    "authors": [
+      "Ahmadreza Jeddi",
+      "Marco Ciccone",
+      "Babak Taati"
+    ],
+    "comment": "ICLR2026",
+    "year": "2026"
+  },
+  "2412.21187": {
+    "title": "Do NOT Think That Much for 2+3=? On the Overthinking of o1-Like LLMs",
+    "authors": [
+      "Xingyu Chen",
+      "Jiahao Xu",
+      "Tian Liang",
+      "Zhiwei He",
+      "Jianhui Pang",
+      "Dian Yu",
+      "Linfeng Song",
+      "Qiuzhi Liu",
+      "Mengfei Zhou",
+      "Zhuosheng Zhang",
+      "Rui Wang",
+      "Zhaopeng Tu",
+      "Haitao Mi",
+      "Dong Yu"
+    ],
+    "comment": "We have updated the results of DeepSeek-R1, and all conclusions still hold",
+    "year": "2024"
+  },
+  "2404.15758": {
+    "title": "Let's Think Dot by Dot: Hidden Computation in Transformer Language Models",
+    "authors": [
+      "Jacob Pfau",
+      "William Merrill",
+      "Samuel R. Bowman"
+    ],
+    "comment": "17 pages, 10 figures",
+    "year": "2024"
+  },
+  "2509.11524": {
+    "title": "Decoding in Latent Spaces for Efficient Inference in LLM-based Recommendation",
+    "authors": [
+      "Chengbing Wang",
+      "Yang Zhang",
+      "Zhicheng Wang",
+      "Tianhao Shi",
+      "Keqin Bao",
+      "Fuli Feng",
+      "Tat-Seng Chua"
+    ],
+    "comment": "Accepted for publication in EMNLP'25",
+    "year": "2025"
+  },
+  "2506.18582": {
+    "title": "Parallel Continuous Chain-of-Thought with Jacobi Iteration",
+    "authors": [
+      "Haoyi Wu",
+      "Zhihao Teng",
+      "Kewei Tu"
+    ],
+    "comment": "Accepted to EMNLP 2025 main conference",
+    "year": "2025"
+  },
+  "2310.02226": {
+    "title": "Think before you speak: Training Language Models With Pause Tokens",
+    "authors": [
+      "Sachin Goyal",
+      "Ziwei Ji",
+      "Ankit Singh Rawat",
+      "Aditya Krishna Menon",
+      "Sanjiv Kumar",
+      "Vaishnavh Nagarajan"
+    ],
+    "comment": "Published at ICLR 2024",
+    "year": "2023"
+  },
+  "2502.21074": {
+    "title": "CODI: Compressing Chain-of-Thought into Continuous Space via Self-Distillation",
+    "authors": [
+      "Zhenyi Shen",
+      "Hanqi Yan",
+      "Linhai Zhang",
+      "Zhanghao Hu",
+      "Yali Du",
+      "Yulan He"
+    ],
+    "comment": "17 pages. Code available at https://github.com/zhenyi4/codi",
+    "year": "2025"
+  },
+  "2507.02199": {
+    "title": "Latent Chain-of-Thought? Decoding the Depth-Recurrent Transformer",
+    "authors": [
+      "Wenquan Lu",
+      "Yuechuan Yang",
+      "Kyle Lee",
+      "Yanshu Li",
+      "Enqi Liu"
+    ],
+    "comment": "First Workshop on the Application of LLM Explainability to Reasoning and Planning at COLM 2025",
+    "year": "2025"
+  },
+  "2506.08552": {
+    "title": "Efficient Post-Training Refinement of Latent Reasoning in Large Language Models",
+    "authors": [
+      "Xinyuan Wang",
+      "Dongjie Wang",
+      "Wangyang Ying",
+      "Haoyue Bai",
+      "Nanxu Gong",
+      "Sixun Dong",
+      "Kunpeng Liu",
+      "Yanjie Fu"
+    ],
+    "comment": "",
+    "year": "2025"
+  },
+  "2503.05179": {
+    "title": "Sketch-of-Thought: Efficient LLM Reasoning with Adaptive Cognitive-Inspired Sketching",
+    "authors": [
+      "Simon A. Aytes",
+      "Jinheon Baek",
+      "Sung Ju Hwang"
+    ],
+    "comment": "EMNLP 2025",
+    "year": "2025"
+  },
+  "2505.21024": {
+    "title": "Pause Tokens Strictly Increase the Expressivity of Constant-Depth Transformers",
+    "authors": [
+      "Charles London",
+      "Varun Kanade"
+    ],
+    "comment": "",
+    "year": "2025"
+  },
+  "2510.24940": {
+    "title": "SemCoT: Accelerating Chain-of-Thought Reasoning through Semantically-Aligned Implicit Tokens",
+    "authors": [
+      "Yinhan He",
+      "Wendy Zheng",
+      "Yaochen Zhu",
+      "Zaiyi Zheng",
+      "Lin Su",
+      "Sriram Vasudevan",
+      "Qi Guo",
+      "Liangjie Hong",
+      "Jundong Li"
+    ],
+    "comment": "",
+    "year": "2025"
+  },
+  "2603.06222": {
+    "title": "SPOT: Span-level Pause-of-Thought for Efficient and Interpretable Latent Reasoning in Large Language Models",
+    "authors": [
+      "Yunlong Chu",
+      "Minglai Shao",
+      "Yuhang Liu",
+      "Bing Hao",
+      "Yumeng Lin",
+      "Jialu Wang",
+      "Ruijie Wang"
+    ],
+    "comment": "",
+    "year": "2026"
+  },
+  "2501.19201": {
+    "title": "Efficient Reasoning with Hidden Thinking",
+    "authors": [
+      "Xuan Shen",
+      "Yizhou Wang",
+      "Xiangxi Shi",
+      "Yanzhi Wang",
+      "Pu Zhao",
+      "Jiuxiang Gu"
+    ],
+    "comment": "Preprint version",
+    "year": "2025"
+  },
+  "2412.17747": {
+    "title": "Deliberation in Latent Space via Differentiable Cache Augmentation",
+    "authors": [
+      "Luyang Liu",
+      "Jonas Pfeiffer",
+      "Jiaxing Wu",
+      "Jun Xie",
+      "Arthur Szlam"
+    ],
+    "comment": "",
+    "year": "2024"
+  },
+  "2510.27338": {
+    "title": "Reasoning Models Sometimes Output Illegible Chains of Thought",
+    "authors": [
+      "Arun Jose"
+    ],
+    "comment": "",
+    "year": "2025"
+  },
+  "2506.01926": {
+    "title": "Large language models can learn and generalize steganographic chain-of-thought under process supervision",
+    "authors": [
+      "Joey Skaf",
+      "Luis Ibanez-Lissen",
+      "Robert McCarthy",
+      "Connor Watts",
+      "Vasil Georgiv",
+      "Hannes Whittingham",
+      "Lorena Gonzalez-Manzano",
+      "David Lindner",
+      "Cameron Tice",
+      "Edward James Young",
+      "Puria Radmard"
+    ],
+    "comment": "10 pages main text, 3 figures main text, 17 pages supplementary material, 1 figure supplementary material, accepted at NeurIPS 2025",
+    "year": "2025"
+  },
+  "2405.15071": {
+    "title": "Grokked Transformers are Implicit Reasoners: A Mechanistic Journey to the Edge of Generalization",
+    "authors": [
+      "Boshi Wang",
+      "Xiang Yue",
+      "Yu Su",
+      "Huan Sun"
+    ],
+    "comment": "NeurIPS 2024. Code and data: https://github.com/OSU-NLP-Group/GrokkedTransformer",
+    "year": "2024"
+  },
+  "2501.19393": {
+    "title": "s1: Simple test-time scaling",
+    "authors": [
+      "Niklas Muennighoff",
+      "Zitong Yang",
+      "Weijia Shi",
+      "Xiang Lisa Li",
+      "Li Fei-Fei",
+      "Hannaneh Hajishirzi",
+      "Luke Zettlemoyer",
+      "Percy Liang",
+      "Emmanuel Cand\u00e8s",
+      "Tatsunori Hashimoto"
+    ],
+    "comment": "46 pages (9 main), 10 figures, 15 tables",
+    "year": "2025"
+  },
+  "2502.13842": {
+    "title": "Inner Thinking Transformer: Leveraging Dynamic Depth Scaling to Foster Adaptive Internal Thinking",
+    "authors": [
+      "Yilong Chen",
+      "Junyuan Shang",
+      "Zhenyu Zhang",
+      "Yanxi Xie",
+      "Jiawei Sheng",
+      "Tingwen Liu",
+      "Shuohuan Wang",
+      "Yu Sun",
+      "Hua Wu",
+      "Haifeng Wang"
+    ],
+    "comment": "15 pages, 11 figures",
+    "year": "2025"
+  },
+  "2505.24863": {
+    "title": "AlphaOne: Reasoning Models Thinking Slow and Fast at Test Time",
+    "authors": [
+      "Junyu Zhang",
+      "Runpei Dong",
+      "Han Wang",
+      "Xuying Ning",
+      "Haoran Geng",
+      "Peihao Li",
+      "Xialin He",
+      "Yutong Bai",
+      "Jitendra Malik",
+      "Saurabh Gupta",
+      "Huan Zhang"
+    ],
+    "comment": "",
+    "year": "2025"
+  },
+  "2510.04128": {
+    "title": "Internal states before wait modulate reasoning patterns",
+    "authors": [
+      "Dmitrii Troitskii",
+      "Koyena Pal",
+      "Chris Wendler",
+      "Callum Stuart McDougall",
+      "Neel Nanda"
+    ],
+    "comment": "Accepted to EMNLP Findings 2025",
+    "year": "2025"
+  },
+  "2507.08806": {
+    "title": "Think Clearly: Improving Reasoning via Redundant Token Pruning",
+    "authors": [
+      "Daewon Choi",
+      "Jimin Lee",
+      "Jihoon Tack",
+      "Woomin Song",
+      "Saket Dingliwal",
+      "Sai Muralidhar Jayanthi",
+      "Bhavana Ganesh",
+      "Jinwoo Shin",
+      "Aram Galstyan",
+      "Sravan Babu Bodapati"
+    ],
+    "comment": "",
+    "year": "2025"
+  }
+}
