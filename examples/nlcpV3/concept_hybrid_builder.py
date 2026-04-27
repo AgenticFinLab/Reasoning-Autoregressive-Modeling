@@ -53,18 +53,14 @@ ENCODER INTEGRATION (hybrid-analysis.md Section 1.2):
     is computed as: Q + back_proj(concepts) → reason_model → solution logits.
 
     Usage:
-        from nlcpV3.config import NLCPV3Config
+        config = load_config("path/to/config.yml")  # Raw dict
 
-        config = NLCPV3Config(
-            reason_model_name="Qwen/Qwen2.5-0.5B",
-            reason_model_freeze=False,  # Set True to freeze backbone
-            ...
-        )
         builder = ConceptPyramidBuilder(config)
         # Reason model + tokenizer are created internally
         # builder.reason_model_hidden_dim is derived from the loaded model
 
-        # Stage 1: Encode CoT → EncoderOutput (requires pre-tokenized input_ids)
+        # Stage 1: Encode CoT → EncoderOutput (accepts text or tokens)
+        enc_out = builder.encode_cot(cot_texts)  # auto-tokenize
         enc_out = builder.encode_cot(cot_input_ids, attention_mask=cot_mask)
         # enc_out.hidden_states: [B, L, D_encoder]
 
@@ -98,16 +94,21 @@ REFERENCES:
 """
 
 import math
+import warnings
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import List, Optional, Union
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from nlcpV3.config import NLCPV3Config
-from nlcpV3.data_loader import BuilderInput
+try:
+    from peft import LoraConfig, get_peft_model
+
+    _PEFT_AVAILABLE = True
+except ImportError:
+    _PEFT_AVAILABLE = False
 
 
 # =========================================================================
@@ -143,12 +144,15 @@ class EncoderOutput:
 
     DIMENSION FLOW:
         hidden_states: [B, L, D_encoder] — last layer hidden states
+        attention_mask: [B, L] — 1=valid, 0=pad (optional)
 
     Attributes:
         hidden_states: Encoder hidden states [B, L, D_encoder]
+        attention_mask: Token validity mask [B, L] (optional)
     """
 
     hidden_states: torch.Tensor  # [B, L, D_encoder] — H_CoT
+    attention_mask: Optional[torch.Tensor] = None  # [B, L]
 
 
 @dataclass
@@ -236,12 +240,8 @@ class PyramidOutput:
             exact decomposition (Section 2.1).
         num_levels: Number of levels K
         level_lengths: Concepts per level [L_0, L_1, ..., L_{K-1}]
-        q_input_ids: Question token IDs stored from BuilderInput [B, L_Q]
-            Used by compute_reasoning_loss() for NTP / reasoning loss.
-        q_attention_mask: Question attention mask [B, L_Q]
-        solution_input_ids: Solution token IDs stored from BuilderInput [B, L_Sol]
-            Used by compute_reasoning_loss() as NTP target.
-        solution_attention_mask: Solution attention mask [B, L_Sol]
+        attention_mask: Optional mask [B, L] for loss computation.
+            1=valid token, 0=pad. Passed through from forward() input.
     """
 
     concepts: List[torch.Tensor]  # [C_0, ..., C_{K-1}], each [B, L_k, D]
@@ -251,11 +251,7 @@ class PyramidOutput:
     residual_hidden: torch.Tensor  # [B, L, D] — f_rest_K
     num_levels: int  # K
     level_lengths: List[int]  # [L_0, L_1, ..., L_{K-1}]
-    # NEW: Q and Solution tokens from BuilderInput, carried for reasoning loss
-    q_input_ids: Optional[torch.Tensor] = None  # [B, L_Q]
-    q_attention_mask: Optional[torch.Tensor] = None  # [B, L_Q]
-    solution_input_ids: Optional[torch.Tensor] = None  # [B, L_Sol]
-    solution_attention_mask: Optional[torch.Tensor] = None  # [B, L_Sol]
+    attention_mask: Optional[torch.Tensor] = None  # [B, L]
 
     @property
     def total_concepts(self) -> int:
@@ -371,7 +367,7 @@ class ConceptPyramidBuilder(nn.Module):
 
     def __init__(
         self,
-        config: NLCPV3Config,
+        config: dict,
     ):
         """Initialize Concept Pyramid Builder.
 
@@ -390,21 +386,26 @@ class ConceptPyramidBuilder(nn.Module):
         METHOD:
             - Load pretrained reason_model via AutoModelForCausalLM
             - Load paired tokenizer via AutoTokenizer.from_pretrained()
-            - Optionally freeze reason_model via config.reason_model_freeze
+            - Optionally freeze reason_model via self.reason_cfg["reason_model_freeze"]
             - Derive reason_model_hidden_dim from model config
             - Construct projection, queries, attention layers
 
         Args:
-            config: NLCPV3Config with hyperparameters.
-                Uses config.reason_model_name to load the model.
-                Uses config.reason_model_freeze to control freezing.
-                Uses config.reason_model_num_layers for layer pruning.
-                Uses config.reason_model_lora for optional LoRA adaptation.
-                Uses config.use_positional_query_init for query init mode.
+            config: Raw config dict with hyperparameters.
+                Caches sub-configs: reason_cfg, pyramid_cfg, builder_cfg.
+                Uses reason_cfg["reason_model_name"] to load the model.
+                Uses reason_cfg["reason_model_freeze"] to control freezing.
+                Uses reason_cfg["reason_model_num_layers"] for layer pruning.
+                Uses reason_cfg["reason_model_lora"] for optional LoRA adaptation.
+                Uses builder_cfg["use_positional_query_init"] for query init mode.
         """
         super().__init__()
         self.config = config
-        self.use_positional_query_init = config.use_positional_query_init
+        # Cache sub-configs to eliminate repeated deep dict lookups
+        self.reason_cfg = config["model"]["reason_model"]
+        self.pyramid_cfg = config["model"]["pyramid"]
+        self.builder_cfg = config["model"]["builder"]
+        self.use_positional_query_init = self.builder_cfg["use_positional_query_init"]
 
         # =================================================================
         # Component 0: Reason Model (decoder-only Transformer + lm_head)
@@ -416,7 +417,7 @@ class ConceptPyramidBuilder(nn.Module):
         #       The lm_head enables NTP / reasoning loss on solution tokens.
         # This is why we load AutoModelForCausalLM instead of AutoModel.
         self.reason_model, self.tokenizer, self.reason_model_hidden_dim = (
-            self._init_reason_model(config)
+            self._init_reason_model(self.reason_cfg)
         )
 
         # =================================================================
@@ -435,8 +436,10 @@ class ConceptPyramidBuilder(nn.Module):
         # METHOD: Linear layer [D_reason → D] followed by LayerNorm(D).
         #   Input:  [B, L, D_reason]
         #   Output: [B, L, D] (normalized to mean=0, std≈1 per token)
-        self.input_proj = nn.Linear(self.reason_model_hidden_dim, config.hidden_dim)
-        self.input_proj_norm = nn.LayerNorm(config.hidden_dim)
+        self.input_proj = nn.Linear(
+            self.reason_model_hidden_dim, self.pyramid_cfg["hidden_dim"]
+        )
+        self.input_proj_norm = nn.LayerNorm(self.pyramid_cfg["hidden_dim"])
 
         # =================================================================
         # Component 2: Learnable Concept Queries (Query Expansion)
@@ -451,8 +454,8 @@ class ConceptPyramidBuilder(nn.Module):
         #   Level 0: [1, D], Level 1: [2, D], ..., Level 5: [32, D]
         self.concept_queries = nn.ParameterList(
             [
-                nn.Parameter(torch.randn(length, config.hidden_dim))
-                for length in config.level_lengths
+                nn.Parameter(torch.randn(length, self.pyramid_cfg["hidden_dim"]))
+                for length in self.pyramid_cfg["level_lengths"]
             ]
         )
 
@@ -479,8 +482,11 @@ class ConceptPyramidBuilder(nn.Module):
         #   Output: C_k_base → [B, L_k, D] (base concept)
         self.level_projs = nn.ModuleList(
             [
-                nn.Linear(config.hidden_dim, config.hidden_dim)
-                for _ in range(config.num_levels)
+                nn.Linear(
+                    self.pyramid_cfg["hidden_dim"],
+                    self.pyramid_cfg["hidden_dim"],
+                )
+                for _ in range(self.pyramid_cfg["num_levels"])
             ]
         )
 
@@ -502,11 +508,11 @@ class ConceptPyramidBuilder(nn.Module):
         self.level_attn = nn.ModuleList(
             [
                 nn.MultiheadAttention(
-                    embed_dim=config.hidden_dim,
-                    num_heads=config.num_heads,
+                    embed_dim=self.pyramid_cfg["hidden_dim"],
+                    num_heads=self.pyramid_cfg["num_heads"],
                     batch_first=True,
                 )
-                for _ in range(config.num_levels)
+                for _ in range(self.pyramid_cfg["num_levels"])
             ]
         )
 
@@ -538,9 +544,11 @@ class ConceptPyramidBuilder(nn.Module):
         # DIMENSION FLOW:
         #   Input:  concepts [B, total_C, D]
         #   Output: concept_embeds [B, total_C, D_encoder]
-        if config.use_reasoning_loss:
+        if self.builder_cfg["use_reasoning_loss"]:
             self.back_proj = nn.Linear(
-                config.hidden_dim, self.reason_model_hidden_dim, bias=False
+                self.pyramid_cfg["hidden_dim"],
+                self.reason_model_hidden_dim,
+                bias=False,
             )
         else:
             self.back_proj = None
@@ -551,7 +559,7 @@ class ConceptPyramidBuilder(nn.Module):
     # Model Initialization Methods
     # =====================================================================
 
-    def _init_reason_model(self, config: NLCPV3Config) -> tuple:
+    def _init_reason_model(self, reason_cfg: dict) -> tuple:
         """Initialize reason_model (backbone + lm_head), tokenizer, and hidden_dim.
 
         PRINCIPLE (hybrid-analysis.md Section 1.2):
@@ -580,19 +588,21 @@ class ConceptPyramidBuilder(nn.Module):
             - This avoids maintaining a separate solution_decoder copy
 
         Args:
-            config: NLCPV3Config with reason_model_* parameters.
+            reason_cfg: Sub-config dict under config["model"]["reason_model"].
 
         Returns:
             Tuple of (reason_model, tokenizer, hidden_dim)
         """
         # Step 1: Load pretrained model with lm_head
         # AutoModelForCausalLM = backbone (Qwen2Model) + lm_head
-        reason_model = AutoModelForCausalLM.from_pretrained(config.reason_model_name)
+        reason_model = AutoModelForCausalLM.from_pretrained(
+            reason_cfg["reason_model_name"]
+        )
         # hidden_dim: D_reason (e.g., 896 for Qwen2.5-0.5B)
         hidden_dim = reason_model.config.hidden_size
 
         # Step 2: Load paired tokenizer
-        tokenizer = AutoTokenizer.from_pretrained(config.reason_model_name)
+        tokenizer = AutoTokenizer.from_pretrained(reason_cfg["reason_model_name"])
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
 
@@ -601,22 +611,18 @@ class ConceptPyramidBuilder(nn.Module):
         #   LoRA adapters are small trainable matrices injected into
         #   target linear layers (e.g., q_proj, v_proj), allowing the
         #   base model weights to remain frozen while still adapting.
-        if config.reason_model_lora is not None:
-            try:
-                from peft import LoraConfig, get_peft_model
-            except ImportError as exc:
+        if reason_cfg["reason_model_lora"] is not None:
+            if not _PEFT_AVAILABLE:
                 raise ImportError(
                     "PEFT library is required for LoRA fine-tuning. "
                     "Install with: pip install peft"
-                ) from exc
+                )
             lora_cfg = LoraConfig(
-                r=config.reason_model_lora.get("r", 8),
-                lora_alpha=config.reason_model_lora.get("lora_alpha", 16),
-                target_modules=config.reason_model_lora.get(
-                    "target_modules", ["q_proj", "v_proj"]
-                ),
-                lora_dropout=config.reason_model_lora.get("lora_dropout", 0.05),
-                bias=config.reason_model_lora.get("bias", "none"),
+                r=reason_cfg["reason_model_lora"]["r"],
+                lora_alpha=reason_cfg["reason_model_lora"]["lora_alpha"],
+                target_modules=reason_cfg["reason_model_lora"]["target_modules"],
+                lora_dropout=reason_cfg["reason_model_lora"]["lora_dropout"],
+                bias=reason_cfg["reason_model_lora"]["bias"],
             )
             reason_model = get_peft_model(reason_model, lora_cfg)
             # NOTE: LoRA adapters are trainable regardless of freeze setting.
@@ -627,11 +633,11 @@ class ConceptPyramidBuilder(nn.Module):
         #   and only the Builder's own parameters (and LoRA if any) are trained.
         #   When False, the backbone adapts its representations for
         #   optimal concept extraction end-to-end.
-        if config.reason_model_freeze:
+        if reason_cfg["reason_model_freeze"]:
             for param in reason_model.parameters():
                 param.requires_grad = False
             # If LoRA is applied, re-enable LoRA adapter gradients
-            if config.reason_model_lora is not None:
+            if reason_cfg["reason_model_lora"] is not None:
                 reason_model.enable_adapter_layers()
                 for name, param in reason_model.named_parameters():
                     if "lora_" in name:
@@ -644,7 +650,7 @@ class ConceptPyramidBuilder(nn.Module):
         # Layer access paths for AutoModelForCausalLM:
         #   Plain:         reason_model.model.layers
         #   PEFT-wrapped:  reason_model.base_model.model.layers
-        if config.reason_model_num_layers > 0:
+        if reason_cfg["reason_model_num_layers"] > 0:
             layers_pruned = False
             # Try all known access paths for the transformer layers
             for obj in [
@@ -653,16 +659,14 @@ class ConceptPyramidBuilder(nn.Module):
                 getattr(getattr(reason_model, "base_model", None), "model", None),
             ]:
                 if obj is not None and hasattr(obj, "layers"):
-                    if config.reason_model_num_layers < len(obj.layers):
-                        obj.layers = obj.layers[: config.reason_model_num_layers]
+                    if reason_cfg["reason_model_num_layers"] < len(obj.layers):
+                        obj.layers = obj.layers[: reason_cfg["reason_model_num_layers"]]
                         layers_pruned = True
                         break
             if not layers_pruned:
-                import warnings
-
                 warnings.warn(
                     f"Could not find layers to prune in {type(reason_model).__name__}. "
-                    f"Requested {config.reason_model_num_layers} layers."
+                    f"Requested {reason_cfg['reason_model_num_layers']} layers."
                 )
 
         return reason_model, tokenizer, hidden_dim
@@ -725,7 +729,7 @@ class ConceptPyramidBuilder(nn.Module):
         # Concept queries: positional or random initialization
         if self.use_positional_query_init:
             # Section 6.2: Q_{k,j} = xavier_uniform(j, D) + α × PE(j / L_k)
-            positional_init_alpha = 0.5  # α: signal strength
+            positional_init_alpha = self.builder_cfg["positional_init_alpha"]
 
             for level_idx, queries in enumerate(self.concept_queries):
                 L_k = queries.shape[0]  # Number of queries at this level
@@ -775,8 +779,9 @@ class ConceptPyramidBuilder(nn.Module):
 
     def encode_cot(
         self,
-        input_ids: torch.Tensor,
+        inputs: Union[List[str], torch.Tensor],
         attention_mask: Optional[torch.Tensor] = None,
+        max_length: Optional[int] = None,
     ) -> EncoderOutput:
         """Encode CoT using the reason_model's Transformer backbone.
 
@@ -787,29 +792,49 @@ class ConceptPyramidBuilder(nn.Module):
             later for NTP / reasoning loss on solution tokens.
 
         PURPOSE:
-            Extract token-level features from CoT input_ids.
-            Tokenization is handled by forward() — this method only
-            accepts pre-tokenized input_ids.
+            Extract token-level features from CoT. Accepts either raw text
+            (auto-tokenized internally) or pre-tokenized tensors.
 
         METHOD:
+            - If inputs is List[str]: auto-tokenize via self.tokenizer
+            - If inputs is torch.Tensor: use directly as token IDs
             - Forward through reason_model.model (backbone only)
             - Extract last hidden state as H_CoT
 
         DIMENSION FLOW:
-            Input:  input_ids [B, L] (token IDs)
+            Input:  texts [B] (strings)  OR  input_ids [B, L] (token IDs)
                     attention_mask [B, L] (optional, 0=pad, 1=valid)
             Output: EncoderOutput with hidden_states [B, L, D_reason]
 
         Args:
-            input_ids: Token ID tensor [B, L].
-            attention_mask: Attention mask [B, L] (optional).
+            inputs: Either a list of text strings or token ID tensor [B, L]
+            attention_mask: Attention mask [B, L] (optional, used when
+                inputs is a tensor). Ignored when inputs is text.
+            max_length: Max sequence length for auto-tokenization (used
+                when inputs is text). Defaults to self.pyramid_cfg["max_seq_len"].
 
         Returns:
             EncoderOutput with hidden_states: [B, L, D_reason]
         """
-        # Move attention_mask to same device as input_ids
-        if attention_mask is not None:
-            attention_mask = attention_mask.to(input_ids.device)
+        # Auto-tokenize if text strings are provided
+        if isinstance(inputs, list) and len(inputs) > 0 and isinstance(inputs[0], str):
+            if max_length is None:
+                max_length = self.pyramid_cfg["max_seq_len"]
+            tokens = self.tokenizer(
+                inputs,
+                return_tensors="pt",
+                padding=True,
+                truncation=True,
+                max_length=max_length,
+            )
+            input_ids = tokens["input_ids"].to(
+                next(self.reason_model.parameters()).device
+            )
+            attention_mask = tokens["attention_mask"].to(input_ids.device)
+        else:
+            input_ids = inputs  # [B, L]
+            if attention_mask is not None:
+                attention_mask = attention_mask.to(input_ids.device)
 
         # Forward through backbone only (NOT the full AutoModelForCausalLM)
         # reason_model is AutoModelForCausalLM = model (backbone) + lm_head
@@ -829,11 +854,17 @@ class ConceptPyramidBuilder(nn.Module):
         else:
             hidden = outputs[0]  # [B, L, D_reason]
 
-        return EncoderOutput(hidden_states=hidden)  # [B, L, D_reason]
+        return EncoderOutput(
+            hidden_states=hidden,  # [B, L, D_reason]
+            attention_mask=attention_mask,  # [B, L]
+        )
 
     def compute_reasoning_loss(
         self,
         pyramid: PyramidOutput,
+        question_ids: torch.Tensor,
+        question_attention_mask: torch.Tensor,
+        solution_ids: torch.Tensor,
     ) -> torch.Tensor:
         """Compute NTP / reasoning loss: Q + concept pyramid → solution.
 
@@ -857,9 +888,10 @@ class ConceptPyramidBuilder(nn.Module):
             the correct solution is useless.
 
         Args:
-            pyramid: PyramidOutput from forward(). Must have q_input_ids,
-                q_attention_mask, solution_input_ids populated (automatically
-                set when forward() receives a BuilderInput with these fields).
+            pyramid: PyramidOutput from forward()
+            question_ids: Token IDs for the question [B, L_Q]
+            question_attention_mask: Attention mask for question [B, L_Q]
+            solution_ids: Token IDs for the solution (target) [B, L_S]
 
         Returns:
             Scalar NTP loss (cross-entropy on solution tokens)
@@ -867,16 +899,6 @@ class ConceptPyramidBuilder(nn.Module):
         assert (
             self.back_proj is not None
         ), "back_proj is None — set use_reasoning_loss=True in config"
-        assert (
-            pyramid.q_input_ids is not None
-        ), "pyramid.q_input_ids is None — forward() must receive BuilderInput with questions"
-        assert (
-            pyramid.solution_input_ids is not None
-        ), "pyramid.solution_input_ids is None — forward() must receive BuilderInput with solutions"
-
-        question_ids = pyramid.q_input_ids
-        question_attention_mask = pyramid.q_attention_mask
-        solution_ids = pyramid.solution_input_ids
 
         device = question_ids.device
         batch_size = question_ids.shape[0]
@@ -942,90 +964,10 @@ class ConceptPyramidBuilder(nn.Module):
 
     def forward(
         self,
-        inputs: BuilderInput,
-    ) -> PyramidOutput:
-        """Build concept pyramid from structured Q/CoT/Solution text input.
-
-        PRINCIPLE:
-            The Builder's forward() receives RAW TEXT for Q, CoT, and Solution
-            and handles ALL internal processing including tokenization:
-            (1) Tokenize CoT text → encode_cot() → H_CoT
-            (2) Project H_CoT to concept dimension → H_proj
-            (3) Build concept pyramid via residual decomposition
-            (4) Tokenize Q and Solution → attach to PyramidOutput
-
-        PURPOSE:
-            This is the MAIN entry point for training. The caller (e.g.,
-            train_builder.py) only provides raw text — all tokenization,
-            encoding, and pyramid building happens internally.
-
-        DIMENSION FLOW:
-            Input:  BuilderInput with:
-                      questions [B] (text strings)
-                      cot_answers [B] (text strings)
-                      solutions [B] (text strings, optional)
-            Step 1: tokenizer(cot_answers) → encode_cot() → H_CoT [B, L, D_encoder]
-            Step 2: _build_pyramid_from_hidden_states(H_CoT) → PyramidOutput
-            Step 3: tokenizer(questions) → attach q_input_ids to PyramidOutput
-            Step 4: tokenizer(solutions) → attach solution_input_ids to PyramidOutput
-            Output: PyramidOutput with concepts + q_input_ids + solution_input_ids
-
-        Args:
-            inputs: BuilderInput with raw text for Q, CoT, Solution.
-
-        Returns:
-            PyramidOutput containing concepts, level_outputs, and Q/Solution tokens.
-        """
-        # Determine device from model parameters
-        device = next(self.reason_model.parameters()).device
-
-        # Step 1: Tokenize CoT text and encode through reason_model backbone
-        cot_tokens = self.tokenizer(
-            inputs.cot_answers,
-            return_tensors="pt",
-            padding=True,
-            truncation=True,
-            max_length=self.config.max_seq_len,
-        )
-        enc_out = self.encode_cot(
-            cot_tokens["input_ids"].to(device),
-            attention_mask=cot_tokens["attention_mask"].to(device),
-        )
-        # enc_out.hidden_states: [B, L_CoT, D_encoder]
-
-        # Step 2: Build pyramid from encoded CoT hidden states
-        pyramid = self._build_pyramid_from_hidden_states(enc_out.hidden_states)
-
-        # Step 3: Tokenize Q and attach to PyramidOutput for reasoning loss
-        q_tokens = self.tokenizer(
-            inputs.questions,
-            return_tensors="pt",
-            padding=True,
-            truncation=True,
-            max_length=self.config.max_seq_len,
-        )
-        pyramid.q_input_ids = q_tokens["input_ids"].to(device)
-        pyramid.q_attention_mask = q_tokens["attention_mask"].to(device)
-
-        # Step 4: Tokenize Solution and attach to PyramidOutput (if provided)
-        if inputs.has_solution:
-            sol_tokens = self.tokenizer(
-                inputs.solutions,
-                return_tensors="pt",
-                padding=True,
-                truncation=True,
-                max_length=self.config.max_seq_len,
-            )
-            pyramid.solution_input_ids = sol_tokens["input_ids"].to(device)
-            pyramid.solution_attention_mask = sol_tokens["attention_mask"].to(device)
-
-        return pyramid
-
-    def _build_pyramid_from_hidden_states(
-        self,
         encoder_hidden_states: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
     ) -> PyramidOutput:
-        """Build concept pyramid from pre-computed CoT hidden states.
+        """Build concept pyramid from CoT hidden states (all levels).
 
         PRINCIPLE (hybrid-analysis.md Section 4.1):
             The Builder extracts groundtruth concepts level by level using
@@ -1036,14 +978,34 @@ class ConceptPyramidBuilder(nn.Module):
             (4) Updates residual: H_rest_{k+1} = H_rest_k - R_k
 
         PURPOSE:
-            Core pyramid-building logic. Used by forward() after CoT encoding.
-            Can also be called directly with pre-computed hidden states.
+            Extract all K levels of concepts in one forward pass.
+            Used during training to build groundtruth concept pyramids.
+
+        METHOD:
+            Iterate k=0..K-1, applying soft attention + residual flow
+            + cross-attention refinement at each level. Collect all
+            per-level data into LevelOutput objects, wrap into PyramidOutput.
+
+        DIMENSION FLOW:
+            Input:  encoder_hidden_states [B, L, D_encoder]
+                    attention_mask [B, L] (optional, 1=valid, 0=pad)
+            Output: PyramidOutput with concepts, level_outputs, etc.
 
         Args:
             encoder_hidden_states: CoT hidden states [B, L, D_encoder]
+                from self.reason_model or pre-computed via encode_cot()
+            attention_mask: Optional mask [B, L] where 1=valid token, 0=pad.
+                When provided, padded positions are excluded from attention
+                and reconstruction loss computation.
 
         Returns:
-            PyramidOutput without Q/Solution fields (added by forward()).
+            PyramidOutput containing:
+                concepts: [C_0, ..., C_{K-1}], each [B, L_k, D]
+                level_outputs: [LevelOutput_0, ..., LevelOutput_{K-1}]
+                projected_hidden: [B, L, D]
+                reconstructed_hidden: [B, L, D]
+                residual_hidden: [B, L, D]
+                attention_mask: [B, L] (passed through for loss masking)
         """
         batch_size, seq_len, _ = encoder_hidden_states.shape
         # batch_size: B, seq_len: L, _: D_encoder
@@ -1086,7 +1048,7 @@ class ConceptPyramidBuilder(nn.Module):
         #     C_k_base → enters f_rest (commit path)
         #     refined_k → does NOT enter f_rest (refinement path)
         #     R_k = A_k^T @ C_k_base — only base reconstructs
-        for level_idx in range(self.config.num_levels):
+        for level_idx in range(self.pyramid_cfg["num_levels"]):
             # level_idx: k ∈ {0, 1, ..., K-1}
 
             # ── 3a: Get learnable queries for this level ──────────────
@@ -1111,12 +1073,24 @@ class ConceptPyramidBuilder(nn.Module):
             # attention_scores: [B, L_k, L]
 
             attention_scores = attention_scores / (
-                math.sqrt(self.config.hidden_dim) * self.temperature
+                math.sqrt(self.pyramid_cfg["hidden_dim"]) * self.temperature
             )
             # attention_scores: [B, L_k, L] — scaled by √D × τ
 
+            # Mask padded positions before softmax so concepts don't attend to them
+            if attention_mask is not None:
+                # attention_mask: [B, L] → [B, 1, L] for broadcasting
+                mask = attention_mask.unsqueeze(1)
+                attention_scores = attention_scores.masked_fill(
+                    mask == 0, float("-inf")
+                )
+
             level_attention = F.softmax(attention_scores, dim=-1)
             # level_attention: [B, L_k, L] — A_k, attention weights
+            # NaN check: if a concept has no valid positions to attend to,
+            # softmax of all -inf produces NaN. Replace with zeros.
+            if attention_mask is not None:
+                level_attention = torch.nan_to_num(level_attention, nan=0.0)
 
             # ── 3c: Extract BASE concepts (commit path) ──────────────
             # PRINCIPLE (Section 2.3, Commit-Refinement Separation):
@@ -1209,8 +1183,11 @@ class ConceptPyramidBuilder(nn.Module):
             projected_hidden=projected_hidden,  # [B, L, D] — H_proj
             reconstructed_hidden=reconstructed_accumulator,  # [B, L, D] — f_hat_K
             residual_hidden=residual_hidden,  # [B, L, D] — f_rest_K
-            num_levels=self.config.num_levels,  # K
-            level_lengths=list(self.config.level_lengths),  # [L_0, ..., L_{K-1}]
+            num_levels=self.pyramid_cfg["num_levels"],  # K
+            level_lengths=list(
+                self.pyramid_cfg["level_lengths"]
+            ),  # [L_0, ..., L_{K-1}]
+            attention_mask=attention_mask,  # [B, L] (optional)
         )
 
     def forward_next_level(
@@ -1319,7 +1296,7 @@ class ConceptPyramidBuilder(nn.Module):
         # attention_scores: [B, L_k, L]
 
         attention_scores = attention_scores / (
-            math.sqrt(self.config.hidden_dim) * self.temperature
+            math.sqrt(self.pyramid_cfg["hidden_dim"]) * self.temperature
         )
         # attention_scores: [B, L_k, L] — scaled
 
@@ -1394,29 +1371,3 @@ class ConceptPyramidBuilder(nn.Module):
         """
         self._cached_attentions = []
         self._cached_base_concepts = []
-
-    def get_level_config(self, level_idx: int) -> Dict[str, Any]:
-        """Get configuration for a specific level.
-
-        PURPOSE: Provide level metadata for external use.
-
-        Args:
-            level_idx: Level index k ∈ {0, ..., K-1}
-
-        Returns:
-            Dictionary with level configuration
-        """
-        return {
-            "level_idx": level_idx,
-            "num_concepts": self.config.level_lengths[level_idx],  # L_k
-            "hidden_dim": self.config.hidden_dim,  # D
-            "query_shape": tuple(self.concept_queries[level_idx].shape),  # (L_k, D)
-        }
-
-    def get_total_concepts(self) -> int:
-        """Get total number of concepts across all levels.
-
-        PRINCIPLE (hybrid-analysis.md Section 1.1):
-            Total = Σ_{k=0}^{K-1} L_k = 1+2+4+8+16+32 = 63 (for K=6)
-        """
-        return sum(self.config.level_lengths)

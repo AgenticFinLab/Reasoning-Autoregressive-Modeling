@@ -65,7 +65,6 @@ sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(EXAMPLES_DIR))
 
 from lmbase.dataset import registry
-from nlcpV3.config import NLCPV3Config
 from nlcpV3.encoder import NLCPV3Encoder
 from nlcpV3.concept_generator import (
     BaseConceptGenerator,
@@ -93,46 +92,12 @@ from ram.utils import load_config
 # =============================================================================
 
 
-def build_nlcpV3_config(config: dict) -> NLCPV3Config:
-    """Build NLCPV3Config from YAML configuration.
-
-    Args:
-        config: Configuration dictionary from YAML file
-
-    Returns:
-        NLCPV3Config instance
-    """
-    model_cfg = config["model"]
-    encoder_cfg = model_cfg["encoder"]
-    pyramid_cfg = model_cfg["pyramid"]
-    decoder_cfg = model_cfg["decoder"]
-    loss_cfg = model_cfg["loss_weights"]
-
-    return NLCPV3Config(
-        hidden_dim=pyramid_cfg["hidden_dim"],
-        num_heads=pyramid_cfg["num_heads"],
-        vocab_size=decoder_cfg["vocab_size"],
-        num_levels=pyramid_cfg["num_levels"],
-        level_lengths=pyramid_cfg["level_lengths"],
-        max_seq_len=pyramid_cfg["max_seq_len"],
-        dropout=decoder_cfg["dropout"],
-        rms_norm_eps=decoder_cfg["rms_norm_eps"],
-        encoder_model_name=encoder_cfg["encoder_model_name"],
-        encoder_num_layers=encoder_cfg["encoder_num_layers"],
-        encoder_freeze=encoder_cfg["encoder_freeze"],
-        ntp_loss_weight=loss_cfg["ntp_loss_weight"],
-        concept_loss_weight=loss_cfg["concept_loss_weight"],
-        recon_loss_weight=loss_cfg["recon_loss_weight"],
-        muP_scale=decoder_cfg["muP_scale"],
-    )
-
-
 # =============================================================================
 # Data Loading
 # =============================================================================
 
 
-def load_gsm8k_batch(config: dict, nlcp_config: NLCPV3Config) -> Dict[str, Any]:
+def load_gsm8k_batch(config: dict) -> Dict[str, Any]:
     """Load GSM8K batch and encode to hidden states.
 
     PURPOSE:
@@ -187,13 +152,15 @@ def load_gsm8k_batch(config: dict, nlcp_config: NLCPV3Config) -> Dict[str, Any]:
         f"Question: {q}\nReasoning: {c}" for q, c in zip(questions, cot_texts)
     ]
 
-    tokenizer = AutoTokenizer.from_pretrained(nlcp_config.encoder_model_name)
+    tokenizer = AutoTokenizer.from_pretrained(
+        config["model"]["encoder"]["encoder_model_name"]
+    )
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
     encoded = tokenizer(
         full_texts,
-        max_length=nlcp_config.max_seq_len,
+        max_length=config["model"]["pyramid"]["max_seq_len"],
         padding="max_length",
         truncation=True,
         return_tensors="pt",
@@ -205,7 +172,7 @@ def load_gsm8k_batch(config: dict, nlcp_config: NLCPV3Config) -> Dict[str, Any]:
     print(f"  Tokenized shape: {list(input_ids.shape)}")
 
     # Encode to hidden states
-    encoder = NLCPV3Encoder(nlcp_config)
+    encoder = NLCPV3Encoder(config)
     encoder.eval()
 
     with torch.no_grad():
@@ -230,7 +197,7 @@ def load_gsm8k_batch(config: dict, nlcp_config: NLCPV3Config) -> Dict[str, Any]:
 def test_concept_generator(
     generator_class: Type[nn.Module],
     generator_name: str,
-    nlcp_config: NLCPV3Config,
+    config: dict,
     encoder_hidden_states: torch.Tensor,
     test_single_level: bool = True,
 ) -> Dict[str, Any]:
@@ -245,7 +212,7 @@ def test_concept_generator(
     Args:
         generator_class: The generator class to test
         generator_name: Human-readable name for logging
-        nlcp_config: Configuration
+        config: Raw YAML config dict
         encoder_hidden_states: Input hidden states [B, L, D_encoder]
         test_single_level: Whether to test single-level inference mode
 
@@ -270,7 +237,7 @@ def test_concept_generator(
 
     # Instantiate generator
     try:
-        generator = generator_class(nlcp_config, encoder_hidden_dim)
+        generator = generator_class(config, encoder_hidden_dim)
         generator.eval()
     except TypeError as e:
         if "abstract method" in str(e):
@@ -302,14 +269,18 @@ def test_concept_generator(
         all_level_concepts, list
     ), f"Expected list, got {type(all_level_concepts)}"
     assert (
-        len(all_level_concepts) == nlcp_config.num_levels
-    ), f"Expected {nlcp_config.num_levels} levels, got {len(all_level_concepts)}"
+        len(all_level_concepts) == config["model"]["pyramid"]["num_levels"]
+    ), f"Expected {config["model"]["pyramid"]["num_levels"]} levels, got {len(all_level_concepts)}"
 
     print(f"      ✓ Generated {len(all_level_concepts)} levels")
 
     for level_idx, level_concepts in enumerate(all_level_concepts):
-        expected_num_concepts = nlcp_config.level_lengths[level_idx]
-        expected_shape = (batch_size, expected_num_concepts, nlcp_config.hidden_dim)
+        expected_num_concepts = config["model"]["pyramid"]["level_lengths"][level_idx]
+        expected_shape = (
+            batch_size,
+            expected_num_concepts,
+            config["model"]["pyramid"]["hidden_dim"],
+        )
         actual_shape = tuple(level_concepts.shape)
 
         assert (
@@ -344,8 +315,8 @@ def test_concept_generator(
 
         expected_shape = (
             batch_size,
-            nlcp_config.level_lengths[0],
-            nlcp_config.hidden_dim,
+            config["model"]["pyramid"]["level_lengths"][0],
+            config["model"]["pyramid"]["hidden_dim"],
         )
         assert (
             tuple(level_0.shape) == expected_shape
@@ -362,8 +333,8 @@ def test_concept_generator(
 
         expected_shape = (
             batch_size,
-            nlcp_config.level_lengths[1],
-            nlcp_config.hidden_dim,
+            config["model"]["pyramid"]["level_lengths"][1],
+            config["model"]["pyramid"]["hidden_dim"],
         )
         assert (
             tuple(level_1.shape) == expected_shape
@@ -389,8 +360,8 @@ def test_concept_generator(
 
         expected_shape = (
             batch_size,
-            nlcp_config.level_lengths[0],
-            nlcp_config.hidden_dim,
+            config["model"]["pyramid"]["level_lengths"][0],
+            config["model"]["pyramid"]["hidden_dim"],
         )
         assert (
             tuple(level_0_direct.shape) == expected_shape
@@ -414,7 +385,7 @@ def test_concept_generator(
 
 
 def test_basic_training_extractors(
-    nlcp_config: NLCPV3Config,
+    config: dict,
     encoder_hidden_states: torch.Tensor,
 ) -> List[Dict[str, Any]]:
     """Test all 6 basic training extractors.
@@ -450,7 +421,7 @@ def test_basic_training_extractors(
     for extractor_class, name in basic_extractors:
         try:
             result = test_concept_generator(
-                extractor_class, name, nlcp_config, encoder_hidden_states
+                extractor_class, name, config, encoder_hidden_states
             )
             results.append(result)
         except Exception as e:
@@ -467,7 +438,7 @@ def test_basic_training_extractors(
 
 
 def test_advanced_causal_extractors(
-    nlcp_config: NLCPV3Config,
+    config: dict,
     encoder_hidden_states: torch.Tensor,
 ) -> List[Dict[str, Any]]:
     """Test all 5 advanced causal training extractors.
@@ -507,7 +478,7 @@ def test_advanced_causal_extractors(
     for extractor_class, name in advanced_extractors:
         try:
             result = test_concept_generator(
-                extractor_class, name, nlcp_config, encoder_hidden_states
+                extractor_class, name, config, encoder_hidden_states
             )
             results.append(result)
         except Exception as e:
@@ -524,7 +495,7 @@ def test_advanced_causal_extractors(
 
 
 def test_inference_generator(
-    nlcp_config: NLCPV3Config,
+    config: dict,
     encoder_hidden_states: torch.Tensor,
 ) -> Dict[str, Any]:
     """Test the inference-only AutoregressiveConceptGenerator.
@@ -540,7 +511,7 @@ def test_inference_generator(
     encoder_hidden_dim = encoder_hidden_states.shape[2]
     batch_size = encoder_hidden_states.shape[0]
 
-    generator = AutoregressiveConceptGenerator(nlcp_config, encoder_hidden_dim)
+    generator = AutoregressiveConceptGenerator(config, encoder_hidden_dim)
     generator.eval()
 
     print(f"\n  Testing AutoregressiveConceptGenerator")
@@ -554,14 +525,18 @@ def test_inference_generator(
         generated_concepts, list
     ), f"Expected list, got {type(generated_concepts)}"
     assert (
-        len(generated_concepts) == nlcp_config.num_levels
-    ), f"Expected {nlcp_config.num_levels} levels, got {len(generated_concepts)}"
+        len(generated_concepts) == config["model"]["pyramid"]["num_levels"]
+    ), f"Expected {config["model"]["pyramid"]["num_levels"]} levels, got {len(generated_concepts)}"
 
     print(f"\n  ✓ Generated {len(generated_concepts)} levels")
 
     for level_idx, level_concepts in enumerate(generated_concepts):
-        expected_num_concepts = nlcp_config.level_lengths[level_idx]
-        expected_shape = (batch_size, expected_num_concepts, nlcp_config.hidden_dim)
+        expected_num_concepts = config["model"]["pyramid"]["level_lengths"][level_idx]
+        expected_shape = (
+            batch_size,
+            expected_num_concepts,
+            config["model"]["pyramid"]["hidden_dim"],
+        )
         actual_shape = tuple(level_concepts.shape)
 
         assert (
@@ -683,19 +658,18 @@ def main():
 
     # Load config
     config = load_config(args.config)
-    nlcp_config = build_nlcpV3_config(config)
 
     print("\n" + "=" * 70)
     print("NLCP V3: COMPREHENSIVE CONCEPT GENERATOR TEST")
     print("=" * 70)
     print(f"\nConfiguration:")
-    print(f"  Hidden dim: {nlcp_config.hidden_dim}")
-    print(f"  Num levels: {nlcp_config.num_levels}")
-    print(f"  Level lengths: {nlcp_config.level_lengths}")
-    print(f"  Encoder model: {nlcp_config.encoder_model_name}")
+    print(f"  Hidden dim: {config["model"]["pyramid"]["hidden_dim"]}")
+    print(f"  Num levels: {config["model"]["pyramid"]["num_levels"]}")
+    print(f"  Level lengths: {config["model"]["pyramid"]["level_lengths"]}")
+    print(f"  Encoder model: {config["model"]["encoder"]["encoder_model_name"]}")
 
     # Load data
-    data = load_gsm8k_batch(config, nlcp_config)
+    data = load_gsm8k_batch(config)
     encoder_hidden_states = data["encoder_hidden_states"]
 
     # Run all tests
@@ -705,19 +679,19 @@ def main():
         # Test basic extractors
         if not args.skip_basic:
             all_results["basic_extractors"] = test_basic_training_extractors(
-                nlcp_config, encoder_hidden_states
+                config, encoder_hidden_states
             )
 
         # Test advanced extractors
         if not args.skip_advanced:
             all_results["advanced_extractors"] = test_advanced_causal_extractors(
-                nlcp_config, encoder_hidden_states
+                config, encoder_hidden_states
             )
 
         # Test inference generator
         if not args.skip_inference:
             all_results["inference_generator"] = test_inference_generator(
-                nlcp_config, encoder_hidden_states
+                config, encoder_hidden_states
             )
 
         # Print summary

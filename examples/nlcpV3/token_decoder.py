@@ -2,10 +2,7 @@
 
 USAGE:
     from nlcpV3.token_decoder import SolutionDecoder
-    from nlcpV3.config import NLCPV3Config
-
-    config = NLCPV3Config(...)
-    decoder = SolutionDecoder(config)
+    decoder = SolutionDecoder(config_dict)  # pass raw YAML dict
 
     # Decode concepts to solution
     solution_logits = decoder(concepts)
@@ -56,8 +53,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from nlcpV3.config import NLCPV3Config
-
 
 class SolutionDecoder(nn.Module):
     """Decoder for direct solution generation from concepts.
@@ -67,7 +62,6 @@ class SolutionDecoder(nn.Module):
         No CoT generation - direct path from concepts to answer.
 
     ATTRIBUTES:
-        config: NLCPV3Config instance
         embedding: Token embedding for solution vocabulary
         blocks: Decoder blocks with self-attention + cross-attention
         output_proj: Projection to vocabulary logits
@@ -80,21 +74,27 @@ class SolutionDecoder(nn.Module):
             concepts [C_0, ..., C_K], solution_tokens → logits [B, L, V]
     """
 
-    def __init__(self, config: NLCPV3Config):
+    def __init__(self, config: dict):
         """Initialize Solution Decoder.
 
         Args:
-            config: NLCPV3Config with hidden_dim, vocab_size, etc.
+            config: Raw YAML config dict.
         """
         super().__init__()
         self.config = config
+        pyramid_cfg = config["model"]["pyramid"]
+        decoder_cfg = config["model"]["decoder"]
 
         # Token embedding for solution
-        self.embedding = nn.Embedding(config.vocab_size, config.hidden_dim)
+        self.embedding = nn.Embedding(
+            decoder_cfg["vocab_size"], pyramid_cfg["hidden_dim"]
+        )
 
         # Position embedding
         max_solution_len = 128  # Maximum solution length
-        self.position_embedding = nn.Embedding(max_solution_len, config.hidden_dim)
+        self.position_embedding = nn.Embedding(
+            max_solution_len, pyramid_cfg["hidden_dim"]
+        )
 
         # Decoder blocks
         self.num_blocks = 4
@@ -103,10 +103,12 @@ class SolutionDecoder(nn.Module):
         )
 
         # Output projection to vocabulary
-        self.output_proj = nn.Linear(config.hidden_dim, config.vocab_size)
+        self.output_proj = nn.Linear(
+            pyramid_cfg["hidden_dim"], decoder_cfg["vocab_size"]
+        )
 
         # Final layer normalization
-        self.norm = nn.LayerNorm(config.hidden_dim)
+        self.norm = nn.LayerNorm(pyramid_cfg["hidden_dim"])
 
         self._init_weights()
 
@@ -270,31 +272,43 @@ class SolutionDecoderBlock(nn.Module):
         ffn: Feed-forward network
     """
 
-    def __init__(self, config: NLCPV3Config):
+    def __init__(self, config: dict):
         """Initialize decoder block."""
         super().__init__()
-        self.hidden_dim = config.hidden_dim
-        self.num_heads = config.num_heads
-        self.head_dim = config.hidden_dim // config.num_heads
+        pyramid_cfg = config["model"]["pyramid"]
+        decoder_cfg = config["model"]["decoder"]
+        self.hidden_dim = pyramid_cfg["hidden_dim"]
+        self.num_heads = pyramid_cfg["num_heads"]
+        self.head_dim = pyramid_cfg["hidden_dim"] // pyramid_cfg["num_heads"]
 
         # Self-attention
-        self.self_attn_norm = nn.LayerNorm(config.hidden_dim)
-        self.self_attn_qkv = nn.Linear(config.hidden_dim, 3 * config.hidden_dim)
-        self.self_attn_out = nn.Linear(config.hidden_dim, config.hidden_dim)
+        self.self_attn_norm = nn.LayerNorm(pyramid_cfg["hidden_dim"])
+        self.self_attn_qkv = nn.Linear(
+            pyramid_cfg["hidden_dim"], 3 * pyramid_cfg["hidden_dim"]
+        )
+        self.self_attn_out = nn.Linear(
+            pyramid_cfg["hidden_dim"], pyramid_cfg["hidden_dim"]
+        )
 
         # Cross-attention
-        self.cross_attn_norm = nn.LayerNorm(config.hidden_dim)
-        self.cross_attn_q = nn.Linear(config.hidden_dim, config.hidden_dim)
-        self.cross_attn_kv = nn.Linear(config.hidden_dim, 2 * config.hidden_dim)
-        self.cross_attn_out = nn.Linear(config.hidden_dim, config.hidden_dim)
+        self.cross_attn_norm = nn.LayerNorm(pyramid_cfg["hidden_dim"])
+        self.cross_attn_q = nn.Linear(
+            pyramid_cfg["hidden_dim"], pyramid_cfg["hidden_dim"]
+        )
+        self.cross_attn_kv = nn.Linear(
+            pyramid_cfg["hidden_dim"], 2 * pyramid_cfg["hidden_dim"]
+        )
+        self.cross_attn_out = nn.Linear(
+            pyramid_cfg["hidden_dim"], pyramid_cfg["hidden_dim"]
+        )
 
         # FFN
-        self.ffn_norm = nn.LayerNorm(config.hidden_dim)
+        self.ffn_norm = nn.LayerNorm(pyramid_cfg["hidden_dim"])
         self.ffn = nn.Sequential(
-            nn.Linear(config.hidden_dim, 4 * config.hidden_dim),
+            nn.Linear(pyramid_cfg["hidden_dim"], 4 * pyramid_cfg["hidden_dim"]),
             nn.GELU(),
-            nn.Dropout(config.dropout),
-            nn.Linear(4 * config.hidden_dim, config.hidden_dim),
+            nn.Dropout(decoder_cfg["dropout"]),
+            nn.Linear(4 * pyramid_cfg["hidden_dim"], pyramid_cfg["hidden_dim"]),
         )
 
         self._init_weights()

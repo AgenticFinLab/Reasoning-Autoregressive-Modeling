@@ -1,10 +1,9 @@
 """NLCP V3 Model: Complete Model Integrating All Components.
 
 USAGE:
-    from nlcpV3 import NLCPV3Config, NLCPV3Model
+    from nlcpV3 import NLCPV3Model
 
-    config = NLCPV3Config(...)
-    model = NLCPV3Model(config)
+    model = NLCPV3Model(config_dict)  # pass raw YAML dict
 
     # Training
     output = model.forward_training(
@@ -46,7 +45,6 @@ import torch
 import torch.nn as nn
 from typing import Optional
 
-from nlcpV3.config import NLCPV3Config
 from nlcpV3.encoder import NLCPV3Encoder
 from nlcpV3.concept_generator import (
     ResidualAttentivePoolingConceptGenerator,
@@ -65,7 +63,6 @@ class NLCPV3Model(nn.Module):
         concept extractors for each mode.
 
     ATTRIBUTES:
-        config: NLCPV3Config instance
         encoder: Text encoder (Qwen2.5-based)
         training_extractor: Concept extraction from Q+CoT during training
         inference_generator: Concept generation from Q during inference
@@ -83,11 +80,11 @@ class NLCPV3Model(nn.Module):
             Q [B, L'] → Solution tokens [B, L_solution]
     """
 
-    def __init__(self, config: NLCPV3Config):
+    def __init__(self, config: dict):
         """Initialize NLCP V3 Model.
 
         Args:
-            config: NLCPV3Config with all hyperparameters
+            config: Raw YAML config dict.
         """
         super().__init__()
         self.config = config

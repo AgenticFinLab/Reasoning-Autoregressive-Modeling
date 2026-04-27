@@ -2,10 +2,7 @@
 
 USAGE:
     from nlcpV3.concept_transformer import ConceptTransformer
-    from nlcpV3.config import NLCPV3Config
-
-    config = NLCPV3Config(...)
-    transformer = ConceptTransformer(config)
+    transformer = ConceptTransformer(config_dict)  # pass raw YAML dict
 
     # Refine hierarchical concepts
     refined_concepts = transformer(concepts)
@@ -62,8 +59,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from nlcpV3.config import NLCPV3Config
-
 
 class ConceptTransformer(nn.Module):
     """VAR-Style Transformer for hierarchical concept refinement.
@@ -73,7 +68,6 @@ class ConceptTransformer(nn.Module):
         Coarse concepts influence fine concepts but not vice versa.
 
     ATTRIBUTES:
-        config: NLCPV3Config instance
         level_embedding: Embedding for concept levels
         position_embedding: Positional encoding within levels
         blocks: Transformer blocks with causal attention
@@ -87,21 +81,24 @@ class ConceptTransformer(nn.Module):
             concepts [C_0, ..., C_K] → refined_concepts [C'_0, ..., C'_K]
     """
 
-    def __init__(self, config: NLCPV3Config):
+    def __init__(self, config: dict):
         """Initialize Concept Transformer.
 
         Args:
-            config: NLCPV3Config with hidden_dim, num_heads, num_levels, etc.
+            config: Raw YAML config dict.
         """
         super().__init__()
         self.config = config
+        pyramid_cfg = config["model"]["pyramid"]
 
         # Level embedding: distinguish different concept levels
-        self.level_embedding = nn.Embedding(config.num_levels, config.hidden_dim)
+        self.level_embedding = nn.Embedding(
+            pyramid_cfg["num_levels"], pyramid_cfg["hidden_dim"]
+        )
 
         # Position embedding: within-level position encoding
-        max_concepts = max(config.level_lengths)
-        self.position_embedding = nn.Embedding(max_concepts, config.hidden_dim)
+        max_concepts = max(pyramid_cfg["level_lengths"])
+        self.position_embedding = nn.Embedding(max_concepts, pyramid_cfg["hidden_dim"])
 
         # Transformer blocks
         self.num_blocks = 4  # Number of transformer layers
@@ -110,7 +107,7 @@ class ConceptTransformer(nn.Module):
         )
 
         # Final layer normalization
-        self.norm = nn.LayerNorm(config.hidden_dim)
+        self.norm = nn.LayerNorm(pyramid_cfg["hidden_dim"])
 
         self._init_weights()
 
@@ -251,27 +248,31 @@ class ConceptTransformerBlock(nn.Module):
         ffn: Feed-forward network
     """
 
-    def __init__(self, config: NLCPV3Config):
+    def __init__(self, config: dict):
         """Initialize transformer block."""
         super().__init__()
-        self.hidden_dim = config.hidden_dim
-        self.num_heads = config.num_heads
-        self.head_dim = config.hidden_dim // config.num_heads
+        pyramid_cfg = config["model"]["pyramid"]
+        decoder_cfg = config["model"]["decoder"]
+        self.hidden_dim = pyramid_cfg["hidden_dim"]
+        self.num_heads = pyramid_cfg["num_heads"]
+        self.head_dim = pyramid_cfg["hidden_dim"] // pyramid_cfg["num_heads"]
 
         # Layer normalization
-        self.norm1 = nn.LayerNorm(config.hidden_dim)
-        self.norm2 = nn.LayerNorm(config.hidden_dim)
+        self.norm1 = nn.LayerNorm(pyramid_cfg["hidden_dim"])
+        self.norm2 = nn.LayerNorm(pyramid_cfg["hidden_dim"])
 
         # Multi-head attention
-        self.qkv_proj = nn.Linear(config.hidden_dim, 3 * config.hidden_dim)
-        self.out_proj = nn.Linear(config.hidden_dim, config.hidden_dim)
+        self.qkv_proj = nn.Linear(
+            pyramid_cfg["hidden_dim"], 3 * pyramid_cfg["hidden_dim"]
+        )
+        self.out_proj = nn.Linear(pyramid_cfg["hidden_dim"], pyramid_cfg["hidden_dim"])
 
         # Feed-forward network
         self.ffn = nn.Sequential(
-            nn.Linear(config.hidden_dim, 4 * config.hidden_dim),
+            nn.Linear(pyramid_cfg["hidden_dim"], 4 * pyramid_cfg["hidden_dim"]),
             nn.GELU(),
-            nn.Linear(4 * config.hidden_dim, config.hidden_dim),
-            nn.Dropout(config.dropout),
+            nn.Linear(4 * pyramid_cfg["hidden_dim"], pyramid_cfg["hidden_dim"]),
+            nn.Dropout(decoder_cfg["dropout"]),
         )
 
         self._init_weights()

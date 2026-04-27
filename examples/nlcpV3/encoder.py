@@ -2,10 +2,7 @@
 
 USAGE:
     from nlcpV3.encoder import NLCPV3Encoder
-    from nlcpV3.config import NLCPV3Config
-
-    config = NLCPV3Config(...)
-    encoder = NLCPV3Encoder(config)
+    encoder = NLCPV3Encoder(config_dict)  # pass raw YAML dict
 
     # Training: Encode Q+CoT
     H = encoder.forward_training(input_ids, attention_mask)
@@ -54,8 +51,6 @@ import torch
 import torch.nn as nn
 from transformers import AutoModel, AutoTokenizer
 
-from nlcpV3.config import NLCPV3Config
-
 
 class NLCPV3Encoder(nn.Module):
     """Encoder for NLCP V3.
@@ -65,7 +60,6 @@ class NLCPV3Encoder(nn.Module):
         Uses pretrained causal LM as backbone for reasoning pattern capture.
 
     ATTRIBUTES:
-        config: NLCPV3Config instance
         model: Pretrained transformer model (e.g., Qwen2.5-0.5B)
         tokenizer: Tokenizer for the pretrained model
 
@@ -81,27 +75,30 @@ class NLCPV3Encoder(nn.Module):
             (L' < L because no CoT)
     """
 
-    def __init__(self, config: NLCPV3Config):
+    def __init__(self, config: dict):
         """Initialize encoder with pretrained model.
 
         Args:
-            config: NLCPV3Config with encoder_model_name, encoder_freeze, etc.
+            config: Raw config dict with model.encoder settings.
 
         PURPOSE:
             Load pretrained model and optionally freeze parameters.
         """
         super().__init__()
         self.config = config
+        encoder_cfg = config["model"]["encoder"]
 
         # Load pretrained model for feature extraction
         # Use AutoModel (not AutoModelForCausalLM) to get hidden states
-        self.model = AutoModel.from_pretrained(config.encoder_model_name)
+        self.model = AutoModel.from_pretrained(encoder_cfg["encoder_model_name"])
 
         # Load tokenizer for potential preprocessing needs
-        self.tokenizer = AutoTokenizer.from_pretrained(config.encoder_model_name)
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            encoder_cfg["encoder_model_name"]
+        )
 
         # Freeze encoder if specified
-        if config.encoder_freeze:
+        if encoder_cfg["encoder_freeze"]:
             for param in self.model.parameters():
                 param.requires_grad = False
 

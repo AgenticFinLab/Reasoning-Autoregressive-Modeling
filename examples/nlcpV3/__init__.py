@@ -1,16 +1,10 @@
 """NLCP V3: Implicit Reasoning via Hierarchical Concept Compression.
 
 USAGE:
-    from nlcpV3 import NLCPV3Config, NLCPV3Model
-
-    # RECOMMENDED: Concept Pyramid Builder (Phase 1 of two-phase architecture)
     from nlcpV3 import ConceptPyramidBuilder
-    config = NLCPV3Config(
-        encoder_model_name="Qwen/Qwen2.5-0.5B",
-        encoder_freeze=False,  # Set True to freeze encoder
-        ...
-    )
-    builder = ConceptPyramidBuilder(config)  # Encoder created internally
+
+    # Pass raw config dict (loaded from YAML)
+    builder = ConceptPyramidBuilder(config_dict)  # Encoder created internally
     # Using BuilderInput: forward() handles ALL tokenization internally
     from nlcpV3.data_loader import BuilderInput
     batch_input = BuilderInput(
@@ -33,7 +27,7 @@ USAGE:
         RobustOrderedConceptGenerator,
         AutoregressiveConceptGenerator,
     )
-    extractor = ResidualAttentivePoolingConceptGenerator(config, encoder_hidden_dim)
+    extractor = ResidualAttentivePoolingConceptGenerator(config_dict, encoder_hidden_dim)
     concepts, aux = extractor(H_cot)
 
 DESIGN SOURCE:
@@ -47,7 +41,6 @@ DESIGN SOURCE:
     - NLCP V3 follows same principle: Builder (extraction) + Predictor (generation)
 
 MODULE STRUCTURE:
-    - config: NLCPV3Config dataclass for all hyperparameters
     - encoder: Qwen2.5-based encoder for Q+CoT (train) / Q (inference)
     - concept_hybrid_builder: Phase 1 — ConceptPyramidBuilder (training only)
     - concept_generator: Individual extractors (standalone, ablation studies)
@@ -60,7 +53,6 @@ KEY DIFFERENCE FROM V2:
     V3: Concepts → Decoder → Solution (direct, no CoT!)
 """
 
-from nlcpV3.config import NLCPV3Config
 from nlcpV3.encoder import NLCPV3Encoder
 from nlcpV3.concept_generator import (
     BaseConceptGenerator,
@@ -94,7 +86,6 @@ from nlcpV3.model import NLCPV3Model
 
 __all__ = [
     # Core components
-    "NLCPV3Config",
     "NLCPV3Encoder",
     # Base class
     "BaseConceptGenerator",

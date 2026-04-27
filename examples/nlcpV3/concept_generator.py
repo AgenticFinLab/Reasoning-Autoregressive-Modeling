@@ -88,9 +88,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from nlcpV3.config import NLCPV3Config
-
-
 # =============================================================================
 # Base Class for Training Extractors
 # =============================================================================
@@ -122,26 +119,27 @@ class BaseConceptGenerator(nn.Module, ABC):
                    (generates from Q without CoT)
 
     ATTRIBUTES:
-        config: NLCPV3Config
+        config: Raw config dict
         encoder_hidden_dim: Input dimension from encoder
         input_proj: Projection to concept dimension
         concept_queries: Learnable queries for each level
     """
 
-    def __init__(self, config: NLCPV3Config, encoder_hidden_dim: int):
+    def __init__(self, config: dict, encoder_hidden_dim: int):
         super().__init__()
         self.config = config
         self.encoder_hidden_dim = encoder_hidden_dim
+        pyramid_cfg = config["model"]["pyramid"]
 
         # Shared projection
-        self.input_proj = nn.Linear(encoder_hidden_dim, config.hidden_dim)
+        self.input_proj = nn.Linear(encoder_hidden_dim, pyramid_cfg["hidden_dim"])
 
         # Shared concept queries (key for consistency!)
         # Each level has its own set of learnable queries
         self.concept_queries = nn.ParameterList(
             [
-                nn.Parameter(torch.randn(length, config.hidden_dim))
-                for length in config.level_lengths
+                nn.Parameter(torch.randn(length, pyramid_cfg["hidden_dim"]))
+                for length in pyramid_cfg["level_lengths"]
             ]
         )
 
@@ -246,7 +244,7 @@ class BaseConceptGenerator(nn.Module, ABC):
             projected_hidden = self.input_proj(encoder_hidden_states)
             all_level_concepts = []
 
-            for level_idx in range(self.config.num_levels):
+            for level_idx in range(self.config["model"]["pyramid"]["num_levels"]):
                 previous = all_level_concepts if all_level_concepts else None
                 level_concepts = self.forward_next_level(
                     encoder_hidden_states, previous, level_idx
@@ -254,8 +252,8 @@ class BaseConceptGenerator(nn.Module, ABC):
                 all_level_concepts.append(level_concepts)
 
             aux = {
-                "num_levels": self.config.num_levels,
-                "level_lengths": self.config.level_lengths,
+                "num_levels": self.config["model"]["pyramid"]["num_levels"],
+                "level_lengths": self.config["model"]["pyramid"]["level_lengths"],
             }
             return all_level_concepts, aux
         else:
@@ -277,14 +275,14 @@ class BaseConceptGenerator(nn.Module, ABC):
         """
         return {
             "level_idx": level_idx,
-            "num_concepts": self.config.level_lengths[level_idx],
-            "hidden_dim": self.config.hidden_dim,
+            "num_concepts": self.config["model"]["pyramid"]["level_lengths"][level_idx],
+            "hidden_dim": self.config["model"]["pyramid"]["hidden_dim"],
             "query_shape": self.concept_queries[level_idx].shape,
         }
 
     def get_total_concepts(self) -> int:
         """Get total number of concepts across all levels."""
-        return sum(self.config.level_lengths)
+        return sum(self.config["model"]["pyramid"]["level_lengths"])
 
 
 ################################################################################
@@ -330,15 +328,18 @@ class ResidualAttentivePoolingConceptGenerator(BaseConceptGenerator):
         VAR.md Section 5.2.2: Core mechanism of residual decomposition
     """
 
-    def __init__(self, config: NLCPV3Config, encoder_hidden_dim: int):
+    def __init__(self, config: dict, encoder_hidden_dim: int):
         super().__init__(config, encoder_hidden_dim)
         self.temperature = nn.Parameter(torch.ones(1))
 
         # Level-specific projections
         self.level_projs = nn.ModuleList(
             [
-                nn.Linear(config.hidden_dim, config.hidden_dim)
-                for _ in range(config.num_levels)
+                nn.Linear(
+                    config["model"]["pyramid"]["hidden_dim"],
+                    config["model"]["pyramid"]["hidden_dim"],
+                )
+                for _ in range(config["model"]["pyramid"]["num_levels"])
             ]
         )
 
@@ -397,7 +398,7 @@ class ResidualAttentivePoolingConceptGenerator(BaseConceptGenerator):
         # Attention
         attention_scores = torch.bmm(expanded_queries, residual_hidden.transpose(1, 2))
         attention_scores = attention_scores / (
-            math.sqrt(self.config.hidden_dim) * self.temperature
+            math.sqrt(self.config["model"]["pyramid"]["hidden_dim"]) * self.temperature
         )
         level_attention = F.softmax(attention_scores, dim=-1)  # [B, L_k, L]
 
@@ -438,7 +439,7 @@ class ResidualAttentivePoolingConceptGenerator(BaseConceptGenerator):
             reconstructed_accumulator = torch.zeros_like(projected_hidden)
             all_level_concepts = []
 
-            for level_idx in range(self.config.num_levels):
+            for level_idx in range(self.config["model"]["pyramid"]["num_levels"]):
                 level_queries = self.concept_queries[level_idx]
                 expanded_queries = level_queries.unsqueeze(0).expand(batch_size, -1, -1)
 
@@ -446,7 +447,8 @@ class ResidualAttentivePoolingConceptGenerator(BaseConceptGenerator):
                     expanded_queries, residual_hidden.transpose(1, 2)
                 )
                 attention_scores = attention_scores / (
-                    math.sqrt(self.config.hidden_dim) * self.temperature
+                    math.sqrt(self.config["model"]["pyramid"]["hidden_dim"])
+                    * self.temperature
                 )
                 level_attention = F.softmax(attention_scores, dim=-1)
 
@@ -468,8 +470,8 @@ class ResidualAttentivePoolingConceptGenerator(BaseConceptGenerator):
                 "reconstructed_hidden": reconstructed_accumulator,
                 "residual_hidden": residual_hidden,
                 "recon_loss": recon_loss,
-                "num_levels": self.config.num_levels,
-                "level_lengths": self.config.level_lengths,
+                "num_levels": self.config["model"]["pyramid"]["num_levels"],
+                "level_lengths": self.config["model"]["pyramid"]["level_lengths"],
                 "method": "residual_pooling",
             }
             return all_level_concepts, aux
@@ -506,17 +508,19 @@ class PositionConstrainedConceptGenerator(BaseConceptGenerator):
         Ordered concept extraction Scheme 1
     """
 
-    def __init__(
-        self, config: NLCPV3Config, encoder_hidden_dim: int, max_seq_len: int = 2048
-    ):
+    def __init__(self, config: dict, encoder_hidden_dim: int, max_seq_len: int = 2048):
         super().__init__(config, encoder_hidden_dim)
 
         # Learnable center positions (initialized uniformly)
-        init_centers = torch.linspace(0, max_seq_len - 1, config.num_levels)
+        init_centers = torch.linspace(
+            0, max_seq_len - 1, config["model"]["pyramid"]["num_levels"]
+        )
         init_logits = torch.logit(torch.clamp(init_centers / max_seq_len, 0.01, 0.99))
         self.center_logits = nn.Parameter(init_logits)
 
-        self.temperature = nn.Parameter(torch.tensor(max_seq_len / config.num_levels))
+        self.temperature = nn.Parameter(
+            torch.tensor(max_seq_len / config["model"]["pyramid"]["num_levels"])
+        )
 
     def _get_sorted_centers(self, seq_len: int) -> torch.Tensor:
         """Get sorted, normalized concept centers."""
@@ -560,7 +564,9 @@ class PositionConstrainedConceptGenerator(BaseConceptGenerator):
 
         # Base scores
         attention_scores = torch.bmm(expanded_queries, projected_hidden.transpose(1, 2))
-        attention_scores = attention_scores / math.sqrt(self.config.hidden_dim)
+        attention_scores = attention_scores / math.sqrt(
+            self.config["model"]["pyramid"]["hidden_dim"]
+        )
 
         # Position prior
         center = centers[target_level_index]
@@ -622,7 +628,7 @@ class PositionConstrainedConceptGenerator(BaseConceptGenerator):
         concepts = []
         expected_positions = []
 
-        for level_idx in range(self.config.num_levels):
+        for level_idx in range(self.config["model"]["pyramid"]["num_levels"]):
             Q_k = self.concept_queries[level_idx]
             L_k = Q_k.shape[0]
 
@@ -630,7 +636,7 @@ class PositionConstrainedConceptGenerator(BaseConceptGenerator):
 
             # Base scores
             scores = torch.bmm(Q, projected_hidden.transpose(1, 2)) / math.sqrt(
-                self.config.hidden_dim
+                self.config["model"]["pyramid"]["hidden_dim"]
             )
 
             # Position prior
@@ -679,9 +685,7 @@ class HardOrderedMaskConceptGenerator(BaseConceptGenerator):
         Ordered concept extraction Scheme 2
     """
 
-    def __init__(
-        self, config: NLCPV3Config, encoder_hidden_dim: int, softness: float = 0.2
-    ):
+    def __init__(self, config: dict, encoder_hidden_dim: int, softness: float = 0.2):
         super().__init__(config, encoder_hidden_dim)
         self.softness = softness
 
@@ -751,7 +755,9 @@ class HardOrderedMaskConceptGenerator(BaseConceptGenerator):
         # Expand queries
         expanded_queries = level_queries.unsqueeze(0).expand(batch_size, -1, -1)
         attention_scores = torch.bmm(expanded_queries, projected_hidden.transpose(1, 2))
-        attention_scores = attention_scores / math.sqrt(self.config.hidden_dim)
+        attention_scores = attention_scores / math.sqrt(
+            self.config["model"]["pyramid"]["hidden_dim"]
+        )
 
         # Apply mask
         log_mask = torch.log(mask.unsqueeze(0) + 1e-10)
@@ -794,7 +800,7 @@ class HardOrderedMaskConceptGenerator(BaseConceptGenerator):
         concepts = []
         all_masks = []
 
-        for level_idx in range(self.config.num_levels):
+        for level_idx in range(self.config["model"]["pyramid"]["num_levels"]):
             Q_k = self.concept_queries[level_idx]
             L_k = Q_k.shape[0]
 
@@ -804,7 +810,7 @@ class HardOrderedMaskConceptGenerator(BaseConceptGenerator):
 
             Q = Q_k.unsqueeze(0).expand(batch_size, -1, -1)
             scores = torch.bmm(Q, projected_hidden.transpose(1, 2)) / math.sqrt(
-                self.config.hidden_dim
+                self.config["model"]["pyramid"]["hidden_dim"]
             )
 
             # Apply mask
@@ -849,7 +855,7 @@ class RecursiveOrderedConceptGenerator(BaseConceptGenerator):
 
     def __init__(
         self,
-        config: NLCPV3Config,
+        config: dict,
         encoder_hidden_dim: int,
         usage_threshold: float = 0.5,
         decay_rate: float = 0.5,
@@ -860,10 +866,16 @@ class RecursiveOrderedConceptGenerator(BaseConceptGenerator):
 
         # Next query projection
         self.next_query_proj = nn.Sequential(
-            nn.Linear(config.hidden_dim, config.hidden_dim),
-            nn.LayerNorm(config.hidden_dim),
+            nn.Linear(
+                config["model"]["pyramid"]["hidden_dim"],
+                config["model"]["pyramid"]["hidden_dim"],
+            ),
+            nn.LayerNorm(config["model"]["pyramid"]["hidden_dim"]),
             nn.GELU(),
-            nn.Linear(config.hidden_dim, config.hidden_dim),
+            nn.Linear(
+                config["model"]["pyramid"]["hidden_dim"],
+                config["model"]["pyramid"]["hidden_dim"],
+            ),
         )
 
     def forward_next_level(
@@ -945,7 +957,7 @@ class RecursiveOrderedConceptGenerator(BaseConceptGenerator):
         concepts = []
         remaining_history = []
 
-        for level_idx in range(self.config.num_levels):
+        for level_idx in range(self.config["model"]["pyramid"]["num_levels"]):
             Q_k = self.concept_queries[level_idx]
             L_k = Q_k.shape[0]  # Number of concepts for this level
 
@@ -955,7 +967,9 @@ class RecursiveOrderedConceptGenerator(BaseConceptGenerator):
             # Compute scores with mask [B, L_k, L]
             scores = torch.bmm(Q, projected_hidden.transpose(1, 2))
             # Apply mask to all query positions
-            scores = scores.masked_fill(remaining_mask.unsqueeze(1) < 0.5, float("-inf"))
+            scores = scores.masked_fill(
+                remaining_mask.unsqueeze(1) < 0.5, float("-inf")
+            )
             A_k = F.softmax(scores, dim=-1)  # [B, L_k, L]
 
             # Extract concepts for this level
@@ -964,7 +978,9 @@ class RecursiveOrderedConceptGenerator(BaseConceptGenerator):
 
             # Update remaining mask (aggregate over all queries in this level)
             max_attn = A_k.max(dim=1, keepdim=True)[0]  # [B, 1, L] - max over queries
-            usage = (A_k.max(dim=1, keepdim=True)[0] > max_attn * self.usage_threshold).float()
+            usage = (
+                A_k.max(dim=1, keepdim=True)[0] > max_attn * self.usage_threshold
+            ).float()
             remaining_mask = remaining_mask * (1 - usage.squeeze(1) * self.decay_rate)
             remaining_history.append(remaining_mask.clone())
 
@@ -998,7 +1014,7 @@ class OrderConstrainedTrainingConceptGenerator(BaseConceptGenerator):
 
     def __init__(
         self,
-        config: NLCPV3Config,
+        config: dict,
         encoder_hidden_dim: int,
         order_margin: float = 1.0,
         order_weight: float = 0.1,
@@ -1044,7 +1060,7 @@ class OrderConstrainedTrainingConceptGenerator(BaseConceptGenerator):
         # Compute attention scores
         attention_scores = torch.bmm(expanded_queries, projected_hidden.transpose(1, 2))
         attention_scores = attention_scores / (
-            math.sqrt(self.config.hidden_dim) * self.temperature
+            math.sqrt(self.config["model"]["pyramid"]["hidden_dim"]) * self.temperature
         )
         level_attention = F.softmax(attention_scores, dim=-1)
 
@@ -1086,12 +1102,15 @@ class OrderConstrainedTrainingConceptGenerator(BaseConceptGenerator):
         concepts = []
         expected_positions = []
 
-        for level_idx in range(self.config.num_levels):
+        for level_idx in range(self.config["model"]["pyramid"]["num_levels"]):
             Q_k = self.concept_queries[level_idx]
 
             Q = Q_k.unsqueeze(0).expand(batch_size, -1, -1)
             scores = torch.bmm(Q, projected_hidden.transpose(1, 2))
-            scores = scores / (math.sqrt(self.config.hidden_dim) * self.temperature)
+            scores = scores / (
+                math.sqrt(self.config["model"]["pyramid"]["hidden_dim"])
+                * self.temperature
+            )
             A_k = F.softmax(scores, dim=-1)
 
             C_k = torch.bmm(A_k, projected_hidden)
@@ -1139,7 +1158,7 @@ class RobustOrderedConceptGenerator(BaseConceptGenerator):
 
     def __init__(
         self,
-        config: NLCPV3Config,
+        config: dict,
         encoder_hidden_dim: int,
         order_margin: float = 1.0,
         order_weight: float = 0.1,
@@ -1154,11 +1173,15 @@ class RobustOrderedConceptGenerator(BaseConceptGenerator):
 
         # Learnable center positions
         max_seq_len = 2048
-        init_centers = torch.linspace(0, max_seq_len - 1, config.num_levels)
+        init_centers = torch.linspace(
+            0, max_seq_len - 1, config["model"]["pyramid"]["num_levels"]
+        )
         init_logits = torch.logit(torch.clamp(init_centers / max_seq_len, 0.01, 0.99))
         self.center_logits = nn.Parameter(init_logits)
 
-        self.temperature = nn.Parameter(torch.tensor(max_seq_len / config.num_levels))
+        self.temperature = nn.Parameter(
+            torch.tensor(max_seq_len / config["model"]["pyramid"]["num_levels"])
+        )
 
     def _get_sorted_centers(self, seq_len: int) -> torch.Tensor:
         """Get sorted, normalized concept centers."""
@@ -1211,7 +1234,7 @@ class RobustOrderedConceptGenerator(BaseConceptGenerator):
         # Compute attention scores
         attention_scores = torch.bmm(
             expanded_queries, projected_hidden.transpose(1, 2)
-        ) / math.sqrt(self.config.hidden_dim)
+        ) / math.sqrt(self.config["model"]["pyramid"]["hidden_dim"])
 
         # Position prior
         center = centers[target_level_index]
@@ -1265,12 +1288,12 @@ class RobustOrderedConceptGenerator(BaseConceptGenerator):
         concepts = []
         expected_positions = []
 
-        for level_idx in range(self.config.num_levels):
+        for level_idx in range(self.config["model"]["pyramid"]["num_levels"]):
             Q_k = self.concept_queries[level_idx]
 
             Q = Q_k.unsqueeze(0).expand(batch_size, -1, -1)
             scores = torch.bmm(Q, projected_hidden.transpose(1, 2)) / math.sqrt(
-                self.config.hidden_dim
+                self.config["model"]["pyramid"]["hidden_dim"]
             )
 
             # Position prior
@@ -1370,7 +1393,7 @@ class MonotonicSoftAssignmentConceptGenerator(BaseConceptGenerator):
 
     def __init__(
         self,
-        config: NLCPV3Config,
+        config: dict,
         encoder_hidden_dim: int,
         epsilon: float = 0.05,
         min_sigma: float = 0.01,
@@ -1381,14 +1404,17 @@ class MonotonicSoftAssignmentConceptGenerator(BaseConceptGenerator):
 
         # Position prediction MLP
         self.pos_mlp = nn.Sequential(
-            nn.Linear(config.hidden_dim, config.hidden_dim // 2),
-            nn.LayerNorm(config.hidden_dim // 2),
+            nn.Linear(
+                config["model"]["pyramid"]["hidden_dim"],
+                config["model"]["pyramid"]["hidden_dim"] // 2,
+            ),
+            nn.LayerNorm(config["model"]["pyramid"]["hidden_dim"] // 2),
             nn.GELU(),
-            nn.Linear(config.hidden_dim // 2, 1),
+            nn.Linear(config["model"]["pyramid"]["hidden_dim"] // 2, 1),
         )
 
         # Learnable segment centers (initialized uniformly in [0.05, 0.95])
-        total_concepts = sum(config.level_lengths)
+        total_concepts = sum(config["model"]["pyramid"]["level_lengths"])
         init_centers = torch.linspace(0.05, 0.95, total_concepts)
         self.centers = nn.Parameter(init_centers)  # [N]
 
@@ -1399,11 +1425,11 @@ class MonotonicSoftAssignmentConceptGenerator(BaseConceptGenerator):
         self.level_attn = nn.ModuleList(
             [
                 nn.MultiheadAttention(
-                    embed_dim=config.hidden_dim,
-                    num_heads=config.num_heads,
+                    embed_dim=config["model"]["pyramid"]["hidden_dim"],
+                    num_heads=config["model"]["pyramid"]["num_heads"],
                     batch_first=True,
                 )
-                for _ in range(config.num_levels)
+                for _ in range(config["model"]["pyramid"]["num_levels"])
             ]
         )
 
@@ -1483,7 +1509,7 @@ class MonotonicSoftAssignmentConceptGenerator(BaseConceptGenerator):
 
         concepts = []
 
-        for level_idx in range(self.config.num_levels):
+        for level_idx in range(self.config["model"]["pyramid"]["num_levels"]):
             Q_k = self.concept_queries[level_idx]
 
             # Prepare queries
@@ -1535,18 +1561,22 @@ class AutoregressiveConceptGenerator(nn.Module):
         VAR.md Section 6: Inference with autoregressive generation
     """
 
-    def __init__(self, config: NLCPV3Config, encoder_hidden_dim: int):
+    def __init__(self, config: dict, encoder_hidden_dim: int):
         super().__init__()
         self.config = config
 
         # Projection
-        self.input_proj = nn.Linear(encoder_hidden_dim, config.hidden_dim)
+        self.input_proj = nn.Linear(
+            encoder_hidden_dim, config["model"]["pyramid"]["hidden_dim"]
+        )
 
         # Shared concept queries (must match training extractors!)
         self.concept_queries = nn.ParameterList(
             [
-                nn.Parameter(torch.randn(length, config.hidden_dim))
-                for length in config.level_lengths
+                nn.Parameter(
+                    torch.randn(length, config["model"]["pyramid"]["hidden_dim"])
+                )
+                for length in config["model"]["pyramid"]["level_lengths"]
             ]
         )
 
@@ -1554,11 +1584,11 @@ class AutoregressiveConceptGenerator(nn.Module):
         self.level_attn = nn.ModuleList(
             [
                 nn.MultiheadAttention(
-                    embed_dim=config.hidden_dim,
-                    num_heads=config.num_heads,
+                    embed_dim=config["model"]["pyramid"]["hidden_dim"],
+                    num_heads=config["model"]["pyramid"]["num_heads"],
                     batch_first=True,
                 )
-                for _ in range(config.num_levels)
+                for _ in range(config["model"]["pyramid"]["num_levels"])
             ]
         )
 
@@ -1587,7 +1617,7 @@ class AutoregressiveConceptGenerator(nn.Module):
 
         concepts = []
 
-        for level_idx in range(self.config.num_levels):
+        for level_idx in range(self.config["model"]["pyramid"]["num_levels"]):
             Q_k = self.concept_queries[level_idx]
             L_k = Q_k.shape[0]
 
@@ -1653,7 +1683,7 @@ class CausalSequentialRefinementConceptGenerator(BaseConceptGenerator):
 
     def __init__(
         self,
-        config: NLCPV3Config,
+        config: dict,
         encoder_hidden_dim: int,
         n_refinement_layers: int = 2,
         dim_feedforward: Optional[int] = None,
@@ -1661,9 +1691,9 @@ class CausalSequentialRefinementConceptGenerator(BaseConceptGenerator):
         super().__init__(config, encoder_hidden_dim)
 
         if dim_feedforward is None:
-            dim_feedforward = 4 * config.hidden_dim
+            dim_feedforward = 4 * config["model"]["pyramid"]["hidden_dim"]
 
-        total_concepts = sum(config.level_lengths)
+        total_concepts = sum(config["model"]["pyramid"]["level_lengths"])
 
         # Causal mask for refinement
         self.register_buffer(
@@ -1674,8 +1704,8 @@ class CausalSequentialRefinementConceptGenerator(BaseConceptGenerator):
         self.refinement_layers = nn.ModuleList(
             [
                 nn.TransformerEncoderLayer(
-                    d_model=config.hidden_dim,
-                    nhead=config.num_heads,
+                    d_model=config["model"]["pyramid"]["hidden_dim"],
+                    nhead=config["model"]["pyramid"]["num_heads"],
                     dim_feedforward=dim_feedforward,
                     activation="gelu",
                     batch_first=True,
@@ -1715,7 +1745,9 @@ class CausalSequentialRefinementConceptGenerator(BaseConceptGenerator):
 
         # Compute attention scores
         attention_scores = torch.bmm(expanded_queries, projected_hidden.transpose(1, 2))
-        attention_scores = attention_scores / (math.sqrt(self.config.hidden_dim) * self.temperature)
+        attention_scores = attention_scores / (
+            math.sqrt(self.config["model"]["pyramid"]["hidden_dim"]) * self.temperature
+        )
         level_attention = F.softmax(attention_scores, dim=-1)
 
         # Extract concepts
@@ -1742,13 +1774,16 @@ class CausalSequentialRefinementConceptGenerator(BaseConceptGenerator):
             level_concepts = self.forward_next_level(
                 encoder_hidden_states, previous_level_concepts, target_level_index
             )
-            aux = {"target_level_index": target_level_index, "method": "causal_sequential_refinement"}
+            aux = {
+                "target_level_index": target_level_index,
+                "method": "causal_sequential_refinement",
+            }
             return level_concepts, aux
 
         # All levels mode
         batch_size, seq_len, _ = encoder_hidden_states.shape
         projected_hidden = self.input_proj(encoder_hidden_states)  # [B, L, D]
-        total_concepts = sum(self.config.level_lengths)
+        total_concepts = sum(self.config["model"]["pyramid"]["level_lengths"])
 
         # Step 1: Soft pooling (concatenate all level queries)
         all_queries = []
@@ -1758,7 +1793,9 @@ class CausalSequentialRefinementConceptGenerator(BaseConceptGenerator):
 
         Q = Q_all.unsqueeze(0).expand(batch_size, -1, -1)  # [B, N, D]
         scores = torch.bmm(Q, projected_hidden.transpose(1, 2))  # [B, N, L]
-        scores = scores / (math.sqrt(self.config.hidden_dim) * self.temperature)
+        scores = scores / (
+            math.sqrt(self.config["model"]["pyramid"]["hidden_dim"]) * self.temperature
+        )
         A = F.softmax(scores, dim=-1)  # [B, N, L]
 
         # Initial segment representations
@@ -1776,7 +1813,9 @@ class CausalSequentialRefinementConceptGenerator(BaseConceptGenerator):
         # Split into hierarchical levels
         concepts = []
         start_idx = 0
-        for level_idx, length in enumerate(self.config.level_lengths):
+        for level_idx, length in enumerate(
+            self.config["model"]["pyramid"]["level_lengths"]
+        ):
             end_idx = start_idx + length
             C_k = Z[:, start_idx:end_idx, :]  # [B, L_k, D]
             concepts.append(C_k)
@@ -1837,7 +1876,7 @@ class ContinuousCausalKernelConceptGenerator(BaseConceptGenerator):
 
     def __init__(
         self,
-        config: NLCPV3Config,
+        config: dict,
         encoder_hidden_dim: int,
         kernel_type: str = "exponential",  # 'exponential' or 'gaussian'
         epsilon: float = 0.02,
@@ -1848,15 +1887,18 @@ class ContinuousCausalKernelConceptGenerator(BaseConceptGenerator):
 
         # Position prediction network
         self.pos_net = nn.Sequential(
-            nn.Linear(config.hidden_dim, config.hidden_dim // 2),
-            nn.LayerNorm(config.hidden_dim // 2),
+            nn.Linear(
+                config["model"]["pyramid"]["hidden_dim"],
+                config["model"]["pyramid"]["hidden_dim"] // 2,
+            ),
+            nn.LayerNorm(config["model"]["pyramid"]["hidden_dim"] // 2),
             nn.GELU(),
-            nn.Linear(config.hidden_dim // 2, 1),
+            nn.Linear(config["model"]["pyramid"]["hidden_dim"] // 2, 1),
             nn.Sigmoid(),  # Map to [0, 1]
         )
 
         # Learnable concept centers
-        total_concepts = sum(config.level_lengths)
+        total_concepts = sum(config["model"]["pyramid"]["level_lengths"])
         init_centers = torch.linspace(0.1, 0.9, total_concepts)
         self.centers = nn.Parameter(init_centers)
 
@@ -1922,7 +1964,9 @@ class ContinuousCausalKernelConceptGenerator(BaseConceptGenerator):
 
         # Compute attention scores
         attention_scores = torch.bmm(expanded_queries, projected_hidden.transpose(1, 2))
-        attention_scores = attention_scores / math.sqrt(self.config.hidden_dim)
+        attention_scores = attention_scores / math.sqrt(
+            self.config["model"]["pyramid"]["hidden_dim"]
+        )
         level_attention = F.softmax(attention_scores, dim=-1)
 
         # Extract concepts
@@ -1952,7 +1996,10 @@ class ContinuousCausalKernelConceptGenerator(BaseConceptGenerator):
             level_concepts = self.forward_next_level(
                 encoder_hidden_states, previous_level_concepts, target_level_index
             )
-            aux = {"target_level_index": target_level_index, "method": "continuous_causal_kernel"}
+            aux = {
+                "target_level_index": target_level_index,
+                "method": "continuous_causal_kernel",
+            }
             return level_concepts, aux
 
         # All levels mode
@@ -1977,7 +2024,9 @@ class ContinuousCausalKernelConceptGenerator(BaseConceptGenerator):
         # Split into hierarchical levels
         concepts = []
         start_idx = 0
-        for level_idx, length in enumerate(self.config.level_lengths):
+        for level_idx, length in enumerate(
+            self.config["model"]["pyramid"]["level_lengths"]
+        ):
             end_idx = start_idx + length
             C_k = Z[:, start_idx:end_idx, :]  # [B, L_k, D]
             concepts.append(C_k)
@@ -2043,36 +2092,47 @@ class AutoregressiveSoftBoundaryConceptGenerator(BaseConceptGenerator):
 
     def __init__(
         self,
-        config: NLCPV3Config,
+        config: dict,
         encoder_hidden_dim: int,
         temperature: float = 1.0,
     ):
         super().__init__(config, encoder_hidden_dim)
         self.temperature = temperature
 
-        total_concepts = sum(config.level_lengths)
+        total_concepts = sum(config["model"]["pyramid"]["level_lengths"])
 
         # Boundary prediction network
         # Input: [H_summary, prev_concept_summary] -> Output: boundary delta
         # Always takes 2*D input (H_summary + prev_concept or zeros)
         self.boundary_net = nn.Sequential(
-            nn.Linear(config.hidden_dim * 2, config.hidden_dim),
-            nn.LayerNorm(config.hidden_dim),
+            nn.Linear(
+                config["model"]["pyramid"]["hidden_dim"] * 2,
+                config["model"]["pyramid"]["hidden_dim"],
+            ),
+            nn.LayerNorm(config["model"]["pyramid"]["hidden_dim"]),
             nn.GELU(),
-            nn.Linear(config.hidden_dim, 1),
+            nn.Linear(config["model"]["pyramid"]["hidden_dim"], 1),
             nn.Sigmoid(),  # Output in (0, 1)
         )
 
         # Zero vector for first iteration (no previous concept)
-        self.register_buffer("zero_concept", torch.zeros(config.hidden_dim))
+        self.register_buffer(
+            "zero_concept", torch.zeros(config["model"]["pyramid"]["hidden_dim"])
+        )
 
         # Concept extraction network
-        self.concept_proj = nn.Linear(config.hidden_dim, config.hidden_dim)
+        self.concept_proj = nn.Linear(
+            config["model"]["pyramid"]["hidden_dim"],
+            config["model"]["pyramid"]["hidden_dim"],
+        )
 
         # Summary network for H
         self.summary_net = nn.Sequential(
-            nn.Linear(config.hidden_dim, config.hidden_dim),
-            nn.LayerNorm(config.hidden_dim),
+            nn.Linear(
+                config["model"]["pyramid"]["hidden_dim"],
+                config["model"]["pyramid"]["hidden_dim"],
+            ),
+            nn.LayerNorm(config["model"]["pyramid"]["hidden_dim"]),
             nn.GELU(),
         )
 
@@ -2107,7 +2167,9 @@ class AutoregressiveSoftBoundaryConceptGenerator(BaseConceptGenerator):
 
         # Compute attention scores
         attention_scores = torch.bmm(expanded_queries, projected_hidden.transpose(1, 2))
-        attention_scores = attention_scores / math.sqrt(self.config.hidden_dim)
+        attention_scores = attention_scores / math.sqrt(
+            self.config["model"]["pyramid"]["hidden_dim"]
+        )
         level_attention = F.softmax(attention_scores, dim=-1)
 
         # Extract concepts
@@ -2143,7 +2205,10 @@ class AutoregressiveSoftBoundaryConceptGenerator(BaseConceptGenerator):
             level_concepts = self.forward_next_level(
                 encoder_hidden_states, previous_level_concepts, target_level_index
             )
-            aux = {"target_level_index": target_level_index, "method": "autoregressive_soft_boundary"}
+            aux = {
+                "target_level_index": target_level_index,
+                "method": "autoregressive_soft_boundary",
+            }
             return level_concepts, aux
 
         # All levels mode
@@ -2156,11 +2221,13 @@ class AutoregressiveSoftBoundaryConceptGenerator(BaseConceptGenerator):
         concepts = []
         boundaries = []
         prev_boundary = torch.full(
-            (batch_size, 1), self.init_boundary.item(), device=encoder_hidden_states.device
+            (batch_size, 1),
+            self.init_boundary.item(),
+            device=encoder_hidden_states.device,
         )  # [B, 1]
         boundaries.append(prev_boundary)
 
-        total_concepts = sum(self.config.level_lengths)
+        total_concepts = sum(self.config["model"]["pyramid"]["level_lengths"])
 
         for i in range(total_concepts):
             # Prepare context: H_summary + previous concept summary
@@ -2184,7 +2251,11 @@ class AutoregressiveSoftBoundaryConceptGenerator(BaseConceptGenerator):
             boundaries.append(new_boundary)
 
             # Create attention mask for positions within current segment
-            positions = torch.linspace(0, 1, seq_len, device=encoder_hidden_states.device).view(1, seq_len)  # [1, L]
+            positions = torch.linspace(
+                0, 1, seq_len, device=encoder_hidden_states.device
+            ).view(
+                1, seq_len
+            )  # [1, L]
             # Mask: positions > prev_boundary AND positions <= new_boundary
             mask = (
                 (positions > prev_boundary) & (positions <= new_boundary)
@@ -2193,7 +2264,9 @@ class AutoregressiveSoftBoundaryConceptGenerator(BaseConceptGenerator):
             # Compute attention scores
             # Use a learnable query for each concept iteration
             Q = self.concept_queries[0][0].unsqueeze(0).expand(batch_size, -1)  # [B, D]
-            scores = torch.bmm(Q.unsqueeze(1), projected_hidden.transpose(1, 2)).squeeze(
+            scores = torch.bmm(
+                Q.unsqueeze(1), projected_hidden.transpose(1, 2)
+            ).squeeze(
                 1
             )  # [B, L]
             scores = scores / self.temperature
@@ -2216,7 +2289,9 @@ class AutoregressiveSoftBoundaryConceptGenerator(BaseConceptGenerator):
         # Split into hierarchical levels
         concepts_list = []
         start_idx = 0
-        for level_idx, length in enumerate(self.config.level_lengths):
+        for level_idx, length in enumerate(
+            self.config["model"]["pyramid"]["level_lengths"]
+        ):
             end_idx = start_idx + length
             C_k = all_concepts[:, start_idx:end_idx, :]  # [B, L_k, D]
             concepts_list.append(C_k)
@@ -2275,7 +2350,7 @@ class CausalSoftPoolingConceptGenerator(BaseConceptGenerator):
 
     def __init__(
         self,
-        config: NLCPV3Config,
+        config: dict,
         encoder_hidden_dim: int,
         n_refinement_layers: int = 2,
         epsilon: float = 0.05,
@@ -2289,14 +2364,17 @@ class CausalSoftPoolingConceptGenerator(BaseConceptGenerator):
         self.lambda_mono = lambda_mono
         self.lambda_cov = lambda_cov
 
-        total_concepts = sum(config.level_lengths)
+        total_concepts = sum(config["model"]["pyramid"]["level_lengths"])
 
         # Position router
         self.pos_mlp = nn.Sequential(
-            nn.Linear(config.hidden_dim, config.hidden_dim // 2),
-            nn.LayerNorm(config.hidden_dim // 2),
+            nn.Linear(
+                config["model"]["pyramid"]["hidden_dim"],
+                config["model"]["pyramid"]["hidden_dim"] // 2,
+            ),
+            nn.LayerNorm(config["model"]["pyramid"]["hidden_dim"] // 2),
             nn.GELU(),
-            nn.Linear(config.hidden_dim // 2, 1),
+            nn.Linear(config["model"]["pyramid"]["hidden_dim"] // 2, 1),
         )
 
         # Learnable centers
@@ -2311,9 +2389,9 @@ class CausalSoftPoolingConceptGenerator(BaseConceptGenerator):
         self.refinement_layers = nn.ModuleList(
             [
                 nn.TransformerEncoderLayer(
-                    d_model=config.hidden_dim,
-                    nhead=config.num_heads,
-                    dim_feedforward=4 * config.hidden_dim,
+                    d_model=config["model"]["pyramid"]["hidden_dim"],
+                    nhead=config["model"]["pyramid"]["num_heads"],
+                    dim_feedforward=4 * config["model"]["pyramid"]["hidden_dim"],
                     activation="gelu",
                     batch_first=True,
                 )
@@ -2322,7 +2400,10 @@ class CausalSoftPoolingConceptGenerator(BaseConceptGenerator):
         )
 
         # Reconstruction head
-        self.recon_head = nn.Linear(config.hidden_dim, config.hidden_dim)
+        self.recon_head = nn.Linear(
+            config["model"]["pyramid"]["hidden_dim"],
+            config["model"]["pyramid"]["hidden_dim"],
+        )
 
     def _compute_monotonicity_loss(self, A: torch.Tensor) -> torch.Tensor:
         """Compute monotonicity regularization loss.
@@ -2386,7 +2467,9 @@ class CausalSoftPoolingConceptGenerator(BaseConceptGenerator):
 
         # Compute attention scores
         attention_scores = torch.bmm(expanded_queries, projected_hidden.transpose(1, 2))
-        attention_scores = attention_scores / math.sqrt(self.config.hidden_dim)
+        attention_scores = attention_scores / math.sqrt(
+            self.config["model"]["pyramid"]["hidden_dim"]
+        )
         level_attention = F.softmax(attention_scores, dim=-1)
 
         # Extract concepts
@@ -2416,7 +2499,10 @@ class CausalSoftPoolingConceptGenerator(BaseConceptGenerator):
             level_concepts = self.forward_next_level(
                 encoder_hidden_states, previous_level_concepts, target_level_index
             )
-            aux = {"target_level_index": target_level_index, "method": "causal_soft_pooling"}
+            aux = {
+                "target_level_index": target_level_index,
+                "method": "causal_soft_pooling",
+            }
             return level_concepts, aux
 
         # All levels mode
@@ -2466,7 +2552,9 @@ class CausalSoftPoolingConceptGenerator(BaseConceptGenerator):
         # Split into hierarchical levels
         concepts = []
         start_idx = 0
-        for level_idx, length in enumerate(self.config.level_lengths):
+        for level_idx, length in enumerate(
+            self.config["model"]["pyramid"]["level_lengths"]
+        ):
             end_idx = start_idx + length
             C_k = Z[:, start_idx:end_idx, :]  # [B, L_k, D]
             concepts.append(C_k)
