@@ -382,6 +382,11 @@ def test_loss_breakdown(builder, config, device, batch_size):
     residual_weighted = residual_raw * residual_w
 
     logging.info(
+        "  Config: ordering_loss_type=%s, ordering_margin=%.2f",
+        ordering_loss_type,
+        loss_weights["ordering_margin"],
+    )
+    logging.info(
         "  ┌─────────────────────────────────────────────────────────────────────┐"
     )
     logging.info(
