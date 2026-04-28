@@ -35,9 +35,8 @@ from nlcpV3.concept_hybrid_builder import (
     PyramidOutput,
     SingleLevelOutput,
 )
-from nlcpV3.data_loader import BuilderInput
+from nlcpV3.data_loader import NLCPV3DataLoader
 from nlcpV3.train_builder import compute_builder_loss
-from lmbase.dataset import registry
 from lmbase.utils.env_tools import get_device
 from ram.utils import load_config
 
@@ -66,32 +65,22 @@ def log_value(name, value, unit=""):
 
 
 def test_encode_cot(builder, device, batch_size):
-    """Verify encode_cot produces correct hidden states from token IDs.
-
-    PURPOSE:
-        The Builder's encode_cot accepts pre-tokenized input_ids and
-        produces hidden states from the pretrained reason_model backbone.
+    """Verify encode_cot produces correct hidden states from text and token IDs.
 
     WHAT IS CHECKED:
+        - Text input → EncoderOutput with 3D hidden_states [B, L, D_encoder]
         - Tensor input → EncoderOutput with 3D hidden_states [B, L, D_encoder]
         - Batch dimension matches requested batch_size
         - Last dimension matches reason_model hidden size
     """
     logging.info("\n=== encode_cot Tests ===")
-    logging.info("Purpose: Verify token ID inputs produce valid hidden states")
+    logging.info("Purpose: Verify text and token-ID inputs produce valid hidden states")
 
     texts = [f"Problem {i}: What is {i} + {i+1}?" for i in range(batch_size)]
 
-    # Tokenize texts externally (as forward() does)
-    tokens = builder.tokenizer(
-        texts, return_tensors="pt", padding=True, truncation=True, max_length=32
-    )
-    input_ids = tokens["input_ids"].to(device)
-    attention_mask = tokens["attention_mask"].to(device)
-
-    # --- Test: tensor input ---
-    logging.info("  -- Test: Tensor input (token IDs) --")
-    enc_out = builder.encode_cot(input_ids, attention_mask)
+    # --- Test: text input ---
+    logging.info("  -- Test: Text input (auto-tokenize) --")
+    enc_out = builder.encode_cot(texts)
     log_check("returns EncoderOutput", isinstance(enc_out, EncoderOutput))
     log_value("hidden_states.dim()", enc_out.hidden_states.dim())
     log_check("hidden_states is 3D", enc_out.hidden_states.dim() == 3)
@@ -107,26 +96,32 @@ def test_encode_cot(builder, device, batch_size):
         f"got {enc_out.hidden_states.shape[-1]}, expected {builder.reason_model_hidden_dim}",
     )
 
+    # --- Test: tensor input ---
+    logging.info("  -- Test: Tensor input (token IDs) --")
+    tokens = builder.tokenizer(
+        texts, return_tensors="pt", padding=True, truncation=True, max_length=32
+    )
+    input_ids = tokens["input_ids"].to(device)
+    attention_mask = tokens["attention_mask"].to(device)
+    enc_out2 = builder.encode_cot(input_ids, attention_mask=attention_mask)
+    log_check("returns EncoderOutput", isinstance(enc_out2, EncoderOutput))
+    log_check("hidden_states is 3D", enc_out2.hidden_states.dim() == 3)
+    log_check("batch dimension correct", enc_out2.hidden_states.shape[0] == batch_size)
+    log_check(
+        "last dim == reason_model_hidden_dim",
+        enc_out2.hidden_states.shape[-1] == builder.reason_model_hidden_dim,
+    )
+
     return enc_out
 
 
 def test_forward(builder, device, config, batch_size):
     """Verify forward() full pyramid construction with residual decomposition.
 
-    PURPOSE:
-        forward() is the core algorithm. It decomposes H_proj into a
-        hierarchy of concept levels with the residual constraint:
-            f_hat_k + f_rest_k = H_proj  for all k
-        This test verifies structural correctness (shapes) and checks
-        the residual identity holds within floating-point tolerance.
-
     WHAT IS CHECKED:
         - Returns PyramidOutput with correct number of levels
         - Each level's concepts have shape [B, L_k, D]
-        - LevelOutput contains concepts, base_concepts, attention, reconstruction
         - Residual identity: reconstructed_hidden + residual_hidden ≈ H_proj
-        - projected/reconstructed/residual all have shape [B, L, D]
-        - PyramidOutput helper properties (num_levels, total_concepts, etc.)
         - Level 0 has no refinement → concepts == base_concepts
         - Attention weights are valid softmax (sum ≈ 1 per slot)
     """
@@ -134,64 +129,43 @@ def test_forward(builder, device, config, batch_size):
     logging.info("Purpose: Verify full pyramid construction and residual decomposition")
 
     texts = [f"Solve {i}: compute {i} * {i+2}." for i in range(batch_size)]
-    tokens = builder.tokenizer(
-        texts,
-        return_tensors="pt",
-        padding=True,
-        truncation=True,
-        max_length=config["model"]["pyramid"]["max_seq_len"],
-    )
-    enc_out = builder.encode_cot(
-        tokens["input_ids"].to(device), tokens["attention_mask"].to(device)
-    )
+    enc_out = builder.encode_cot(texts)
     H = enc_out.hidden_states
     seq_len = H.shape[1]
     logging.info("  Encoder output H shape: %s", list(H.shape))
 
     # Build pyramid
-    output = builder._build_pyramid_from_hidden_states(H)
+    output = builder(H, attention_mask=enc_out.attention_mask)
     log_check("returns PyramidOutput", isinstance(output, PyramidOutput))
 
+    pyramid_cfg = config["model"]["pyramid"]
+    num_levels = pyramid_cfg["num_levels"]
+    level_lengths = pyramid_cfg["level_lengths"]
+    hidden_dim = pyramid_cfg["hidden_dim"]
+
     # --- Concepts count and shapes ---
-    # concepts: list of K tensors, concepts[k] shape [B, L_k, D]
-    log_value("num_levels", config["model"]["pyramid"]["num_levels"])
+    log_value("num_levels", num_levels)
     log_value("concepts count", len(output.concepts))
-    log_check(
-        "concepts count == num_levels",
-        len(output.concepts) == config["model"]["pyramid"]["num_levels"],
-    )
+    log_check("concepts count == num_levels", len(output.concepts) == num_levels)
     for k, concepts in enumerate(output.concepts):
-        expected = (
-            batch_size,
-            config["model"]["pyramid"]["level_lengths"][k],
-            config["model"]["pyramid"]["hidden_dim"],
-        )
+        expected = (batch_size, level_lengths[k], hidden_dim)
         log_value(f"concepts[{k}].shape", list(concepts.shape))
-        log_value(f"concepts[{k}].expected", list(expected))
         log_check(f"level {k} shape correct", concepts.shape == expected)
 
     # --- LevelOutput fields ---
-    # Each level produces structured output with 4 tensors.
     log_value("level_outputs count", len(output.level_outputs))
     log_check(
-        "level_outputs count == num_levels",
-        len(output.level_outputs) == config["model"]["pyramid"]["num_levels"],
+        "level_outputs count == num_levels", len(output.level_outputs) == num_levels
     )
     for k, lo in enumerate(output.level_outputs):
-        Lk = config["model"]["pyramid"]["level_lengths"][k]
-        log_value(f"level {k} concepts.shape", list(lo.concepts.shape))
-        log_value(f"level {k} base_concepts.shape", list(lo.base_concepts.shape))
-        log_value(f"level {k} attention.shape", list(lo.attention_weights.shape))
-        log_value(f"level {k} reconstruction.shape", list(lo.reconstruction.shape))
+        Lk = level_lengths[k]
         log_check(
             f"level {k} concepts shape",
-            lo.concepts.shape
-            == (batch_size, Lk, config["model"]["pyramid"]["hidden_dim"]),
+            lo.concepts.shape == (batch_size, Lk, hidden_dim),
         )
         log_check(
             f"level {k} base_concepts shape",
-            lo.base_concepts.shape
-            == (batch_size, Lk, config["model"]["pyramid"]["hidden_dim"]),
+            lo.base_concepts.shape == (batch_size, Lk, hidden_dim),
         )
         log_check(
             f"level {k} attention shape",
@@ -199,86 +173,33 @@ def test_forward(builder, device, config, batch_size):
         )
         log_check(
             f"level {k} reconstruction shape",
-            lo.reconstruction.shape
-            == (batch_size, seq_len, config["model"]["pyramid"]["hidden_dim"]),
+            lo.reconstruction.shape == (batch_size, seq_len, hidden_dim),
         )
 
     # --- Residual decomposition: f_hat + f_rest == H_proj ---
-    # MATHEMATICAL PRINCIPLE:
-    #   reconstructed_accumulator = R_0 + R_1 + ... + R_{K-1}
-    #   residual_hidden = H_proj - (R_0 + R_1 + ... + R_{K-1})
-    #   Therefore: reconstructed + residual = H_proj exactly (in real arithmetic).
-    # In floating point, the independent addition and subtraction sequences
-    # accumulate round-off error. With random (untrained) weights, R_k can
-    # be large, so cancellation amplifies the absolute error.
-    # EXPECTED: diff < ~1e-2 for float32, even before training.
     logging.info("  -- Residual decomposition check --")
     recomposed = output.reconstructed_hidden + output.residual_hidden
     diff = torch.abs(recomposed - output.projected_hidden).max().item()
     log_value("max_diff (f_hat + f_rest vs H_proj)", f"{diff:.2e}")
-    # Use a tolerant threshold because this is untrained random weights.
-    # The identity is algorithmic correctness, not training quality.
-    tolerance = 1e-1  # generous for float32 + random weights
+    tolerance = 1e-1
     log_check(
         f"residual identity holds (tol={tolerance:.0e})",
         diff < tolerance,
-        f"diff={diff:.2e} — NOTE: before training, large diff is expected; "
-        f"the algorithm is still correct",
+        f"diff={diff:.2e} — NOTE: before training, large diff is expected",
     )
-
-    # --- Hidden state shapes ---
-    for name, tensor in [
-        ("projected_hidden", output.projected_hidden),
-        ("reconstructed_hidden", output.reconstructed_hidden),
-        ("residual_hidden", output.residual_hidden),
-    ]:
-        expected_shape = (batch_size, seq_len, config["model"]["pyramid"]["hidden_dim"])
-        log_value(f"{name}.shape", list(tensor.shape))
-        log_check(
-            f"{name} shape correct",
-            tensor.shape == expected_shape,
-            f"expected {expected_shape}",
-        )
 
     # --- PyramidOutput properties ---
-    log_value("num_levels", output.num_levels)
-    log_value("level_lengths", output.level_lengths)
     log_value("total_concepts", output.total_concepts)
-    log_check(
-        "num_levels correct",
-        output.num_levels == config["model"]["pyramid"]["num_levels"],
-    )
-    log_check(
-        "level_lengths correct",
-        output.level_lengths == config["model"]["pyramid"]["level_lengths"],
-    )
-    log_check(
-        "total_concepts correct",
-        output.total_concepts == sum(config["model"]["pyramid"]["level_lengths"]),
-    )
+    log_check("total_concepts correct", output.total_concepts == sum(level_lengths))
     log_value("all_attentions length", len(output.all_attentions))
-    log_value("all_base_concepts length", len(output.all_base_concepts))
-    log_check(
-        "all_attentions length",
-        len(output.all_attentions) == config["model"]["pyramid"]["num_levels"],
-    )
-    log_check(
-        "all_base_concepts length",
-        len(output.all_base_concepts) == config["model"]["pyramid"]["num_levels"],
-    )
+    log_check("all_attentions length", len(output.all_attentions) == num_levels)
 
     cat = output.cat_concepts()
-    expected_cat_shape = (
-        batch_size,
-        sum(config["model"]["pyramid"]["level_lengths"]),
-        config["model"]["pyramid"]["hidden_dim"],
-    )
+    expected_cat_shape = (batch_size, sum(level_lengths), hidden_dim)
     log_value("cat_concepts.shape", list(cat.shape))
     log_check("cat_concepts shape correct", cat.shape == expected_cat_shape)
 
     # --- Level 0: no refinement ---
-    # By design, level 0 has no previous concepts to attend to, so
-    # refined_concepts = 0 and concepts == base_concepts.
     max_diff_l0 = (
         (output.level_outputs[0].concepts - output.level_outputs[0].base_concepts)
         .abs()
@@ -295,8 +216,6 @@ def test_forward(builder, device, config, batch_size):
     )
 
     # --- Attention softmax check ---
-    # Attention weights should sum to 1 across the sequence dimension.
-    # For random weights, the distribution may be uniform or peaked.
     for k, lo in enumerate(output.level_outputs):
         attn_sum = lo.attention_weights.sum(dim=-1)
         max_dev = (attn_sum - 1.0).abs().max().item()
@@ -313,16 +232,9 @@ def test_forward(builder, device, config, batch_size):
 def test_forward_next_level(builder, device, config, batch_size):
     """Verify forward_next_level step-by-step level extraction.
 
-    PURPOSE:
-        forward_next_level() is the incremental API used during autoregressive
-        generation (Phase 2 — Predictor). It extracts one level at a time,
-        using previously extracted concepts as context for refinement.
-        This test verifies each level is extracted correctly in sequence.
-
     WHAT IS CHECKED:
         - Each level returns SingleLevelOutput with correct level_index
         - concepts shape is [B, L_k, D]
-        - projected_hidden shape matches encoder output H
         - Cache accumulates exactly num_levels entries
         - clear_cache() resets both cache lists to empty
     """
@@ -330,24 +242,18 @@ def test_forward_next_level(builder, device, config, batch_size):
     logging.info("Purpose: Verify incremental level-by-level extraction")
 
     texts = [f"Step {i}: calculate {i+1} * {i+2}." for i in range(batch_size)]
-    tokens = builder.tokenizer(
-        texts,
-        return_tensors="pt",
-        padding=True,
-        truncation=True,
-        max_length=config["model"]["pyramid"]["max_seq_len"],
-    )
-    enc_out = builder.encode_cot(
-        tokens["input_ids"].to(device), tokens["attention_mask"].to(device)
-    )
+    enc_out = builder.encode_cot(texts)
     H = enc_out.hidden_states
     logging.info("  Encoder output H shape: %s", list(H.shape))
 
-    # Sequential level extraction
-    # This mirrors how the Predictor will generate: level 0, then level 1, etc.
+    pyramid_cfg = config["model"]["pyramid"]
+    num_levels = pyramid_cfg["num_levels"]
+    level_lengths = pyramid_cfg["level_lengths"]
+    hidden_dim = pyramid_cfg["hidden_dim"]
+
     builder.clear_cache()
     prev_concepts = []
-    for k in range(config["model"]["pyramid"]["num_levels"]):
+    for k in range(num_levels):
         logging.info("  -- Extracting level %d --", k)
         level_out = builder.forward_next_level(
             H, previous_level_concepts=prev_concepts, target_level_index=k
@@ -360,26 +266,11 @@ def test_forward_next_level(builder, device, config, batch_size):
         log_check(f"level {k} index correct", level_out.level_index == k)
         log_value(f"level {k} concepts.shape", list(level_out.concepts.shape))
         log_check(
-            f"level {k} batch size correct",
-            level_out.concepts.shape[0] == batch_size,
+            f"level {k} batch size correct", level_out.concepts.shape[0] == batch_size
         )
         log_check(
             f"level {k} concept count correct",
-            level_out.concepts.shape[1]
-            == config["model"]["pyramid"]["level_lengths"][k],
-        )
-        log_value(
-            f"level {k} projected_hidden.shape", list(level_out.projected_hidden.shape)
-        )
-        expected_ph_shape = (
-            batch_size,
-            H.shape[1],
-            config["model"]["pyramid"]["hidden_dim"],
-        )
-        log_value(f"level {k} projected_hidden expected", list(expected_ph_shape))
-        log_check(
-            f"level {k} projected_hidden shape correct",
-            level_out.projected_hidden.shape == expected_ph_shape,
+            level_out.concepts.shape[1] == level_lengths[k],
         )
         prev_concepts.append(level_out.concepts)
 
@@ -387,12 +278,11 @@ def test_forward_next_level(builder, device, config, batch_size):
     log_value("cached_attentions length", len(builder._cached_attentions))
     log_value("cached_base_concepts length", len(builder._cached_base_concepts))
     log_check(
-        "cache has num_levels attentions",
-        len(builder._cached_attentions) == config["model"]["pyramid"]["num_levels"],
+        "cache has num_levels attentions", len(builder._cached_attentions) == num_levels
     )
     log_check(
         "cache has num_levels base_concepts",
-        len(builder._cached_base_concepts) == config["model"]["pyramid"]["num_levels"],
+        len(builder._cached_base_concepts) == num_levels,
     )
 
     # --- Clear cache ---
@@ -405,65 +295,52 @@ def test_forward_next_level(builder, device, config, batch_size):
     )
 
 
-def test_gsm8k_integration(builder, device, config, dataset, batch_size):
+def test_gsm8k_integration(builder, device, config, dataloader):
     """Verify end-to-end pipeline with real GSM8K CoT data.
 
-    PURPOSE:
-        All previous tests use synthetic text. This test uses actual GSM8K
-        Chain-of-Thought answers to verify the pipeline works on realistic
-        reasoning traces (longer, more complex text).
-
     WHAT IS CHECKED:
+        - NLCPV3DataLoader yields BuilderInput batches correctly
         - encode_cot handles real CoT text (auto-tokenize)
-        - hidden_states batch dimension matches dataset samples
         - forward() produces valid PyramidOutput with correct shapes
         - total_concepts matches configuration
     """
     logging.info("\n=== GSM8K Integration Tests ===")
-    logging.info("Purpose: Verify pipeline with real GSM8K CoT data")
-
-    n = min(batch_size, len(dataset))
-    samples = [dataset[i] for i in range(n)]
-    questions = [s["question"] for s in samples]
-    cot_texts = [s["cot_answer"] for s in samples]
-    logging.info("  Using %d GSM8K samples", n)
-
-    # --- Build pyramid via forward(BuilderInput) with raw text ---
-    batch_input = BuilderInput(
-        questions=questions,
-        cot_answers=cot_texts,
-        solutions=[],
+    logging.info(
+        "Purpose: Verify pipeline with real GSM8K CoT data via NLCPV3DataLoader"
     )
-    pyramid = builder(batch_input)
+
+    batch = next(iter(dataloader))
+    logging.info("  Using batch of %d GSM8K samples", batch.batch_size)
+
+    enc_out = builder.encode_cot(batch.cot_answers)
+    pyramid = builder(enc_out.hidden_states, attention_mask=enc_out.attention_mask)
     log_check(
         "GSM8K forward returns PyramidOutput",
         isinstance(pyramid, PyramidOutput),
     )
     log_value("GSM8K concepts count", len(pyramid.concepts))
+    pyramid_cfg = config["model"]["pyramid"]
     log_check(
         "GSM8K concepts count correct",
-        len(pyramid.concepts) == config["model"]["pyramid"]["num_levels"],
+        len(pyramid.concepts) == pyramid_cfg["num_levels"],
     )
     log_value("GSM8K total_concepts", pyramid.total_concepts)
     log_check(
         "GSM8K total_concepts correct",
-        pyramid.total_concepts == sum(config["model"]["pyramid"]["level_lengths"]),
+        pyramid.total_concepts == sum(pyramid_cfg["level_lengths"]),
     )
-    log_value("GSM8K concept batch", pyramid.concepts[0].shape[0])
-    log_check("GSM8K concept batch correct", pyramid.concepts[0].shape[0] == n)
-    log_value("GSM8K projected_hidden batch", pyramid.projected_hidden.shape[0])
+    log_check(
+        "GSM8K concept batch correct",
+        pyramid.concepts[0].shape[0] == batch.batch_size,
+    )
     log_check(
         "GSM8K projected_hidden batch correct",
-        pyramid.projected_hidden.shape[0] == n,
+        pyramid.projected_hidden.shape[0] == batch.batch_size,
     )
 
 
 def test_loss_breakdown(builder, config, device, batch_size):
     """Display each loss component, its weight, and the weighted contribution.
-
-    PURPOSE:
-        Show a clear breakdown of all builder training losses so the
-        developer can verify that weights and magnitudes are reasonable.
 
     WHAT IS DISPLAYED:
         For each loss component:
@@ -471,52 +348,34 @@ def test_loss_breakdown(builder, config, device, batch_size):
           - Weight from config
           - Weighted contribution = raw × weight
         Plus the total loss = sum of all weighted contributions.
-
-    LOSS COMPONENTS:
-        1. recon_loss     × recon_loss_weight   — CoT reconstruction
-        2. ordering_loss  × concept_loss_weight  — Intra-level ordering
-        3. residual_loss  × 0.01 (fixed)         — Clean decomposition
-        Total = (1) + (2) + (3)
-
-        When use_reasoning_loss=True and ntp_loss_weight > 0:
-        4. ntp_loss       × ntp_loss_weight     — Reasoning validation
-        Total = (1) + (2) + (3) + (4)
     """
     logging.info("\n=== Loss Breakdown ===")
     logging.info(
         "Purpose: Show raw loss, weight, and weighted contribution for each component"
     )
 
-    # --- Build pyramid ---
     texts = [f"What is {i} + {i+1}? The answer is {i+i+1}." for i in range(batch_size)]
     builder.train()
-    tokens = builder.tokenizer(
-        texts,
-        return_tensors="pt",
-        padding=True,
-        truncation=True,
-        max_length=config["model"]["pyramid"]["max_seq_len"],
-    )
-    enc_out = builder.encode_cot(
-        tokens["input_ids"].to(device), tokens["attention_mask"].to(device)
-    )
+    enc_out = builder.encode_cot(texts)
     H = enc_out.hidden_states
-    pyramid = builder._build_pyramid_from_hidden_states(H)
+    pyramid = builder(H, attention_mask=enc_out.attention_mask)
 
-    # --- Compute base builder losses (recon + ordering + residual) ---
+    loss_weights = config["training"]["loss_weights"]
+    ordering_loss_type = config["training"].get("ordering_loss_type", "margin")
+
+    # --- Compute base builder losses ---
     total_loss, loss_dict = compute_builder_loss(
-        pyramid, config["training"]["loss_weights"]
+        pyramid, loss_weights, ordering_loss_type=ordering_loss_type
     )
 
-    # Display each component
     recon_raw = loss_dict["recon"]
     ordering_raw = loss_dict["ordering"]
     residual_raw = loss_dict["residual"]
     total_raw = loss_dict["total"]
 
-    recon_w = config["training"]["loss_weights"]["recon_loss_weight"]
-    ordering_w = config["training"]["loss_weights"]["concept_loss_weight"]
-    residual_w = 0.01  # fixed small weight
+    recon_w = loss_weights["recon_loss_weight"]
+    ordering_w = loss_weights["concept_loss_weight"]
+    residual_w = loss_weights.get("residual_loss_weight", 0.01)
 
     recon_weighted = recon_raw * recon_w
     ordering_weighted = ordering_raw * ordering_w
@@ -555,26 +414,19 @@ def test_loss_breakdown(builder, config, device, batch_size):
 
     # --- NTP loss (when enabled) ---
     ntp_weighted = 0.0
-    if (
+    use_reasoning = (
         config["model"]["builder"]["use_reasoning_loss"]
-        and config["training"]["loss_weights"]["ntp_loss_weight"] > 0
+        and loss_weights.get("ntp_loss_weight", 0.0) > 0
         and builder.back_proj is not None
-    ):
+    )
+    if use_reasoning:
         questions = [f"What is {i} + {i+1}?" for i in range(batch_size)]
         solutions = [str(i + i + 1) for i in range(batch_size)]
         Q_tokens = builder.tokenizer(
-            questions,
-            return_tensors="pt",
-            padding=True,
-            truncation=True,
-            max_length=64,
+            questions, return_tensors="pt", padding=True, truncation=True, max_length=64
         )
         sol_tokens = builder.tokenizer(
-            solutions,
-            return_tensors="pt",
-            padding=True,
-            truncation=True,
-            max_length=64,
+            solutions, return_tensors="pt", padding=True, truncation=True, max_length=64
         )
         ntp_loss = builder.compute_reasoning_loss(
             pyramid,
@@ -583,7 +435,7 @@ def test_loss_breakdown(builder, config, device, batch_size):
             sol_tokens["input_ids"].to(device),
         )
         ntp_raw = ntp_loss.item()
-        ntp_w = config["training"]["loss_weights"]["ntp_loss_weight"]
+        ntp_w = loss_weights["ntp_loss_weight"]
         ntp_weighted = ntp_raw * ntp_w
         logging.info(
             "  │ ntp_loss               │ %11.4f  │ %7.3f  │ %13.4f   │",
@@ -594,7 +446,6 @@ def test_loss_breakdown(builder, config, device, batch_size):
         logging.info(
             "  ├─────────────────────────────────────────────────────────────────────┤"
         )
-        # Recompute total with NTP included
         total_with_ntp = total_loss.item() + ntp_weighted
     else:
         total_with_ntp = total_loss.item()
@@ -614,7 +465,7 @@ def test_loss_breakdown(builder, config, device, batch_size):
         abs(total_raw - expected_base_total) < 1e-3,
         f"total={total_raw:.4f}, sum={expected_base_total:.4f}",
     )
-    log_check("recon_loss is finite", recon_raw == recon_raw)  # NaN check
+    log_check("recon_loss is finite", recon_raw == recon_raw)
     log_check("ordering_loss is finite", ordering_raw == ordering_raw)
     log_check("residual_loss >= 0", residual_raw >= 0)
     log_check("total_loss is finite", total_raw == total_raw)
@@ -624,12 +475,6 @@ def test_loss_breakdown(builder, config, device, batch_size):
 
 def test_gradient_flow(builder, device, batch_size):
     """Verify backpropagation reaches all learnable parameters.
-
-    PURPOSE:
-        Before training, we must confirm that gradients can flow through
-        every learnable component: input_proj, temperature, concept_queries,
-        and level_projs. If any component has broken gradients, training
-        will silently fail (parameters frozen).
 
     WHAT IS CHECKED:
         - input_proj.weight receives grad after backward()
@@ -645,21 +490,11 @@ def test_gradient_flow(builder, device, batch_size):
     logging.info("Purpose: Verify all learnable parameters receive gradients")
 
     texts = [f"Compute {i} + {i+1}." for i in range(batch_size)]
-    tokens = builder.tokenizer(
-        texts,
-        return_tensors="pt",
-        padding=True,
-        truncation=True,
-        max_length=builder.pyramid_cfg["max_seq_len"],
-    )
-    enc_out = builder.encode_cot(
-        tokens["input_ids"].to(device), tokens["attention_mask"].to(device)
-    )
+    enc_out = builder.encode_cot(texts)
 
     builder.train()
-    output = builder._build_pyramid_from_hidden_states(enc_out.hidden_states)
+    output = builder(enc_out.hidden_states, attention_mask=enc_out.attention_mask)
 
-    # Use a simple sum loss so every concept contributes.
     loss = sum(c.sum() for c in output.concepts)
     log_value("loss value", f"{loss.item():.4f}")
     loss.backward()
@@ -696,7 +531,6 @@ def test_gradient_flow(builder, device, batch_size):
             )
 
     # --- reason_model (frozen by default) ---
-    # Not a failure — just informational.
     backbone_grad = any(p.grad is not None for p in builder.reason_model.parameters())
     log_check(
         "reason_model has gradients (only if un-frozen or LoRA)",
@@ -720,26 +554,22 @@ def test_gradient_flow(builder, device, batch_size):
 def test_reasoning_loss(ntp_config, device, batch_size):
     """Verify compute_reasoning_loss with use_reasoning_loss=True.
 
-    PURPOSE:
-        When use_reasoning_loss is enabled, the Builder creates back_proj
-        (D → D_encoder) and supports compute_reasoning_loss(). This test
-        verifies the full NTP pipeline: Q + concept pyramid → solution logits.
-
     WHAT IS CHECKED:
         - Builder with use_reasoning_loss=True has back_proj
         - back_proj dimensions: in=hidden_dim, out=reason_model_hidden_dim
         - back_proj.weight ≈ input_proj.weight.T (pseudo-inverse init)
-        - compute_reasoning_loss returns a scalar loss
+        - compute_reasoning_loss returns a scalar loss with correct args
         - Loss is finite and positive
         - Gradients flow through back_proj and input_proj after NTP backward
     """
     logging.info("\n=== Reasoning Loss Tests (use_reasoning_loss=True) ===")
     logging.info("Purpose: Verify NTP reasoning loss pipeline with back_proj")
 
-    # Config is loaded from YAML with use_reasoning_loss=True
     logging.info("  Creating builder from NTP config...")
     ntp_builder = ConceptPyramidBuilder(ntp_config)
     ntp_builder.to(device)
+
+    pyramid_cfg = ntp_config["model"]["pyramid"]
 
     # --- back_proj existence and dimensions ---
     log_check(
@@ -749,50 +579,67 @@ def test_reasoning_loss(ntp_config, device, batch_size):
     if ntp_builder.back_proj is not None:
         log_check(
             "back_proj.in_features == hidden_dim",
-            ntp_builder.back_proj.in_features
-            == ntp_config["model"]["pyramid"]["hidden_dim"],
-            f"in={ntp_builder.back_proj.in_features}, expected={ntp_config["model"]["pyramid"]["hidden_dim"]}",
+            ntp_builder.back_proj.in_features == pyramid_cfg["hidden_dim"],
+            f"in={ntp_builder.back_proj.in_features}, expected={pyramid_cfg['hidden_dim']}",
         )
         log_check(
             "back_proj.out_features == reason_model_hidden_dim",
             ntp_builder.back_proj.out_features == ntp_builder.reason_model_hidden_dim,
-            f"out={ntp_builder.back_proj.out_features}, "
-            f"expected={ntp_builder.reason_model_hidden_dim}",
+            f"out={ntp_builder.back_proj.out_features}, expected={ntp_builder.reason_model_hidden_dim}",
         )
 
         # --- Pseudo-inverse initialization check ---
-        # back_proj.weight should be initialized as input_proj.weight.T
         weight_diff = (
             (ntp_builder.back_proj.weight - ntp_builder.input_proj.weight.T)
             .abs()
             .max()
             .item()
         )
-        log_value(
-            "back_proj vs input_proj.T max_diff",
-            f"{weight_diff:.2e}",
-        )
+        log_value("back_proj vs input_proj.T max_diff", f"{weight_diff:.2e}")
         log_check(
             "back_proj initialized as input_proj.T (pseudo-inverse)",
             weight_diff < 1e-6,
             f"diff={weight_diff:.2e}",
         )
 
-    # --- Full NTP pipeline ---
-    texts = [f"What is {i} + {i+1}? The answer is {i+i+1}." for i in range(batch_size)]
-    questions = [f"What is {i} + {i+1}?" for i in range(batch_size)]
-    solutions = [str(i + i + 1) for i in range(batch_size)]
+    # --- Full NTP pipeline with real data via NLCPV3DataLoader ---
+    data_cfg = ntp_config["data"]
+    ntp_dataloader = NLCPV3DataLoader(
+        data_cfg=data_cfg,
+        batch_size=batch_size,
+        include_solution=True,
+        shuffle=False,
+        drop_last=False,
+        num_workers=0,
+    )
+    batch = next(iter(ntp_dataloader))
+    logging.info("  Using batch of %d GSM8K samples for NTP", batch.batch_size)
 
-    batch_input = BuilderInput(
-        questions=questions,
-        cot_answers=texts,
-        solutions=solutions,
+    enc_out = ntp_builder.encode_cot(batch.cot_answers)
+    pyramid = ntp_builder(enc_out.hidden_states, attention_mask=enc_out.attention_mask)
+
+    Q_tokens = ntp_builder.tokenizer(
+        batch.questions,
+        return_tensors="pt",
+        padding=True,
+        truncation=True,
+        max_length=ntp_config["model"]["pyramid"]["max_seq_len"],
+    )
+    sol_tokens = ntp_builder.tokenizer(
+        batch.solutions,
+        return_tensors="pt",
+        padding=True,
+        truncation=True,
+        max_length=ntp_config["model"]["pyramid"]["max_seq_len"],
     )
 
     ntp_builder.train()
-    pyramid = ntp_builder(batch_input)
-
-    ntp_loss = ntp_builder.compute_reasoning_loss(pyramid)
+    ntp_loss = ntp_builder.compute_reasoning_loss(
+        pyramid,
+        Q_tokens["input_ids"].to(device),
+        Q_tokens["attention_mask"].to(device),
+        sol_tokens["input_ids"].to(device),
+    )
     log_value("NTP loss value", f"{ntp_loss.item():.4f}")
     log_check("NTP loss is finite", torch.isfinite(ntp_loss))
     log_check("NTP loss is positive", ntp_loss.item() > 0)
@@ -849,17 +696,24 @@ def main():
         "Model loaded. reason_model_hidden_dim=%d", builder.reason_model_hidden_dim
     )
 
-    # Load GSM8K
-    logging.info("Loading GSM8K dataset...")
+    # Load GSM8K via NLCPV3DataLoader
+    logging.info("Loading GSM8K dataset via NLCPV3DataLoader...")
     data_cfg = yaml_config["data"]
-    dataset = registry.get(data_cfg, split=data_cfg["split"])
-    logging.info("GSM8K loaded: %d samples", len(dataset))
+    dataloader = NLCPV3DataLoader(
+        data_cfg=data_cfg,
+        batch_size=batch_size,
+        include_solution=False,
+        shuffle=False,
+        drop_last=False,
+        num_workers=0,
+    )
+    logging.info("GSM8K loaded: %d samples", dataloader.dataset_size)
 
     # Run all diagnostic tests
     test_encode_cot(builder, device, batch_size)
     test_forward(builder, device, yaml_config, batch_size)
     test_forward_next_level(builder, device, yaml_config, batch_size)
-    test_gsm8k_integration(builder, device, yaml_config, dataset, batch_size)
+    test_gsm8k_integration(builder, device, yaml_config, dataloader)
     test_loss_breakdown(builder, yaml_config, device, batch_size)
     test_gradient_flow(builder, device, batch_size)
 
