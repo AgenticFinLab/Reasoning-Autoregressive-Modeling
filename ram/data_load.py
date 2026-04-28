@@ -25,7 +25,9 @@ Usage:
 Custom target formatting:
     >>> class MyDataLoader(RamDataLoaderRegistry):
     ...     def format_target(self, sample) -> str:
-    ...         return f"Q: {sample.question}\nA: {sample.cot_answer}"
+    ...         question = sample["question"] if isinstance(sample, dict) else sample.question
+    ...         cot = sample["cot_answer"] if isinstance(sample, dict) else sample.cot_answer
+    ...         return f"Q: {question}\nA: {cot}"
     >>>
     >>> loader = MyDataLoader({
     ...     "data_name": "gsm8k",

@@ -52,13 +52,24 @@ class NLCPV3DataLoader:
         # Load dataset from lmbase registry
         self.dataset = registry.get(data_cfg, split=data_cfg["split"])
 
+    @staticmethod
+    def _get_field(sample: Any, attr_name: str, dict_key: str) -> str:
+        """Extract a field from either a dict or an object.
+
+        lmbase datasets return dicts. Direct access enforces fail-fast:
+        missing fields raise KeyError / AttributeError immediately.
+        """
+        if isinstance(sample, dict):
+            return sample[dict_key]
+        return getattr(sample, attr_name)
+
     def _collate_fn(self, raw_samples: List[Any]) -> BuilderInput:
         questions, cot_answers, solutions = [], [], []
         for sample in raw_samples:
-            questions.append(sample.question)
-            cot_answers.append(sample.cot_answer)
+            questions.append(self._get_field(sample, "question", "question"))
+            cot_answers.append(self._get_field(sample, "cot_answer", "cot_answer"))
             if self.include_solution:
-                solutions.append(sample.groundtruth)
+                solutions.append(self._get_field(sample, "groundtruth", "groundtruth"))
         return BuilderInput(
             questions=questions, cot_answers=cot_answers, solutions=solutions
         )
