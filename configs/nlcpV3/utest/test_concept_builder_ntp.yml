@@ -57,7 +57,7 @@ training:
   # Loss weights for training objectives
   loss_weights:
     ntp_loss_weight: 1.0
-    concept_loss_weight: 0.1
+    ordering_loss_weight: 0.1
     recon_loss_weight: 0.1
     ordering_margin: 1.0
     residual_loss_weight: 0.01

@@ -374,7 +374,7 @@ def test_loss_breakdown(builder, config, device, batch_size):
     total_raw = loss_dict["total"]
 
     recon_w = loss_weights["recon_loss_weight"]
-    ordering_w = loss_weights["concept_loss_weight"]
+    ordering_w = loss_weights["ordering_loss_weight"]
     residual_w = loss_weights.get("residual_loss_weight", 0.01)
 
     recon_weighted = recon_raw * recon_w

@@ -85,7 +85,7 @@ training:
   #   computes cross-entropy on solution tokens given Q + concept pyramid.
   #   [test value: 1.0 — non-zero to verify NTP code path in unit tests]
   #
-  # concept_loss_weight:
+  # ordering_loss_weight:
   #   Intra-level ordering loss. Encourages concepts within each level
   #   to attend to sequential CoT positions (Gaussian soft targets).
   #
@@ -95,7 +95,7 @@ training:
   # ─────────────────────────────────────────────────────────
   loss_weights:
     ntp_loss_weight: 1.0
-    concept_loss_weight: 0.1
+    ordering_loss_weight: 0.1
     recon_loss_weight: 0.1
     ordering_margin: 1.0
     residual_loss_weight: 0.01

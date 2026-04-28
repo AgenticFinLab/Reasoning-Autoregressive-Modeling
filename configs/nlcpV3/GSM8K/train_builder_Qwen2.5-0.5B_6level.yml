@@ -100,7 +100,7 @@ model:
 #
 # loss_weights:
 #   ntp_loss_weight       : Weight for next-token-prediction reasoning loss.
-#   concept_loss_weight   : Weight for intra-level concept ordering loss.
+#   ordering_loss_weight   : Weight for intra-level concept ordering loss.
 #   recon_loss_weight     : Weight for CoT hidden-state reconstruction loss.
 #   ordering_margin       : Margin for ordering constraint in concept_loss.
 #   residual_loss_weight  : Weight for residual decomposition regularization.
@@ -120,7 +120,7 @@ training:
   resume: ''
   loss_weights:
     ntp_loss_weight: 0.0
-    concept_loss_weight: 0.1
+    ordering_loss_weight: 0.1
     recon_loss_weight: 1.0
     ordering_margin: 1.0
     residual_loss_weight: 0.01

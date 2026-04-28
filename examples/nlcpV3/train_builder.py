@@ -124,7 +124,7 @@ def compute_builder_loss(
 
     Args:
         pyramid: PyramidOutput from builder.forward()
-        loss_weights: Dict with recon_loss_weight, concept_loss_weight,
+        loss_weights: Dict with recon_loss_weight, ordering_loss_weight,
             residual_loss_weight, etc.
         ordering_loss_type: "margin" (design doc spec, mandatory) or
             "gaussian" (original soft target). Can also be "both".
@@ -187,7 +187,7 @@ def compute_builder_loss(
     residual_weight = loss_weights["residual_loss_weight"]
     total_loss = (
         loss_weights["recon_loss_weight"] * recon_loss
-        + loss_weights["concept_loss_weight"] * ordering_loss
+        + loss_weights["ordering_loss_weight"] * ordering_loss
         + residual_weight * res_loss
     )
     loss_dict["total"] = total_loss.item()
