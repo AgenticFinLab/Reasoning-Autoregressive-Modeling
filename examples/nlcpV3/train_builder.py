@@ -136,11 +136,15 @@ def compute_builder_loss(
     device = pyramid.projected_hidden.device
 
     # ── Reconstruction loss ──────────────────────────────────────────
-    # Mask out padded positions if attention_mask is provided
+    # MSE averaged over all valid elements (B, L, D), consistent with
+    # VAR's F.mse_loss(reduction='mean') which averages over all dims.
     if pyramid.attention_mask is not None:
         mask = pyramid.attention_mask.unsqueeze(-1)  # [B, L, 1]
         recon_diff = (pyramid.reconstructed_hidden - pyramid.projected_hidden) * mask
-        recon_loss = (recon_diff**2).sum() / mask.sum()
+        num_valid_elements = (
+            mask.sum() * pyramid.projected_hidden.shape[-1]
+        )  # tokens × D
+        recon_loss = (recon_diff**2).sum() / num_valid_elements
     else:
         recon_loss = F.mse_loss(pyramid.reconstructed_hidden, pyramid.projected_hidden)
     loss_dict["recon"] = recon_loss.item()
@@ -176,9 +180,14 @@ def compute_builder_loss(
     loss_dict["ordering"] = ordering_loss.item()
 
     # ── Residual loss ────────────────────────────────────────────────
+    # L1 averaged over all valid elements (B, L, D), consistent with
+    # the per-element mean convention used by reconstruction loss.
     if pyramid.attention_mask is not None:
         mask = pyramid.attention_mask.unsqueeze(-1)
-        res_loss = (pyramid.residual_hidden.abs() * mask).sum() / mask.sum()
+        num_valid_elements = (
+            mask.sum() * pyramid.residual_hidden.shape[-1]
+        )  # tokens × D
+        res_loss = (pyramid.residual_hidden.abs() * mask).sum() / num_valid_elements
     else:
         res_loss = pyramid.residual_hidden.abs().mean()
     loss_dict["residual"] = res_loss.item()
