@@ -1,121 +1,170 @@
 # =============================================================================
 # NLCP V3 Hybrid Concept Generator Test Configuration
 # =============================================================================
-# Purpose: Dedicated configuration for test_hybrid_generator.py unit tests
-# Usage: python examples/nlcpV3/utest/test_hybrid_generator.py -c configs/nlcpV3/utest/test_hybrid_generator.yml
-#
-# Hybrid Generator Design:
-#   Combines three best methods:
-#   1. ResidualAttentivePooling - VAR-style residual decomposition (backbone)
-#   2. MonotonicSoftAssignment - Cross-attention context accumulation (bridge)
-#   3. AutoregressiveSoftBoundary - Boundary ordering constraint (auxiliary)
-#
-# Test Output:
-#   Terminal output is saved to: log.log_path/terminal_out.txt
+# Purpose: Unit tests for Hybrid Concept Generator with encoder + decoder pipeline
+# Usage:
+#   python examples/nlcpV3/utest/test_hybrid_generator.py \
+#       -c configs/nlcpV3/utest/test_hybrid_generator.yml
 # =============================================================================
 
-# Data configuration for GSM8K integration tests
+# Data configuration
+# -----------------------------------------------------------------------------
+# data_name    : Dataset identifier (GSM8K for grade-school math reasoning).
+# data_path    : Root directory for dataset storage.
+# split        : Which data split to use for testing.
+# subset       : Optional subset filter (empty string = use all data).
+# -----------------------------------------------------------------------------
 data:
-  data_name: "GSM8K"
-  data_path: "EXPERIMENT/data/GSM8K"
-  split: "train"
-  subset: ""
+  data_name: GSM8K
+  data_path: EXPERIMENT/data/GSM8K
+  split: train
+  subset: ''
 
 # Environment configuration
+# -----------------------------------------------------------------------------
+# dotenv_path  : Path to .env file for environment variables (e.g., HF_TOKEN).
+# seed         : Random seed for reproducibility across runs.
+# dataloader_num_workers : Number of data-loading worker processes (0 = main process only).
+# device_map   : Device placement strategy for model and auxiliary modules.
+#   model.device   : Device allocation (auto = automatic selection).
+#   model.priority : Priority rank for device assignment.
+# -----------------------------------------------------------------------------
 environment:
-  dotenv_path: ".env"
+  dotenv_path: .env
   seed: 42
   dataloader_num_workers: 0
   device_map:
     model:
-      device: "auto"
+      device: auto
       priority: 1
 
-# Model configuration - Hybrid Concept Generator specific
+# Model configuration
+# -----------------------------------------------------------------------------
+# encoder           : Feature extraction encoder (causal Transformer backbone).
+#   encoder_model_name : HuggingFace model identifier for the encoder.
+#   encoder_num_layers : Number of encoder layers to use (-1 = all layers).
+#   encoder_freeze     : Whether to freeze encoder weights during testing.
+#   encoder_hidden_dim : Hidden dimension of encoder output states.
+#
+# concept_builder   : Concept pyramid construction module.
+#   hidden_dim         : Dimension of concept embeddings.
+#   num_heads          : Number of attention heads for intra-level ordering.
+#   num_levels         : Number of pyramid levels (geometric abstraction hierarchy).
+#   level_lengths      : Number of concepts per level (geometric progression).
+#   max_seq_len        : Maximum sequence length for CoT encoding.
+#   use_positional_query_init : Initialize queries with DLCM positional priors.
+#   positional_init_alpha     : Strength of positional initialization signal (α).
+#   use_reasoning_loss        : Enable NTP reasoning loss (requires back_proj).
+#
+# concept_generator : Concept extraction / generation module (architecture placeholder).
+#   (Loss weights such as order_loss_weight are configured under training.loss_weights.)
+#
+# decoder           : Token decoding head for autoregressive generation.
+#   vocab_size    : Vocabulary size matching the tokenizer.
+#   dropout       : Dropout rate for decoder layers.
+#   rms_norm_eps  : Epsilon for RMS normalization stability.
+#   muP_scale     : Maximal Update Parametrization scaling factor.
+# -----------------------------------------------------------------------------
 model:
-  # Encoder configuration
   encoder:
-    encoder_model_name: "Qwen/Qwen2.5-0.5B"
+    encoder_model_name: Qwen/Qwen2.5-0.5B
     encoder_num_layers: 4
     encoder_freeze: true
     encoder_hidden_dim: 896
 
-  # Concept pyramid configuration
-  pyramid:
+  concept_builder:
     hidden_dim: 256
     num_heads: 8
     num_levels: 6
-    level_lengths: [1, 2, 4, 8, 16, 32]
+    level_lengths:
+    - 1
+    - 2
+    - 4
+    - 8
+    - 16
+    - 32
     max_seq_len: 512
+    use_positional_query_init: true
+    positional_init_alpha: 0.5
+    use_reasoning_loss: false
 
-  # Decoder configuration
+  concept_generator:
+    # Architecture-specific parameters for the concept generator go here.
+    # Loss weights (order_loss_weight, order_margin) are defined under training.loss_weights.
+
   decoder:
     vocab_size: 151936
     dropout: 0.1
     rms_norm_eps: 1.0e-6
     muP_scale: 1.0
 
-  # Hybrid Concept Generator specific parameters
-  hybrid_generator:
-    # Ordering loss weight (lambda_order)
-    order_loss_weight: 0.1
-    # Ordering constraint margin
-    order_margin: 1.0
-
-  # Builder-specific parameters
-  builder:
-    # Query initialization mode (ablation option)
-    # True: initialize queries with positional priors (DLCM-style segment bias)
-    # False: random Xavier uniform initialization
-    use_positional_query_init: true
-    # Enable NTP reasoning loss: Q + concept pyramid → solution validation.
-    use_reasoning_loss: false
-
-# Training configuration (minimal for testing)
+# Training configuration (minimal for unit testing)
+# -----------------------------------------------------------------------------
+# batch_size              : Training batch size for testing.
+# num_epochs              : Number of epochs (1 is sufficient for unit tests).
+# learning_rate           : Peak learning rate for AdamW optimizer.
+# weight_decay            : L2 regularization coefficient.
+# scheduler_type          : Learning rate scheduler (cosine = cosine annealing).
+# warmup_steps            : Number of linear warmup steps.
+# max_grad_norm           : Maximum gradient norm for clipping.
+# checkpointing           : Whether to enable gradient checkpointing.
+# bf16                    : Whether to use bfloat16 mixed precision.
+# resume                  : Checkpoint path to resume from (null = from scratch).
+#
+# loss_weights:
+#   ntp_loss_weight       : Weight for next-token-prediction reasoning loss.
+#   concept_loss_weight   : Weight for intra-level concept ordering loss.
+#   recon_loss_weight     : Weight for CoT hidden-state reconstruction loss.
+#   ordering_margin       : Margin for ordering constraint in concept_loss.
+#   residual_loss_weight  : Weight for residual decomposition regularization.
+#   order_loss_weight     : Weight for hybrid-generator ordering loss.
+#   order_margin          : Margin for hybrid-generator ordering constraint.
+# -----------------------------------------------------------------------------
 training:
   batch_size: 4
   num_epochs: 1
-  learning_rate: 1.0e-4
+  learning_rate: 0.0001
   weight_decay: 0.01
-  scheduler_type: "cosine"
+  scheduler_type: cosine
   warmup_steps: 10
-
-  # Loss weights for training objectives
-  # ─────────────────────────────────────────────────────────
-  # ntp_loss_weight:
-  #   NTP / reasoning loss. When use_reasoning_loss=True, the Builder
-  #   computes cross-entropy on solution tokens given Q + concept pyramid.
-  #   [test value: 1.0 — non-zero to verify NTP code path in unit tests]
-  #
-  # concept_loss_weight:
-  #   Intra-level ordering loss. Encourages concepts within each level
-  #   to attend to sequential CoT positions (Gaussian soft targets).
-  #
-  # recon_loss_weight:
-  #   CoT reconstruction loss. MSE between pyramid-reconstructed hidden
-  #   states and the original projected CoT hidden states.
-  # ─────────────────────────────────────────────────────────
   loss_weights:
     ntp_loss_weight: 1.0
     concept_loss_weight: 0.1
     recon_loss_weight: 0.1
-
+    ordering_margin: 1.0
+    residual_loss_weight: 0.01
+    order_loss_weight: 0.1
+    order_margin: 1.0
   gradient:
     max_grad_norm: 1.0
     checkpointing: false
   bf16: true
   resume: null
 
-# Log configuration - terminal output saved to log_path/terminal_out.txt
+# Logging configuration
+# -----------------------------------------------------------------------------
+# save_folder    : Root directory for all experiment outputs.
+# checkpoint_path: Directory for model checkpoints.
+# log_path       : Directory for training logs and terminal output.
+# log_level      : Console/logging verbosity (DEBUG/INFO/WARNING/ERROR).
+# checkpoint_step_interval : Save checkpoint every N steps.
+# log_step_interval        : Log metrics every N steps.
+# -----------------------------------------------------------------------------
 log:
-  save_folder: "EXPERIMENT/nlcpV3/utest/hybrid_generator"
-  checkpoint_path: "EXPERIMENT/nlcpV3/utest/hybrid_generator/checkpoints"
-  log_path: "EXPERIMENT/nlcpV3/utest/hybrid_generator/logs"
-  log_level: "INFO"
+  save_folder: EXPERIMENT/nlcpV3/utest/hybrid_generator
+  checkpoint_path: EXPERIMENT/nlcpV3/utest/hybrid_generator/checkpoints
+  log_path: EXPERIMENT/nlcpV3/utest/hybrid_generator/logs
+  log_level: INFO
   checkpoint_step_interval: 100
   log_step_interval: 10
 
-# Evaluation configuration (disabled for testing)
+# Evaluation configuration (disabled for unit testing)
+# -----------------------------------------------------------------------------
+# enabled          : Whether evaluation is enabled.
+# eval_step_interval : Evaluation frequency during training (0 = disable).
+# datasets         : List of evaluation datasets.
+# metrics          : List of evaluation metrics.
+# -----------------------------------------------------------------------------
 evaluation:
   enabled: false
   eval_step_interval: 100

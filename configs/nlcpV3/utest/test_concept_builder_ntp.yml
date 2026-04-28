@@ -43,6 +43,7 @@ model:
   # Builder-specific parameters
   builder:
     use_positional_query_init: true
+    positional_init_alpha: 0.5
     # Enable NTP reasoning loss: adds back_proj + compute_reasoning_loss()
     use_reasoning_loss: true
 
@@ -58,6 +59,8 @@ training:
     ntp_loss_weight: 1.0
     concept_loss_weight: 0.1
     recon_loss_weight: 0.1
+    ordering_margin: 1.0
+    residual_loss_weight: 0.01
 
 # Log configuration
 log:

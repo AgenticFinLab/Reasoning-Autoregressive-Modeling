@@ -15,8 +15,7 @@ DESIGN PHILOSOPHY:
        qualitative assessment (OK / WARNING / INFO).
 
 USAGE:
-    python3 examples/nlcpV3/utest/test_concept_builder.py \
-        -c configs/nlcpV3/utest/test_concept_builder.yml
+    python3 examples/nlcpV3/utest/test_concept_builder.py -c configs/nlcpV3/utest/test_concept_builder.yml
 """
 
 import argparse

@@ -1,3 +1,21 @@
+# =============================================================================
+# NLCP V3 Concept Pyramid Builder Training Configuration
+# =============================================================================
+# Purpose: Train ConceptPyramidBuilder on GSM8K with Qwen/Qwen3-1.7B
+# Pyramid Levels: 4 (ablation study)
+# Usage:
+#   python examples/nlcpV3/train_builder.py -c configs/nlcpV3/GSM8K/train_builder_Qwen3-1.7B_4level.yml
+# =============================================================================
+
+# Data configuration
+# -----------------------------------------------------------------------------
+# data_name    : Dataset identifier (GSM8K for grade-school math reasoning).
+# data_path    : Root directory for dataset storage.
+# split        : Which data split to use for training.
+# subset       : Optional subset filter (empty string = use all data).
+# shuffle      : Whether to shuffle training batches each epoch.
+# drop_last    : Drop incomplete final batch to ensure consistent tensor shapes.
+# -----------------------------------------------------------------------------
 data:
   data_name: GSM8K
   data_path: EXPERIMENT/data/GSM8K
@@ -5,6 +23,16 @@ data:
   subset: ''
   shuffle: true
   drop_last: true
+
+# Environment configuration
+# -----------------------------------------------------------------------------
+# dotenv_path  : Path to .env file for environment variables (e.g., HF_TOKEN).
+# seed         : Random seed for reproducibility across runs.
+# dataloader_num_workers : Number of data-loading worker processes (0 = main process only).
+# device_map   : Device placement strategy for model and auxiliary modules.
+#   model.device   : Device allocation (auto = automatic selection).
+#   model.priority : Priority rank for device assignment.
+# -----------------------------------------------------------------------------
 environment:
   dotenv_path: .env
   seed: 42
@@ -13,6 +41,27 @@ environment:
     model:
       device: auto
       priority: 1
+
+# Model configuration
+# -----------------------------------------------------------------------------
+# reason_model : Pre-trained causal language model used as the reasoning backbone.
+#   reason_model_name      : HuggingFace model identifier.
+#   reason_model_num_layers: Number of backbone layers to use (-1 = all layers).
+#   reason_model_freeze    : Whether to freeze backbone weights during training.
+#   reason_model_lora      : LoRA configuration (null = disabled).
+#
+# pyramid      : Concept pyramid architecture parameters.
+#   hidden_dim  : Dimension of concept embeddings.
+#   num_heads   : Number of attention heads for intra-level ordering.
+#   num_levels  : Number of pyramid levels (geometric abstraction hierarchy).
+#   level_lengths: Number of concepts per level (geometric progression).
+#   max_seq_len : Maximum sequence length for CoT encoding.
+#
+# builder      : ConceptPyramidBuilder-specific parameters.
+#   use_positional_query_init : Initialize queries with DLCM positional priors.
+#   use_reasoning_loss        : Enable NTP reasoning loss (requires back_proj).
+#   positional_init_alpha     : Strength of positional initialization signal (α).
+# -----------------------------------------------------------------------------
 model:
   reason_model:
     reason_model_name: Qwen/Qwen3-1.7B
@@ -33,6 +82,29 @@ model:
     use_positional_query_init: true
     use_reasoning_loss: false
     positional_init_alpha: 0.5
+
+# Training configuration
+# -----------------------------------------------------------------------------
+# batch_size              : Training batch size (reduce for larger models/GPUs).
+# num_epochs              : Total training epochs.
+# learning_rate           : Peak learning rate for AdamW optimizer.
+# weight_decay            : L2 regularization coefficient.
+# warmup_ratio            : Fraction of total steps for linear LR warmup.
+# gradient_clip           : Maximum gradient norm for clipping (prevents explosion).
+# log_step_interval       : Log training metrics every N steps.
+# checkpoint_step_interval: Save checkpoint every N steps (0 = disable).
+# eval_step_interval      : Evaluation frequency during training (0 = disable).
+# resume                  : Checkpoint path to resume from (empty = scratch).
+#
+# loss_weights:
+#   ntp_loss_weight       : Weight for next-token-prediction reasoning loss.
+#   concept_loss_weight   : Weight for intra-level concept ordering loss.
+#   recon_loss_weight     : Weight for CoT hidden-state reconstruction loss.
+#   ordering_margin       : Margin for ordering constraint in concept_loss.
+#   residual_loss_weight  : Weight for residual decomposition regularization.
+#
+# ordering_loss_type      : Ordering loss variant (margin = hinge-based).
+# -----------------------------------------------------------------------------
 training:
   batch_size: 2
   num_epochs: 10
@@ -51,6 +123,14 @@ training:
     ordering_margin: 1.0
     residual_loss_weight: 0.01
   ordering_loss_type: margin
+
+# Logging configuration
+# -----------------------------------------------------------------------------
+# save_folder    : Root directory for all experiment outputs.
+# checkpoint_path: Directory for model checkpoints.
+# log_path       : Directory for training logs and metrics.
+# log_level      : Console/logging verbosity (DEBUG/INFO/WARNING/ERROR).
+# -----------------------------------------------------------------------------
 log:
   save_folder: EXPERIMENT/nlcpV3/builder/GSM8K_Qwen3-1.7B_4level
   checkpoint_path: EXPERIMENT/nlcpV3/builder/GSM8K_Qwen3-1.7B_4level/checkpoints

@@ -66,6 +66,8 @@ model:
     # True: initialize queries with positional priors (DLCM-style segment bias)
     # False: random Xavier uniform initialization
     use_positional_query_init: true
+    # Positional initialization alpha (α) for query PE signal strength
+    positional_init_alpha: 0.5
     # Enable NTP reasoning loss: Q + concept pyramid → solution validation.
     use_reasoning_loss: false
 
@@ -95,6 +97,8 @@ training:
     ntp_loss_weight: 1.0
     concept_loss_weight: 0.1
     recon_loss_weight: 0.1
+    ordering_margin: 1.0
+    residual_loss_weight: 0.01
 
 # Log configuration
 log:
