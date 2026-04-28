@@ -59,7 +59,6 @@ environment:
 #
 # builder      : ConceptPyramidBuilder-specific parameters.
 #   use_positional_query_init : Initialize queries with DLCM positional priors.
-#   use_reasoning_loss        : Enable NTP reasoning loss (requires back_proj).
 #   positional_init_alpha     : Strength of positional initialization signal (α).
 # -----------------------------------------------------------------------------
 model:
@@ -80,7 +79,6 @@ model:
     max_seq_len: 512
   builder:
     use_positional_query_init: true
-    use_reasoning_loss: false
     positional_init_alpha: 0.5
 
 # Training configuration
@@ -97,7 +95,7 @@ model:
 # resume                  : Checkpoint path to resume from (empty = scratch).
 #
 # loss_weights:
-#   ntp_loss_weight       : Weight for next-token-prediction reasoning loss.
+#   reasoning_loss_weight       : Weight for next-token-prediction reasoning loss.
 #   ordering_loss_weight   : Weight for intra-level concept ordering loss.
 #   recon_loss_weight     : Weight for CoT hidden-state reconstruction loss.
 #   ordering_margin       : Margin for ordering constraint in concept_loss.
@@ -117,7 +115,7 @@ training:
   eval_step_interval: 0
   resume: ''
   loss_weights:
-    ntp_loss_weight: 0.0
+    reasoning_loss_weight: 0.0
     ordering_loss_weight: 0.1
     recon_loss_weight: 1.0
     ordering_margin: 1.0

@@ -296,13 +296,10 @@ def train_builder(config: dict):
 
     optimizer = AdamW(trainable_params, lr=learning_rate, weight_decay=weight_decay)
 
-    use_reasoning = (
-        builder_cfg["use_reasoning_loss"] and loss_weights["ntp_loss_weight"] > 0
-    )
     dataloader = NLCPV3DataLoader(
         data_cfg=data_cfg,
         batch_size=batch_size,
-        include_solution=use_reasoning,
+        include_solution=True,
         shuffle=data_cfg["shuffle"],
         drop_last=data_cfg["drop_last"],
         num_workers=env_cfg["dataloader_num_workers"],
@@ -364,8 +361,8 @@ def train_builder(config: dict):
                 ordering_loss_type=ordering_loss_type,
             )
 
-            if use_reasoning:
-                # Tokenize questions and solutions for NTP loss
+            if batch.has_solution:
+                # Tokenize questions and solutions for reasoning loss
                 q_tokens = builder.tokenizer(
                     batch.questions,
                     return_tensors="pt",
@@ -385,11 +382,13 @@ def train_builder(config: dict):
                 )
                 sol_ids = sol_tokens["input_ids"].to(device)
 
-                ntp_loss = builder.compute_reasoning_loss(
+                reasoning_loss = builder.compute_reasoning_loss(
                     pyramid, q_ids, q_mask, sol_ids
                 )
-                total_loss = total_loss + loss_weights["ntp_loss_weight"] * ntp_loss
-                loss_dict["ntp"] = ntp_loss.item()
+                total_loss = (
+                    total_loss + loss_weights["reasoning_loss_weight"] * reasoning_loss
+                )
+                loss_dict["reasoning"] = reasoning_loss.item()
                 loss_dict["total"] = total_loss.item()
 
             total_loss.backward()

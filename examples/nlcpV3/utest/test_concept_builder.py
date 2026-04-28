@@ -390,74 +390,62 @@ def test_loss_breakdown(builder, config, device, batch_size):
         "  ┌─────────────────────────────────────────────────────────────────────┐"
     )
     logging.info(
-        "  │ Loss Component         │ Raw Value    │ Weight   │ Weighted Value  │"
+        "  │ Config Key             │ Raw Loss     │ Weight   │ Weighted Value  │"
     )
     logging.info(
         "  ├─────────────────────────────────────────────────────────────────────┤"
     )
     logging.info(
-        "  │ recon_loss             │ %11.4f  │ %7.3f  │ %13.4f   │",
+        "  │ recon_loss_weight      │ %11.4f  │ %7.3f  │ %13.4f   │",
         recon_raw,
         recon_w,
         recon_weighted,
     )
     logging.info(
-        "  │ ordering_loss          │ %11.4f  │ %7.3f  │ %13.4f   │",
+        "  │ ordering_loss_weight   │ %11.4f  │ %7.3f  │ %13.4f   │",
         ordering_raw,
         ordering_w,
         ordering_weighted,
     )
     logging.info(
-        "  │ residual_loss          │ %11.4f  │ %7.3f  │ %13.4f   │",
+        "  │ residual_loss_weight   │ %11.4f  │ %7.3f  │ %13.4f   │",
         residual_raw,
         residual_w,
         residual_weighted,
     )
+
+    # --- Reasoning loss (always computed; weight controls contribution) ---
+    reasoning_w = loss_weights.get("reasoning_loss_weight", 0.0)
+    questions = [f"What is {i} + {i+1}?" for i in range(batch_size)]
+    solutions = [str(i + i + 1) for i in range(batch_size)]
+    Q_tokens = builder.tokenizer(
+        questions, return_tensors="pt", padding=True, truncation=True, max_length=64
+    )
+    sol_tokens = builder.tokenizer(
+        solutions, return_tensors="pt", padding=True, truncation=True, max_length=64
+    )
+    reasoning_loss = builder.compute_reasoning_loss(
+        pyramid,
+        Q_tokens["input_ids"].to(device),
+        Q_tokens["attention_mask"].to(device),
+        sol_tokens["input_ids"].to(device),
+    )
+    reasoning_raw = reasoning_loss.item()
+    reasoning_weighted = reasoning_raw * reasoning_w
+    logging.info(
+        "  │ reasoning_loss_weight  │ %11.4f  │ %7.3f  │ %13.4f   │",
+        reasoning_raw,
+        reasoning_w,
+        reasoning_weighted,
+    )
+
     logging.info(
         "  ├─────────────────────────────────────────────────────────────────────┤"
     )
-
-    # --- NTP loss (when enabled) ---
-    ntp_weighted = 0.0
-    use_reasoning = (
-        config["model"]["builder"]["use_reasoning_loss"]
-        and loss_weights.get("ntp_loss_weight", 0.0) > 0
-        and builder.back_proj is not None
-    )
-    if use_reasoning:
-        questions = [f"What is {i} + {i+1}?" for i in range(batch_size)]
-        solutions = [str(i + i + 1) for i in range(batch_size)]
-        Q_tokens = builder.tokenizer(
-            questions, return_tensors="pt", padding=True, truncation=True, max_length=64
-        )
-        sol_tokens = builder.tokenizer(
-            solutions, return_tensors="pt", padding=True, truncation=True, max_length=64
-        )
-        ntp_loss = builder.compute_reasoning_loss(
-            pyramid,
-            Q_tokens["input_ids"].to(device),
-            Q_tokens["attention_mask"].to(device),
-            sol_tokens["input_ids"].to(device),
-        )
-        ntp_raw = ntp_loss.item()
-        ntp_w = loss_weights["ntp_loss_weight"]
-        ntp_weighted = ntp_raw * ntp_w
-        logging.info(
-            "  │ ntp_loss               │ %11.4f  │ %7.3f  │ %13.4f   │",
-            ntp_raw,
-            ntp_w,
-            ntp_weighted,
-        )
-        logging.info(
-            "  ├─────────────────────────────────────────────────────────────────────┤"
-        )
-        total_with_ntp = total_loss.item() + ntp_weighted
-    else:
-        total_with_ntp = total_loss.item()
-
+    total_with_reasoning = total_loss.item() + reasoning_weighted
     logging.info(
         "  │ TOTAL                  │             │          │ %13.4f   │",
-        total_with_ntp,
+        total_with_reasoning,
     )
     logging.info(
         "  └─────────────────────────────────────────────────────────────────────┘"
@@ -470,9 +458,9 @@ def test_loss_breakdown(builder, config, device, batch_size):
         abs(total_raw - expected_base_total) < 1e-3,
         f"total={total_raw:.4f}, sum={expected_base_total:.4f}",
     )
-    log_check("recon_loss is finite", recon_raw == recon_raw)
-    log_check("ordering_loss is finite", ordering_raw == ordering_raw)
-    log_check("residual_loss >= 0", residual_raw >= 0)
+    log_check("recon_loss_weight is finite", recon_raw == recon_raw)
+    log_check("ordering_loss_weight is finite", ordering_raw == ordering_raw)
+    log_check("residual_loss_weight >= 0", residual_raw >= 0)
     log_check("total_loss is finite", total_raw == total_raw)
 
     builder.eval()
@@ -543,7 +531,7 @@ def test_gradient_flow(builder, device, batch_size):
         "Expected WARN if freeze=True and no LoRA",
     )
 
-    # --- back_proj (only when use_reasoning_loss=True) ---
+    # --- back_proj ---
     if builder.back_proj is not None:
         bp_grad = builder.back_proj.weight.grad is not None
         log_check("back_proj.weight has gradient", bp_grad)
@@ -557,18 +545,17 @@ def test_gradient_flow(builder, device, batch_size):
 
 
 def test_reasoning_loss(ntp_config, device, batch_size):
-    """Verify compute_reasoning_loss with use_reasoning_loss=True.
+    """Verify compute_reasoning_loss pipeline.
 
     WHAT IS CHECKED:
-        - Builder with use_reasoning_loss=True has back_proj
-        - back_proj dimensions: in=hidden_dim, out=reason_model_hidden_dim
+        - back_proj exists and has correct dimensions
         - back_proj.weight ≈ input_proj.weight.T (pseudo-inverse init)
         - compute_reasoning_loss returns a scalar loss with correct args
         - Loss is finite and positive
-        - Gradients flow through back_proj and input_proj after NTP backward
+        - Gradients flow through back_proj and input_proj after backward
     """
-    logging.info("\n=== Reasoning Loss Tests (use_reasoning_loss=True) ===")
-    logging.info("Purpose: Verify NTP reasoning loss pipeline with back_proj")
+    logging.info("\n=== Reasoning Loss Tests ===")
+    logging.info("Purpose: Verify reasoning loss pipeline with back_proj")
 
     logging.info("  Creating builder from NTP config...")
     ntp_builder = ConceptPyramidBuilder(ntp_config)
@@ -578,7 +565,7 @@ def test_reasoning_loss(ntp_config, device, batch_size):
 
     # --- back_proj existence and dimensions ---
     log_check(
-        "back_proj exists (use_reasoning_loss=True)",
+        "back_proj exists",
         ntp_builder.back_proj is not None,
     )
     if ntp_builder.back_proj is not None:
@@ -639,27 +626,27 @@ def test_reasoning_loss(ntp_config, device, batch_size):
     )
 
     ntp_builder.train()
-    ntp_loss = ntp_builder.compute_reasoning_loss(
+    reasoning_loss = ntp_builder.compute_reasoning_loss(
         pyramid,
         Q_tokens["input_ids"].to(device),
         Q_tokens["attention_mask"].to(device),
         sol_tokens["input_ids"].to(device),
     )
-    log_value("NTP loss value", f"{ntp_loss.item():.4f}")
-    log_check("NTP loss is finite", torch.isfinite(ntp_loss))
-    log_check("NTP loss is positive", ntp_loss.item() > 0)
+    log_value("reasoning loss value", f"{reasoning_loss.item():.4f}")
+    log_check("reasoning loss is finite", torch.isfinite(reasoning_loss))
+    log_check("reasoning loss is positive", reasoning_loss.item() > 0)
 
-    # --- Gradient flow through NTP ---
-    ntp_loss.backward()
+    # --- Gradient flow through reasoning loss ---
+    reasoning_loss.backward()
     bp_grad = ntp_builder.back_proj.weight.grad is not None
-    log_check("back_proj receives gradient from NTP loss", bp_grad)
+    log_check("back_proj receives gradient from reasoning loss", bp_grad)
     if bp_grad:
         log_value(
             "back_proj.grad norm",
             f"{ntp_builder.back_proj.weight.grad.norm().item():.4f}",
         )
     ip_grad = ntp_builder.input_proj.weight.grad is not None
-    log_check("input_proj receives gradient from NTP loss", ip_grad)
+    log_check("input_proj receives gradient from reasoning loss", ip_grad)
     if ip_grad:
         log_value(
             "input_proj.grad norm",
@@ -722,12 +709,11 @@ def main():
     test_loss_breakdown(builder, yaml_config, device, batch_size)
     test_gradient_flow(builder, device, batch_size)
 
-    # Load NTP config and test reasoning loss if use_reasoning_loss is False
-    if not yaml_config["model"]["builder"]["use_reasoning_loss"]:
-        ntp_config_path = config_path.parent / "test_concept_builder_ntp.yml"
-        if ntp_config_path.exists():
-            ntp_yaml = load_config(str(ntp_config_path))
-            test_reasoning_loss(ntp_yaml, device, batch_size)
+    # Load NTP config and test reasoning loss
+    ntp_config_path = config_path.parent / "test_concept_builder_ntp.yml"
+    if ntp_config_path.exists():
+        ntp_yaml = load_config(str(ntp_config_path))
+        test_reasoning_loss(ntp_yaml, device, batch_size)
 
     logging.info("\n=== ALL DIAGNOSTIC TESTS COMPLETE ===")
     logging.info(

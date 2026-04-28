@@ -54,7 +54,6 @@ environment:
 #   max_seq_len        : Maximum sequence length for CoT encoding.
 #   use_positional_query_init : Initialize queries with DLCM positional priors.
 #   positional_init_alpha     : Strength of positional initialization signal (α).
-#   use_reasoning_loss        : Enable NTP reasoning loss (requires back_proj).
 #
 # concept_generator : Concept extraction / generation module (architecture placeholder).
 #   (Loss weights such as order_loss_weight are configured under training.loss_weights.)
@@ -86,7 +85,6 @@ model:
     max_seq_len: 512
     use_positional_query_init: true
     positional_init_alpha: 0.5
-    use_reasoning_loss: false
 
   concept_generator:
     # Architecture-specific parameters for the concept generator go here.
@@ -112,7 +110,7 @@ model:
 # resume                  : Checkpoint path to resume from (null = from scratch).
 #
 # loss_weights:
-#   ntp_loss_weight       : Weight for next-token-prediction reasoning loss.
+#   reasoning_loss_weight       : Weight for next-token-prediction reasoning loss.
 #   ordering_loss_weight   : Weight for intra-level concept ordering loss.
 #   recon_loss_weight     : Weight for CoT hidden-state reconstruction loss.
 #   ordering_margin       : Margin for ordering constraint in concept_loss.
@@ -128,7 +126,7 @@ training:
   scheduler_type: cosine
   warmup_steps: 10
   loss_weights:
-    ntp_loss_weight: 1.0
+    reasoning_loss_weight: 1.0
     ordering_loss_weight: 0.1
     recon_loss_weight: 0.1
     ordering_margin: 1.0

@@ -48,7 +48,7 @@ ENCODER INTEGRATION (hybrid-analysis.md Section 1.2):
     NTP / reasoning loss to validate that the concept pyramid
     supports effective reasoning.
 
-    When use_reasoning_loss=True, back_proj (D → D_encoder) is added to
+    back_proj (D → D_encoder) maps concept embeddings back to encoder
     map concept embeddings back to the model's input space. The NTP loss
     is computed as: Q + back_proj(concepts) → reason_model → solution logits.
 
@@ -359,10 +359,10 @@ class ConceptPyramidBuilder(nn.Module):
         temperature: Learnable attention temperature
         level_projs: Level-specific output projections
         level_attn: Cross-attention layers for refinement
-        back_proj: Optional projection from concept_dim back to encoder_dim
-            Only created when use_reasoning_loss=True. Used to map concept
-            embeddings into the model's input space for NTP reasoning loss.
-            Initialized as transpose of input_proj (pseudo-inverse).
+        back_proj: Projection from concept_dim back to encoder_dim.
+            Maps concept embeddings into the model's input space for
+            reasoning loss computation. Initialized as transpose of
+            input_proj (pseudo-inverse).
     """
 
     def __init__(
@@ -530,10 +530,10 @@ class ConceptPyramidBuilder(nn.Module):
         # =================================================================
         # Component 6: Back-Projection (concept_dim → encoder_dim)
         # =================================================================
-        # PRINCIPLE: When use_reasoning_loss is enabled, we need to inject
-        #   concept pyramid embeddings into the reason_model for NTP.
+        # PRINCIPLE: back_proj maps concept embeddings (D) back to encoder
+        #   dimension (D_encoder), enabling NTP reasoning loss computation.
         #   The model operates in D_encoder space, but concepts are in D space.
-        #   back_proj maps D → D_encoder, bridging this dimension gap.
+        #   back_proj bridges this dimension gap.
         #
         # INITIALIZATION: back_proj.weight is initialized as the transpose
         #   of input_proj.weight (pseudo-inverse). This gives a natural
@@ -544,14 +544,11 @@ class ConceptPyramidBuilder(nn.Module):
         # DIMENSION FLOW:
         #   Input:  concepts [B, total_C, D]
         #   Output: concept_embeds [B, total_C, D_encoder]
-        if self.builder_cfg["use_reasoning_loss"]:
-            self.back_proj = nn.Linear(
-                self.pyramid_cfg["hidden_dim"],
-                self.reason_model_hidden_dim,
-                bias=False,
-            )
-        else:
-            self.back_proj = None
+        self.back_proj = nn.Linear(
+            self.pyramid_cfg["hidden_dim"],
+            self.reason_model_hidden_dim,
+            bias=False,
+        )
 
         self._init_weights()
 
@@ -896,9 +893,7 @@ class ConceptPyramidBuilder(nn.Module):
         Returns:
             Scalar NTP loss (cross-entropy on solution tokens)
         """
-        assert (
-            self.back_proj is not None
-        ), "back_proj is None — set use_reasoning_loss=True in config"
+        assert self.back_proj is not None, "back_proj is None"
 
         device = question_ids.device
         batch_size = question_ids.shape[0]
@@ -954,13 +949,13 @@ class ConceptPyramidBuilder(nn.Module):
         # Use solution_ids as target (same length as Q for teacher-forcing)
         # The model should predict solution tokens at each Q position
         L_min = min(solution_logits.shape[1], solution_ids.shape[1])
-        ntp_loss = F.cross_entropy(
+        reasoning_loss = F.cross_entropy(
             solution_logits[:, :L_min, :].reshape(-1, solution_logits.shape[-1]),
             solution_ids[:, :L_min].reshape(-1),
             ignore_index=-100,  # ignore padding tokens
         )
 
-        return ntp_loss
+        return reasoning_loss
 
     def forward(
         self,

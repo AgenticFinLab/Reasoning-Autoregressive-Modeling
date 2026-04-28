@@ -68,8 +68,6 @@ model:
     use_positional_query_init: true
     # Positional initialization alpha (α) for query PE signal strength
     positional_init_alpha: 0.5
-    # Enable NTP reasoning loss: Q + concept pyramid → solution validation.
-    use_reasoning_loss: false
 
 # Training configuration (minimal for testing)
 training:
@@ -80,8 +78,8 @@ training:
 
   # Loss weights for training objectives
   # ─────────────────────────────────────────────────────────
-  # ntp_loss_weight:
-  #   NTP / reasoning loss. When use_reasoning_loss=True, the Builder
+  # reasoning_loss_weight:
+  #   NTP / reasoning loss. The Builder
   #   computes cross-entropy on solution tokens given Q + concept pyramid.
   #   [test value: 1.0 — non-zero to verify NTP code path in unit tests]
   #
@@ -94,7 +92,7 @@ training:
   #   states and the original projected CoT hidden states.
   # ─────────────────────────────────────────────────────────
   loss_weights:
-    ntp_loss_weight: 1.0
+    reasoning_loss_weight: 1.0
     ordering_loss_weight: 0.1
     recon_loss_weight: 0.1
     ordering_margin: 1.0

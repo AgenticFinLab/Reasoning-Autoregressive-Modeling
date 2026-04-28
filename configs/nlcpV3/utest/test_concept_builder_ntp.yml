@@ -1,7 +1,6 @@
 # =============================================================================
 # NLCP V3 ConceptPyramidBuilder Test Configuration — NTP Reasoning Loss
 # =============================================================================
-# Purpose: Configuration for test_concept_builder.py with use_reasoning_loss=True
 # Usage:
 #   python examples/nlcpV3/utest/test_concept_builder.py  -c configs/nlcpV3/utest/test_concept_builder_ntp.yml
 # =============================================================================
@@ -44,8 +43,6 @@ model:
   builder:
     use_positional_query_init: true
     positional_init_alpha: 0.5
-    # Enable NTP reasoning loss: adds back_proj + compute_reasoning_loss()
-    use_reasoning_loss: true
 
 # Training configuration (minimal for testing)
 training:
@@ -56,7 +53,7 @@ training:
 
   # Loss weights for training objectives
   loss_weights:
-    ntp_loss_weight: 1.0
+    reasoning_loss_weight: 1.0
     ordering_loss_weight: 0.1
     recon_loss_weight: 0.1
     ordering_margin: 1.0
