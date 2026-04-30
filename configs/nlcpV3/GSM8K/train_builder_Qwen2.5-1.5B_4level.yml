@@ -116,11 +116,11 @@ training:
     freeze: true
     lora: null
   loss_weights:
-    reasoning_loss_weight: 0.0
-    ordering_loss_weight: 0.1
-    recon_loss_weight: 1.0
+    reasoning_loss_weight: 0.5
+    ordering_loss_weight: 0.5
+    recon_loss_weight: 0.1
     ordering_margin: 1.0
-    residual_loss_weight: 0.01
+    residual_loss_weight: 1.0
   ordering_loss_type: margin
 
 # Logging configuration
