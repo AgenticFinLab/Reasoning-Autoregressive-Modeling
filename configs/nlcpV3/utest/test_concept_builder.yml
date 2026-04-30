@@ -42,15 +42,6 @@ model:
     #   -1: use ALL layers (no pruning, default)
     #   N>0: keep only first N layers
     reason_model_num_layers: -1
-    reason_model_freeze: false
-    # LoRA configuration for reason_model (null = no LoRA)
-    # When enabled, applies PEFT LoRA adapters for parameter-efficient fine-tuning.
-    # reason_model_lora:
-    #   r: 8
-    #   lora_alpha: 16
-    #   target_modules: ["q_proj", "v_proj"]
-    #   lora_dropout: 0.05
-    reason_model_lora: null
 
   # Concept pyramid configuration
   pyramid:
@@ -75,6 +66,9 @@ training:
   num_epochs: 1
   learning_rate: 1.0e-4
   weight_decay: 0.01
+  reason_model:
+    freeze: true
+    lora: null
 
   # Loss weights for training objectives
   # ─────────────────────────────────────────────────────────
@@ -97,6 +91,7 @@ training:
     recon_loss_weight: 0.1
     ordering_margin: 1.0
     residual_loss_weight: 0.01
+  ordering_loss_type: margin
 
 # Log configuration
 log:

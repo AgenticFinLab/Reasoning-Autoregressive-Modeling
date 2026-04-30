@@ -170,8 +170,8 @@ class NLCPV3Model(nn.Module):
             "logits": logits,
             "concepts": concepts,
             "refined_concepts": refined_concepts,
-            "H_hat": aux.get("H_hat"),
-            "H_rest": aux.get("H_rest"),
+            "H_hat": aux["H_hat"],
+            "H_rest": aux["H_rest"],
         }
 
     def forward_inference(

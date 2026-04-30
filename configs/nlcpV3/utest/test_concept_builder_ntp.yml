@@ -28,8 +28,6 @@ model:
   reason_model:
     reason_model_name: "Qwen/Qwen2.5-0.5B"
     reason_model_num_layers: -1
-    reason_model_freeze: false
-    reason_model_lora: null
 
   # Concept pyramid configuration
   pyramid:
@@ -50,6 +48,9 @@ training:
   num_epochs: 1
   learning_rate: 1.0e-4
   weight_decay: 0.01
+  reason_model:
+    freeze: true
+    lora: null
 
   # Loss weights for training objectives
   loss_weights:
@@ -58,6 +59,7 @@ training:
     recon_loss_weight: 0.1
     ordering_margin: 1.0
     residual_loss_weight: 0.01
+  ordering_loss_type: margin
 
 # Log configuration
 log:

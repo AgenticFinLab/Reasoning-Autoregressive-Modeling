@@ -220,8 +220,10 @@ class PyramidOutput:
     DIMENSION FLOW:
         concepts:            List of [B, L_k, D] for k=0..K-1
         level_outputs:       List[LevelOutput] for k=0..K-1
-        projected_hidden:    [B, L, D] — H_proj
+        encoder_hidden_states: [B, L, D_encoder] — original H_CoT (frozen)
+        projected_hidden:    [B, L, D] — H_proj = input_proj(H_CoT)
         reconstructed_hidden:[B, L, D] — f_hat_K = sum of R_k
+        reconstructed_encoder_hidden: [B, L, D_encoder] — back_proj(f_hat_K)
         residual_hidden:     [B, L, D] — f_rest_K = H_proj - f_hat_K
 
     Attributes:
@@ -230,11 +232,16 @@ class PyramidOutput:
         level_outputs: Per-level detailed outputs [LevelOutput_0, ..., LevelOutput_{K-1}]
             Contains base_concepts, attention_weights, reconstruction
             for each level — needed for external loss computation.
+        encoder_hidden_states: Original CoT encoder output [B, L, D_encoder]
+            H_CoT from frozen reason_model. This is the stable
+            reconstruction target, analogous to VAR's frozen encoder output.
         projected_hidden: Projected encoder output [B, L, D]
-            H_proj = Linear(H_CoT). The "CoT information to decompose".
+            H_proj = Linear(H_CoT). Internal concept space representation.
         reconstructed_hidden: Accumulated reconstruction [B, L, D]
-            f_hat_K = sum_{k=0}^{K-1} R_k. Target for reconstruction loss:
-            L_recon = ||f_hat_K - H_proj||^2 (Section 5.1.1).
+            f_hat_K = sum_{k=0}^{K-1} R_k in concept space.
+        reconstructed_encoder_hidden: Back-projected reconstruction [B, L, D_encoder]
+            back_proj(f_hat_K). Reconstruction target comparison:
+            L_recon = ||back_proj(f_hat_K) - H_CoT||^2.
         residual_hidden: Final residual [B, L, D]
             f_rest_K = H_proj - f_hat_K. Should approach zero for
             exact decomposition (Section 2.1).
@@ -246,8 +253,10 @@ class PyramidOutput:
 
     concepts: List[torch.Tensor]  # [C_0, ..., C_{K-1}], each [B, L_k, D]
     level_outputs: List[LevelOutput]  # Per-level detailed data
+    encoder_hidden_states: torch.Tensor  # [B, L, D_encoder] — H_CoT (frozen)
     projected_hidden: torch.Tensor  # [B, L, D] — H_proj
     reconstructed_hidden: torch.Tensor  # [B, L, D] — f_hat_K
+    reconstructed_encoder_hidden: torch.Tensor  # [B, L, D_encoder] — back_proj(f_hat_K)
     residual_hidden: torch.Tensor  # [B, L, D] — f_rest_K
     num_levels: int  # K
     level_lengths: List[int]  # [L_0, L_1, ..., L_{K-1}]
@@ -386,17 +395,17 @@ class ConceptPyramidBuilder(nn.Module):
         METHOD:
             - Load pretrained reason_model via AutoModelForCausalLM
             - Load paired tokenizer via AutoTokenizer.from_pretrained()
-            - Optionally freeze reason_model via self.reason_cfg["reason_model_freeze"]
+            - Apply training strategy: freeze backbone (configurable), apply LoRA
             - Derive reason_model_hidden_dim from model config
             - Construct projection, queries, attention layers
 
         Args:
             config: Raw config dict with hyperparameters.
-                Caches sub-configs: reason_cfg, pyramid_cfg, builder_cfg.
+                Caches sub-configs: reason_cfg, pyramid_cfg, builder_cfg, train_rm_cfg.
                 Uses reason_cfg["reason_model_name"] to load the model.
-                Uses reason_cfg["reason_model_freeze"] to control freezing.
                 Uses reason_cfg["reason_model_num_layers"] for layer pruning.
-                Uses reason_cfg["reason_model_lora"] for optional LoRA adaptation.
+                Uses train_rm_cfg["freeze"] for backbone freezing.
+                Uses train_rm_cfg["lora"] for optional LoRA adaptation.
                 Uses builder_cfg["use_positional_query_init"] for query init mode.
         """
         super().__init__()
@@ -406,6 +415,8 @@ class ConceptPyramidBuilder(nn.Module):
         self.pyramid_cfg = config["model"]["pyramid"]
         self.builder_cfg = config["model"]["builder"]
         self.use_positional_query_init = self.builder_cfg["use_positional_query_init"]
+        # Training strategy for reason_model (freeze, lora)
+        self.train_rm_cfg = config["training"]["reason_model"]
 
         # =================================================================
         # Component 0: Reason Model (decoder-only Transformer + lm_head)
@@ -417,7 +428,7 @@ class ConceptPyramidBuilder(nn.Module):
         #       The lm_head enables NTP / reasoning loss on solution tokens.
         # This is why we load AutoModelForCausalLM instead of AutoModel.
         self.reason_model, self.tokenizer, self.reason_model_hidden_dim = (
-            self._init_reason_model(self.reason_cfg)
+            self._init_reason_model(self.reason_cfg, self.train_rm_cfg)
         )
 
         # =================================================================
@@ -556,7 +567,7 @@ class ConceptPyramidBuilder(nn.Module):
     # Model Initialization Methods
     # =====================================================================
 
-    def _init_reason_model(self, reason_cfg: dict) -> tuple:
+    def _init_reason_model(self, reason_cfg: dict, train_rm_cfg: dict) -> tuple:
         """Initialize reason_model (backbone + lm_head), tokenizer, and hidden_dim.
 
         PRINCIPLE (hybrid-analysis.md Section 1.2):
@@ -575,8 +586,8 @@ class ConceptPyramidBuilder(nn.Module):
             (1) Loading pretrained model (AutoModelForCausalLM)
             (2) Loading paired tokenizer
             (3) Optional layer pruning (reason_model_num_layers)
-            (4) Optional parameter freezing (reason_model_freeze)
-            (5) Optional LoRA fine-tuning (reason_model_lora)
+            (4) Configurable freeze strategy (train_rm_cfg["freeze"])
+            (5) Optional LoRA fine-tuning (train_rm_cfg["lora"])
 
         CRITICAL:
             Use AutoModelForCausalLM (not AutoModel) because:
@@ -586,6 +597,9 @@ class ConceptPyramidBuilder(nn.Module):
 
         Args:
             reason_cfg: Sub-config dict under config["model"]["reason_model"].
+                Contains model name, num_layers, etc.
+            train_rm_cfg: Sub-config dict under config["training"]["reason_model"].
+                Contains freeze (bool) and lora (dict or null).
 
         Returns:
             Tuple of (reason_model, tokenizer, hidden_dim)
@@ -608,33 +622,33 @@ class ConceptPyramidBuilder(nn.Module):
         #   LoRA adapters are small trainable matrices injected into
         #   target linear layers (e.g., q_proj, v_proj), allowing the
         #   base model weights to remain frozen while still adapting.
-        if reason_cfg["reason_model_lora"] is not None:
+        lora_cfg = train_rm_cfg["lora"]
+        if lora_cfg is not None:
             if not _PEFT_AVAILABLE:
                 raise ImportError(
                     "PEFT library is required for LoRA fine-tuning. "
                     "Install with: pip install peft"
                 )
-            lora_cfg = LoraConfig(
-                r=reason_cfg["reason_model_lora"]["r"],
-                lora_alpha=reason_cfg["reason_model_lora"]["lora_alpha"],
-                target_modules=reason_cfg["reason_model_lora"]["target_modules"],
-                lora_dropout=reason_cfg["reason_model_lora"]["lora_dropout"],
-                bias=reason_cfg["reason_model_lora"]["bias"],
+            lora_config = LoraConfig(
+                r=lora_cfg["r"],
+                lora_alpha=lora_cfg["lora_alpha"],
+                target_modules=lora_cfg["target_modules"],
+                lora_dropout=lora_cfg["lora_dropout"],
+                bias=lora_cfg["bias"],
             )
-            reason_model = get_peft_model(reason_model, lora_cfg)
+            reason_model = get_peft_model(reason_model, lora_config)
             # NOTE: LoRA adapters are trainable regardless of freeze setting.
             #   After get_peft_model, only LoRA params have requires_grad=True.
 
-        # Step 4: Freeze base model if specified
-        # PURPOSE: When reason_model_freeze=True, backbone weights are frozen
-        #   and only the Builder's own parameters (and LoRA if any) are trained.
-        #   When False, the backbone adapts its representations for
-        #   optimal concept extraction end-to-end.
-        if reason_cfg["reason_model_freeze"]:
+        # Step 4: Freeze backbone if configured
+        # PRINCIPLE: Like VAR's frozen VQVAE encoder, freezing the reason_model
+        #   produces stable CoT encodings that serve as a fixed reconstruction
+        #   target. When freeze=false, the backbone is also trained (end-to-end).
+        if train_rm_cfg["freeze"]:
             for param in reason_model.parameters():
                 param.requires_grad = False
             # If LoRA is applied, re-enable LoRA adapter gradients
-            if reason_cfg["reason_model_lora"] is not None:
+            if lora_cfg is not None:
                 reason_model.enable_adapter_layers()
                 for name, param in reason_model.named_parameters():
                     if "lora_" in name:
@@ -997,8 +1011,10 @@ class ConceptPyramidBuilder(nn.Module):
             PyramidOutput containing:
                 concepts: [C_0, ..., C_{K-1}], each [B, L_k, D]
                 level_outputs: [LevelOutput_0, ..., LevelOutput_{K-1}]
+                encoder_hidden_states: [B, L, D_encoder] — original H_CoT
                 projected_hidden: [B, L, D]
                 reconstructed_hidden: [B, L, D]
+                reconstructed_encoder_hidden: [B, L, D_encoder]
                 residual_hidden: [B, L, D]
                 attention_mask: [B, L] (passed through for loss masking)
         """
@@ -1168,15 +1184,28 @@ class ConceptPyramidBuilder(nn.Module):
             )
 
         # =================================================================
-        # Step 4: Build PyramidOutput
+        # Step 4: Back-project reconstruction to encoder space
+        # =================================================================
+        # PRINCIPLE (VAR-faithful reconstruction):
+        #   Reconstruction loss must compare against the ORIGINAL stable
+        #   encoder output (H_CoT), not the projected version (H_proj).
+        #   back_proj maps f_hat_K from concept space D back to D_encoder.
+        #   L_recon = ||back_proj(f_hat_K) - H_CoT||^2
+        reconstructed_encoder_hidden = self.back_proj(reconstructed_accumulator)
+        # reconstructed_encoder_hidden: [B, L, D_encoder]
+
+        # =================================================================
+        # Step 5: Build PyramidOutput
         # =================================================================
         # PURPOSE: Return structured PyramidOutput for external
         #   loss computation (hybrid-analysis.md Section 5).
         return PyramidOutput(
             concepts=all_level_concepts,  # [C_0, ..., C_{K-1}]
             level_outputs=all_level_outputs,  # [LevelOutput_0, ...]
+            encoder_hidden_states=encoder_hidden_states,  # [B, L, D_encoder] — H_CoT
             projected_hidden=projected_hidden,  # [B, L, D] — H_proj
             reconstructed_hidden=reconstructed_accumulator,  # [B, L, D] — f_hat_K
+            reconstructed_encoder_hidden=reconstructed_encoder_hidden,  # [B, L, D_encoder]
             residual_hidden=residual_hidden,  # [B, L, D] — f_rest_K
             num_levels=self.pyramid_cfg["num_levels"],  # K
             level_lengths=list(
@@ -1188,8 +1217,8 @@ class ConceptPyramidBuilder(nn.Module):
     def forward_next_level(
         self,
         encoder_hidden_states: torch.Tensor,
+        target_level_index: int,
         previous_level_concepts: Optional[List[torch.Tensor]] = None,
-        target_level_index: int = 0,
     ) -> SingleLevelOutput:
         """Build concepts for a single level (sequential mode).
 

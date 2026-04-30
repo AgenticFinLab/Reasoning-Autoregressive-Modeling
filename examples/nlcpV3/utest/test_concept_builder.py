@@ -361,7 +361,7 @@ def test_loss_breakdown(builder, config, device, batch_size):
     pyramid = builder(H, attention_mask=enc_out.attention_mask)
 
     loss_weights = config["training"]["loss_weights"]
-    ordering_loss_type = config["training"].get("ordering_loss_type", "margin")
+    ordering_loss_type = config["training"]["ordering_loss_type"]
 
     # --- Compute base builder losses ---
     total_loss, loss_dict = compute_builder_loss(
@@ -375,7 +375,7 @@ def test_loss_breakdown(builder, config, device, batch_size):
 
     recon_w = loss_weights["recon_loss_weight"]
     ordering_w = loss_weights["ordering_loss_weight"]
-    residual_w = loss_weights.get("residual_loss_weight", 0.01)
+    residual_w = loss_weights["residual_loss_weight"]
 
     recon_weighted = recon_raw * recon_w
     ordering_weighted = ordering_raw * ordering_w
@@ -415,7 +415,7 @@ def test_loss_breakdown(builder, config, device, batch_size):
     )
 
     # --- Reasoning loss (always computed; weight controls contribution) ---
-    reasoning_w = loss_weights.get("reasoning_loss_weight", 0.0)
+    reasoning_w = loss_weights["reasoning_loss_weight"]
     questions = [f"What is {i} + {i+1}?" for i in range(batch_size)]
     solutions = [str(i + i + 1) for i in range(batch_size)]
     Q_tokens = builder.tokenizer(
@@ -476,7 +476,7 @@ def test_gradient_flow(builder, device, batch_size):
         - Every level_projs[k].weight receives grad
 
     NOTE:
-        If reason_model_freeze=True and no LoRA, the backbone will NOT
+        If reason_model is frozen (always) and no LoRA, the backbone will NOT
         have gradients — this is expected and not an error.
     """
     logging.info("\n=== Gradient Flow Tests ===")

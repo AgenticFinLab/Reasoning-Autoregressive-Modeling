@@ -47,7 +47,6 @@ environment:
 # reason_model : Pre-trained causal language model used as the reasoning backbone.
 #   reason_model_name      : HuggingFace model identifier.
 #   reason_model_num_layers: Number of backbone layers to use (-1 = all layers).
-#   reason_model_freeze    : Whether to freeze backbone weights during training.
 #   reason_model_lora      : LoRA configuration (null = disabled).
 #
 # pyramid      : Concept pyramid architecture parameters.
@@ -65,8 +64,6 @@ model:
   reason_model:
     reason_model_name: Qwen/Qwen3-8B
     reason_model_num_layers: -1
-    reason_model_freeze: true
-    reason_model_lora: null
   pyramid:
     hidden_dim: 512
     num_heads: 8
@@ -115,6 +112,9 @@ training:
   checkpoint_step_interval: 500
   eval_step_interval: 0
   resume: ''
+  reason_model:
+    freeze: true
+    lora: null
   loss_weights:
     reasoning_loss_weight: 0.0
     ordering_loss_weight: 0.1

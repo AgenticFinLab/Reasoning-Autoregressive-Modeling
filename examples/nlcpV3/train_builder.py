@@ -53,7 +53,7 @@ def parse_args():
 
 
 def _ordering_loss_margin(
-    attention_weights: torch.Tensor, margin: float = 1.0
+    attention_weights: torch.Tensor, margin: float
 ) -> torch.Tensor:
     """Margin-based ordering loss per hybrid-analysis.md Section 5.1.2.
 
@@ -118,7 +118,7 @@ def _ordering_loss_gaussian(
 def compute_builder_loss(
     pyramid: PyramidOutput,
     loss_weights: dict,
-    ordering_loss_type: str = "margin",
+    ordering_loss_type: str,
 ) -> tuple[torch.Tensor, dict]:
     """Compute recon + ordering + residual losses.
 
@@ -136,17 +136,23 @@ def compute_builder_loss(
     device = pyramid.projected_hidden.device
 
     # ── Reconstruction loss ──────────────────────────────────────────
-    # MSE averaged over all valid elements (B, L, D), consistent with
-    # VAR's F.mse_loss(reduction='mean') which averages over all dims.
+    # MSE between back-projected reconstruction and original CoT encodings:
+    #   L_recon = ||back_proj(f_hat_K) - H_CoT||^2
+    # This measures how well the pyramid preserves the ORIGINAL encoder
+    # information, analogous to VAR's reconstruction against frozen encoder output.
     if pyramid.attention_mask is not None:
         mask = pyramid.attention_mask.unsqueeze(-1)  # [B, L, 1]
-        recon_diff = (pyramid.reconstructed_hidden - pyramid.projected_hidden) * mask
+        recon_diff = (
+            pyramid.reconstructed_encoder_hidden - pyramid.encoder_hidden_states
+        ) * mask
         num_valid_elements = (
-            mask.sum() * pyramid.projected_hidden.shape[-1]
-        )  # tokens × D
+            mask.sum() * pyramid.encoder_hidden_states.shape[-1]
+        )  # tokens × D_encoder
         recon_loss = (recon_diff**2).sum() / num_valid_elements
     else:
-        recon_loss = F.mse_loss(pyramid.reconstructed_hidden, pyramid.projected_hidden)
+        recon_loss = F.mse_loss(
+            pyramid.reconstructed_encoder_hidden, pyramid.encoder_hidden_states
+        )
     loss_dict["recon"] = recon_loss.item()
 
     # ── Ordering loss ────────────────────────────────────────────────
@@ -212,7 +218,7 @@ def save_checkpoint(
     step: int,
     loss: float,
     checkpoint_dir: Path,
-    is_best: bool = False,
+    is_best: bool,
 ) -> Path:
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
     checkpoint = {
