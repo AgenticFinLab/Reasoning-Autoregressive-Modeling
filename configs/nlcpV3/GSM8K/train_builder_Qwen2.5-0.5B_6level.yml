@@ -49,7 +49,7 @@ environment:
 #   reason_model_num_layers: Number of backbone layers to use (-1 = all layers).
 #
 # pyramid      : Concept pyramid architecture parameters.
-#   hidden_dim  : Dimension of concept embeddings.
+#   hidden_dim  : Dimension of concept embeddings (must equal encoder hidden_size).
 #   num_heads   : Number of attention heads for intra-level ordering.
 #   num_levels  : Number of pyramid levels (geometric abstraction hierarchy).
 #   level_lengths: Number of concepts per level (geometric progression).
@@ -64,7 +64,8 @@ model:
     reason_model_name: Qwen/Qwen2.5-0.5B
     reason_model_num_layers: -1
   pyramid:
-    hidden_dim: 256
+    hidden_dim: 896
+    # Must equal encoder hidden_size to avoid lossy projection (VAR-faithful)
     num_heads: 8
     num_levels: 6
     level_lengths:

@@ -432,6 +432,26 @@ class ConceptPyramidBuilder(nn.Module):
         )
 
         # =================================================================
+        # Dimension consistency check (VAR-faithful principle)
+        # =================================================================
+        # PRINCIPLE: In VAR, quant_conv preserves dimension (in_ch == out_ch).
+        #   When hidden_dim != encoder hidden_size, input_proj becomes a lossy
+        #   compression, and back_proj cannot perfectly invert it. This creates
+        #   a theoretical floor on reconstruction error unrelated to the
+        #   pyramid's capacity. Set hidden_dim = encoder hidden_size to avoid.
+        concept_dim = self.pyramid_cfg["hidden_dim"]
+        if concept_dim != self.reason_model_hidden_dim:
+            warnings.warn(
+                f"\u26a0\ufe0f  pyramid.hidden_dim ({concept_dim}) != "
+                f"encoder hidden_size ({self.reason_model_hidden_dim}). "
+                f"This creates a lossy projection bottleneck — "
+                f"reconstruction error has a non-zero theoretical floor. "
+                f"Set hidden_dim = {self.reason_model_hidden_dim} for "
+                f"VAR-faithful lossless projection.",
+                stacklevel=2,
+            )
+
+        # =================================================================
         # Component 1: Projection (encoder_dim → concept_dim) + LayerNorm
         # =================================================================
         # PRINCIPLE (hybrid-analysis.md Section 1.2):

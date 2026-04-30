@@ -45,7 +45,8 @@ model:
 
   # Concept pyramid configuration
   pyramid:
-    hidden_dim: 256
+    hidden_dim: 896
+    # Must equal encoder hidden_size to avoid lossy projection (VAR-faithful)
     num_heads: 8
     num_levels: 6
     level_lengths: [1, 2, 4, 8, 16, 32]
