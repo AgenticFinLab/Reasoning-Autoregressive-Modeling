@@ -32,14 +32,14 @@ explaining the mapping. This is because:
 
 ### 1.2 Key Variables (following VAR.md Section 5.2.2)
 
-| Variable         | VAR Image Domain                | Our Text Domain                               | Physical Meaning              |
-|------------------|---------------------------------|-----------------------------------------------|-------------------------------|
-| **H_proj**       | z = Encoder(image)              | H_proj = Linear(Encoder(CoT))                 | CoT information to decompose  |
-| **H_rest**       | f_rest = "still needs encoding" | H_rest_k = H_proj - Σ_{i<k} R_i               | Residual at level k           |
-| **H_hat**        | f_hat = "already encoded"       | H_hat_k = Σ_{i<k} R_i                         | Accumulated reconstruction    |
-| **A_{k,j}**      | (implicit in VQ)                | A_{k,j} = softmax(Q_{k,j} @ H_rest_k^T)       | Attention weights for C_{k,j} |
-| **C_{k,j}_base** | h_k = codebook[idx_k]           | C_{k,j}_base = level_proj(A_{k,j} @ H_rest_k) | Base concept (commit path)    |
-| **R_k**          | f_hat += h_k_up                 | R_k = A_k^T @ C_k_base                        | Reconstruction from level k   |
+| Variable    | VAR Image Domain                | Our Text Domain                          | Physical Meaning              |
+|-------------|---------------------------------|------------------------------------------|-------------------------------|
+| **H_proj**  | z = Encoder(image)              | H_proj = Linear(Encoder(CoT))            | CoT information to decompose  |
+| **H_rest**  | f_rest = "still needs encoding" | H_rest_k = H_proj - Σ_{i<k} R_i          | Residual at level k           |
+| **H_hat**   | f_hat = "already encoded"       | H_hat_k = Σ_{i<k} R_i                    | Accumulated reconstruction    |
+| **A_{k,j}** | (implicit in VQ)                | A_{k,j} = softmax(Q_{k,j} @ H_rest_k^T)  | Attention weights for C_{k,j} |
+| **C_{k,j}** | h_k = codebook[idx_k]           | C_{k,j} = level_proj(A_{k,j} @ H_rest_k) | Concept (purely residual)     |
+| **R_k**     | f_hat += h_k_up                 | R_k = A_k^T @ C_k                        | Reconstruction from level k   |
 
 ### 1.3 Two Structural Dimensions
 
@@ -110,7 +110,8 @@ This section provides a high-level overview of how the hybrid design achieves th
 │          ├── Learns: Given Q and previous concepts, predict next level       │
 │          └── Output: Predicted concepts matching Builder's groundtruth       │
 │                                                                              │
-│  Loss: L_reconstruction + L_ordering + L_prediction + L_solution             │
+│  Loss: L_recon + L_ordering + L_reasoning (Builder)                      │
+│        L_prediction (Predictor, MSE vs frozen Builder GT)                │
 │                                                                              │
 └─────────────────────────────────────────────────────────────────────────────┘
                                     ↓
@@ -143,10 +144,10 @@ This section provides a high-level overview of how the hybrid design achieves th
 **2. Preserved Core Mechanisms**
 All mechanisms from Section 1.3 are retained:
 - **Query expansion**: 1→2→4→8→16→32 learnable queries per level
-- **Soft attention**: Competition-based segment-concept correspondence
+- **Soft attention (soft boundaries)**: Competition-based segment-concept correspondence
 - **Residual reconstruction**: Coarse-to-fine information decomposition
 - **Intra-level ordering**: Concepts ordered by CoT position
-- **Commit-refinement separation**: Clean residual flow
+- **Purely residual**: No cross-scale conditioning in the builder (VAR.md principle)
 
 **3. Training-Inference Alignment**
 - Training: Predictor sees groundtruth concepts (teacher forcing)
@@ -176,10 +177,10 @@ Ours:        Q → [Σ_{k=0}^{K-1} L_k concepts] → Solution   (fast, hierarchi
 
 ### 2.1 The Rank Bottleneck Guarantee
 
-At each level k, the reconstruction R_k = A_k^T @ C_k_base has rank at most L_k:
+At each level k, the reconstruction R_k = A_k^T @ C_k has rank at most L_k:
 
 ```
-R_k = A_k^T @ C_k_base
+R_k = A_k^T @ C_k
     = [B, L, L_k] @ [B, L_k, D]
 ```
 
@@ -238,40 +239,29 @@ Level 5: [■|■|■|■|■|■|■|■|■|■|■|■|■|■|■|■|■|�
 All levels describe THE SAME CoT, just at different segment granularities.
 ```
 
-### 2.3 The Commit vs Refinement Separation
+### 2.3 Purely Residual Decomposition (No Cross-Scale Conditioning)
 
-**Problem identified**: If cross-attention refinement enters the residual flow, it causes double-counting. The refined concept C_k = C_k_base + refined_k contains information from [H_proj, C_0, ..., C_{k-1}], some of which was already reconstructed by previous levels. When R_k = A_k^T @ C_k enters f_hat, this double-counts.
+**Design principle (VAR.md)**: The builder must be purely residual — each level only sees the current residual `H_rest_k`, with NO conditioning on previous levels' concepts. Cross-scale conditioning (e.g., cross-attention refinement using `[C_0, ..., C_{k-1}]`) belongs to Stage 2 (the Predictor), not Stage 1 (the Builder).
 
-**Solution**: Separate the commit path (enters residual flow) from the refinement path (improves output quality only):
+**Why no cross-attention in the builder?**
+1. **VAR alignment**: VAR's VQ-VAE Stage 1 uses purely residual decomposition — each scale only encodes `f_rest`, with no knowledge of previous scales' codebook entries. Cross-scale conditioning only appears in Stage 2 (the Transformer).
+2. **Clean gradient flow**: Every parameter in the builder is trained by `recon_loss` + `reasoning_loss`. Cross-attention on previous concepts would create parameters that only the predictor's loss could train — dead weights in Stage 1.
+3. **Separation of concerns**: The builder extracts ground truth concepts from CoT. The predictor learns cross-level dependencies from Q alone. Mixing these concerns in the builder violates the two-stage design.
 
 ```
-Level k processing:
+Level k processing (purely residual):
 
   ┌─────────────────────────────────────────────────┐
-  │ COMMIT PATH (enters residual flow)                │
-  │                                                    │
-  │   C_{k,j}_base = level_proj(A_{k,j} @ H_rest_k)  │
-  │   R_k = A_k^T @ C_k_base                         │
+  │   C_{k,j} = level_proj(A_{k,j} @ H_rest_k)      │
+  │   R_k = A_k^T @ C_k                             │
   │   H_hat += R_k        ← "what has been encoded"   │
   │   H_rest -= R_k       ← "what still needs encoding"│
-  └─────────────────────────────────────────────────┘
-                    │
-                    ▼
-  ┌─────────────────────────────────────────────────┐
-  │ REFINEMENT PATH (does NOT enter residual flow)    │
   │                                                    │
-  │   If k > 0:                                        │
-  │     context = [H_proj, C_0, ..., C_{k-1}]         │
-  │     refined_k = CrossAttn(Q_k, context, context)  │
-  │     C_k = C_k_base + refined_k                    │
-  │   Else:                                            │
-  │     C_k = C_k_base                                 │
-  │                                                    │
-  │   C_k goes to decoder, NOT to residual flow        │
+  │   C_k is the FINAL concept — no refinement step.  │
+  │   Cross-level dependencies are learned by the      │
+  │   Predictor (Stage 2), not the Builder.            │
   └─────────────────────────────────────────────────┘
 ```
-
-**Why this matters**: The reconstruction loss L_recon = ||H_hat - H_proj||² now correctly measures how well the base concepts cover H_proj. Without the separation, the loss would be contaminated by refinement-induced double-counting, forcing the model to suppress cross-attention (making it useless).
 
 ### 2.4 Potential Issue: Greedy Early Levels
 
@@ -460,7 +450,7 @@ In DLCM: C_{k,j} = mean(S_j). The content is simply the average of token represe
 > level of segmentation, DLCM's c_k ≡ our C_{k,j} at whichever single level DLCM
 > operates. Our notation C_{k,j} subsumes DLCM's by adding the level dimension.
 
-In our design: C_{k,j}_base = level_proj(A_{k,j} @ H_rest_k). The content is a learned, weighted combination of residual representations. The position emerges from attention patterns.
+In our design: C_{k,j} = level_proj(A_{k,j} @ H_rest_k). The content is a learned, weighted combination of residual representations. The position emerges from attention patterns.
 
 Our design is strictly more expressive because:
 1. **Weighted** combination (not just mean) — more important positions get higher weight
@@ -482,34 +472,37 @@ The Builder constructs the groundtruth concept pyramid from CoT using soft atten
 - **Q**: Context/prior (conditions the extraction but doesn't enter pyramid)
 - **Solution**: Used for auxiliary loss (validating pyramid's reasoning capability)
 
-**Mechanism**:
+**Mechanism** (purely residual — no cross-scale conditioning):
 ```
-H_CoT = Encoder(CoT)  # Encode CoT to hidden states
-H_rest_0 = H_CoT
+H_CoT = Encoder(CoT)                      # Encode CoT to hidden states
+H_proj = LayerNorm(Linear(H_CoT))         # Project to concept space
+H_rest_0 = H_proj
 
-for k in range(K):  # K=6 levels: 0, 1, 2, 3, 4, 5
-    # Use learnable queries Q_{k,0}, ..., Q_{k,L_k-1}
-    A_k = softmax(Q_k @ H_rest_k^T / sqrt(D))
-    C_k_base = level_proj(A_k @ H_rest_k)
+for k in range(K):  # K levels
+    # Soft boundaries via learnable queries
+    A_k = softmax(Q_k @ H_rest_k^T / (sqrt(D) × τ))     # [B, L_k, L]
+    C_k = level_proj(A_k @ H_rest_k)                     # [B, L_k, D]
     
-    # Refine with cross-attention to previous concepts
-    C_k_refined = CrossAttn(Q_k, [C_0, ..., C_{k-1}], [C_0, ..., C_{k-1}])
-    C_k = C_k_base + C_k_refined
-    
-    # Residual update
-    R_k = A_k^T @ C_k_base
+    # Residual update (VAR f_hat/f_rest)
+    R_k = A_k^T @ C_k                                    # [B, L, D]
+    H_hat_{k+1} = H_hat_k + R_k
     H_rest_{k+1} = H_rest_k - R_k
+
+# Back-project to encoder space for reconstruction loss
+H_recon = back_proj(H_hat_K)              # [B, L, D_encoder]
+L_recon = ||H_recon - H_CoT||²
 ```
 
 **Output**: Groundtruth concept pyramid [C_0, C_1, ..., C_{K-1}]
 
-**Loss**:
+**Loss** (Stage 1 dual objectives):
 ```
-L_builder = L_reconstruction + λ_order × L_ordering + λ_solution × L_solution
+L_builder = L_recon + λ_order × L_ordering + λ_reasoning × L_reasoning
 
-- L_reconstruction: ||reconstruct([C_0, ..., C_{K-1}]) - H_CoT||²
+- L_recon: ||back_proj(H_hat_K) - H_CoT||²  (reconstruction in encoder space)
 - L_ordering: Intra-level concept ordering (Section 3.2)
-- L_solution: ||predict_solution([C_0, ..., C_{K-1}]) - Solution||²
+- L_reasoning: NTP cross-entropy — [concepts + Q] → predict Solution tokens
+    (ensures pyramid is useful for reasoning, not just reconstruction)
 ```
 
 **Key Properties**:
@@ -521,39 +514,51 @@ L_builder = L_reconstruction + λ_order × L_ordering + λ_solution × L_solutio
 
 The Predictor learns to autoregressively generate the concept pyramid from Q alone, mimicking the Builder's output.
 
-**Architecture**: Decoder-only Transformer with level-wise causal masking
+**Architecture**: Concept Transformer with scale-level causal masking.
+The backbone model can be configured to either:
+- Reuse the Builder's `reason_model` (shared weights, `use_shared_model: true`)
+- Load its own separate model (`use_shared_model: false`)
+
+**Components**:
+- `q_proj + q_proj_norm`: Project question hidden states to concept space
+- `level_embeddings`: Learnable per-level embeddings [K, D] (analogous to VAR's `lvl_emb`)
+- `position_embeddings`: Within-level positional encoding
+- `concept_transformer`: Transformer blocks with scale-level causal mask
+- `concept_head`: 2-layer MLP predicting concept vectors
+- `start_token`: Learnable [1, D] token injected with question context
 
 **Training** (Teacher Forcing):
 ```
-Input sequence: [Q_emb, C_0, C_1, ..., C_{K-1}, Solution]
-                 ↑    ↑    ↑          ↑          ↑
-               条件  GT   GT          GT         GT
+Input:  [start_token + Q_context, C_0_gt, C_1_gt, ..., C_{K-2}_gt]
+Target: [C_0_gt, C_1_gt, ..., C_{K-1}_gt]
 
-Position 0 (Q):      Input [Q]              → Predict C_0
-Position 1 (C_0):    Input [Q, C_0]         → Predict C_1
-Position 2-3 (C_1):  Input [Q, C_0, C_1]    → Predict C_2
+start_token output → predicts C_0
+C_0 output positions → predicts C_1
+C_1 output positions → predicts C_2
 ...
-Position Σ_{i=0}^{K-1} L_i+ (C_{K-1}):  Input [Q, C_0..C_{K-1}] → Predict Solution
+C_{K-2} output positions → predicts C_{K-1}
 ```
 
-**Level-wise Causal Masking**:
-- Within a level: parallel (all positions attend to each other)
-- Across levels: causal (level k can only attend to levels < k)
+**Scale-Level Causal Masking** (VAR.md Section 5.3.1):
+- Start token: visible to all (like VAR's class embedding)
+- Within a level: full visibility (parallel prediction)
+- Across levels: strict causality — level k attends to levels < k only
+- `mask[i,j] = 1 if level[i] >= level[j] else 0`
 
 **Loss**:
 ```
-L_predictor = Σ_{k=0}^{K-1} MSE(Ĉ_k, C_k) + L_solution
+L_predictor = (1/K) × Σ_{k=0}^{K-1} MSE(Ĉ_k, C_k.detach())
 
-Where C_k are groundtruth concepts from Builder
+Where C_k are groundtruth concepts from frozen Builder
 ```
 
 **Inference** (Autoregressive Generation):
 ```
-Step 0: Q → Ĉ_0
-Step 1: Q, Ĉ_0 → Ĉ_1
-Step 2: Q, Ĉ_0, Ĉ_1 → Ĉ_2
+Step 0: [start + Q_context] → Ĉ_0
+Step 1: [start + Q_context, Ĉ_0] → Ĉ_1
+Step 2: [start + Q_context, Ĉ_0, Ĉ_1] → Ĉ_2
 ...
-Step K: Q, Ĉ_0, ..., Ĉ_{K-1} → Solution  (K=6)
+Step K-1: [start + Q_context, Ĉ_0, ..., Ĉ_{K-2}] → Ĉ_{K-1}
 ```
 
 ### 4.3 Why This Separation?
@@ -598,12 +603,12 @@ The Builder's loss ensures high-quality groundtruth concept pyramid extraction.
 #### 5.1.1 Reconstruction Loss
 
 ```
-L_recon = ||H_hat_K - H_CoT||²
+L_recon = ||back_proj(H_hat_K) - H_CoT||²
 ```
 
-Ensures the concept pyramid **preserves all information** from CoT.
+Ensures the concept pyramid **preserves all information** from CoT. The reconstruction is compared in encoder space via `back_proj` (maps concept space D back to encoder space D_encoder).
 
-**What it guarantees**: If L_recon → 0, then Σ_k A_k^T @ C_k_base → H_CoT. Every position in H_CoT is reconstructable from the concept pyramid.
+**What it guarantees**: If L_recon → 0, then back_proj(Σ_k A_k^T @ C_k) ≈ H_CoT. Every position in H_CoT is reconstructable from the concept pyramid.
 
 #### 5.1.2 Ordering Loss (Intra-Level Only)
 
@@ -617,18 +622,18 @@ Ensures concepts within each level are ordered by CoT position (Section 3.2).
 
 **Why no inter-level ordering**: Levels cover the SAME CoT at different granularities, not sequential segments (Section 3.2).
 
-#### 5.1.3 Solution Loss (Auxiliary)
+#### 5.1.3 Reasoning Loss (NTP)
 
 ```
-L_solution_builder = ||predict_solution([C_0, ..., C_{K-1}]) - Solution||²
+L_reasoning = CrossEntropy(reason_model([concept_embeds; Q_embeds]), solution_tokens)
 ```
 
-Validates that the concept pyramid contains sufficient information to derive the Solution.
+Validates that the concept pyramid supports reasoning. Concepts are back-projected to encoder space, concatenated with question embeddings, and fed through the reason_model's lm_head. Cross-entropy loss on solution tokens ensures the pyramid is useful for reasoning, not just reconstruction.
 
 #### 5.1.4 Total Builder Loss
 
 ```
-L_builder = L_recon + λ_order × L_order + λ_solution × L_solution_builder
+L_builder = L_recon + λ_order × L_order + λ_reasoning × L_reasoning
 ```
 
 ### 5.2 ConceptPredictor Loss
@@ -636,16 +641,15 @@ L_builder = L_recon + λ_order × L_order + λ_solution × L_solution_builder
 The Predictor's loss ensures accurate autoregressive generation of concepts.
 
 ```
-L_predictor = Σ_{k=0}^{K-1} MSE(Ĉ_k, C_k) + L_solution
+L_predictor = (1/K) × Σ_{k=0}^{K-1} MSE(Ĉ_k, C_k.detach())
 
 Where:
 - Ĉ_k: Predicted concepts at level k
-- C_k: Groundtruth concepts from Builder
-- L_solution: Cross-entropy loss for Solution prediction
+- C_k: Groundtruth concepts from frozen Builder (detached)
 ```
 
-**Training**: Teacher forcing with groundtruth concepts
-**Inference**: Autoregressive generation without groundtruth
+**Training**: Teacher forcing with groundtruth concepts from frozen Builder
+**Inference**: Autoregressive generation level by level
 
 ### 5.3 Interaction Between Builder and Predictor
 
@@ -664,7 +668,7 @@ Builder (with CoT) ──→ Groundtruth [C_0, ..., C_{K-1}] ──→ Predictor
 For the Predictor, we can add per-level weights:
 
 ```
-L_predictor_weighted = Σ_{k=0}^{K-1} w_k × MSE(Ĉ_k, C_k) + L_solution
+L_predictor_weighted = Σ_{k=0}^{K-1} w_k × MSE(Ĉ_k, C_k.detach())
 ```
 
 Weighting strategies:
@@ -804,12 +808,12 @@ VAR explicitly separates extraction (VQ-VAE) from generation (Transformer). We f
 
 ### 8.1 What Is Guaranteed by Construction (Builder)
 
-| Guarantee                 | Mechanism                                      | Strength                           |
-|---------------------------|------------------------------------------------|------------------------------------|
-| Coarse-to-fine hierarchy  | Rank bottleneck (L_k concepts) + residual flow | **Hard** (mathematically provable) |
-| Full information coverage | Reconstruction loss ‖H_hat - H_CoT‖²           | **Soft** (loss-driven)             |
-| Clean residual flow       | Commit-refinement separation                   | **Hard** (architectural)           |
-| Intra-level ordering      | Ordering loss L_order                          | **Soft** (loss-driven)             |
+| Guarantee                 | Mechanism                                       | Strength                           |
+|---------------------------|-------------------------------------------------|------------------------------------|
+| Coarse-to-fine hierarchy  | Rank bottleneck (L_k concepts) + residual flow  | **Hard** (mathematically provable) |
+| Full information coverage | Reconstruction loss ‖back_proj(H_hat) - H_CoT‖² | **Soft** (loss-driven)             |
+| Clean residual flow       | Purely residual (no cross-scale conditioning)   | **Hard** (architectural)           |
+| Intra-level ordering      | Ordering loss L_order                           | **Soft** (loss-driven)             |
 
 ### 8.2 What Is Guaranteed by Construction (Predictor)
 
@@ -847,7 +851,7 @@ VAR explicitly separates extraction (VQ-VAE) from generation (Transformer). We f
 
 ## 9. Conclusion
 
-The Concept Pyramid design is architecturally sound. The ConceptPyramidBuilder uses soft attention with learnable query expansion to extract hierarchical concepts from CoT, while the ConceptPredictor learns to autoregressively generate these concepts from Q alone. The commit-refinement separation correctly follows VAR's f_hat/f_rest principle. The rank bottleneck provides a hard guarantee of coarse-to-fine hierarchy. The combination of softmax competition, residual flow, and ordering loss creates sufficient inductive bias for DLCM-style segment-concept correspondence without requiring hard segmentation.
+The Concept Pyramid design is architecturally sound. The ConceptPyramidBuilder uses soft attention (soft boundaries) with learnable query expansion to extract hierarchical concepts from CoT via purely residual decomposition — no cross-scale conditioning, following VAR's VQ-VAE Stage 1 principle. The ConceptPredictor learns to autoregressively generate these concepts from Q alone using scale-level causal attention, following VAR's Transformer Stage 2 principle. The rank bottleneck provides a hard guarantee of coarse-to-fine hierarchy. The combination of softmax competition, residual flow, and ordering loss creates sufficient inductive bias for DLCM-style segment-concept correspondence without requiring hard segmentation.
 
 The main limitations — soft segment locality, potential extraction imbalance, and Q-only generalization — are inherent trade-offs of the soft attention approach. They are acceptable for our research goals because:
 1. The soft approach is strictly more expressive than hard segmentation

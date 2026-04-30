@@ -13,16 +13,14 @@ BUILDER ROLE (hybrid-analysis.md Section 4.1):
     - Q:        Context/prior (conditions extraction, doesn't enter pyramid)
     - Solution: Used for validation (outside this module)
 
-    Mechanism:
+    Mechanism (purely residual, following VAR's VQ-VAE Stage 1):
         H_CoT = Encoder(CoT)                                   # Encode CoT
         H_proj = Linear(H_CoT)                                 # Project to D
         H_rest_0 = H_proj
         for k in range(K):                                     # K=6 levels
             A_k = softmax(Q_k @ H_rest_k^T / sqrt(D))         # Soft attention
-            C_k_base = level_proj(A_k @ H_rest_k)             # Commit path
-            C_k_refined = CrossAttn(Q_k, context, context)     # Refinement path
-            C_k = C_k_base + C_k_refined                       # Output concept
-            R_k = A_k^T @ C_k_base                             # Reconstruct (base only)
+            C_k = level_proj(A_k @ H_rest_k)                   # Base concept
+            R_k = A_k^T @ C_k                                  # Reconstruct
             H_rest_{k+1} = H_rest_k - R_k                      # Residual update
 
     Output: Groundtruth concept pyramid [C_0, C_1, ..., C_{K-1}]
@@ -35,7 +33,7 @@ KEY DESIGN PRINCIPLES (hybrid-analysis.md):
     1. Query expansion:         Section 1.1, 6.2  — 1→2→4→8→16→32 learnable queries
     2. Soft attention:          Section 3.2       — Competition-based segment-concept correspondence
     3. Residual reconstruction: Section 2.1-2.3   — Coarse-to-fine information decomposition
-    4. Commit-refinement:       Section 2.3       — Only base concepts enter residual flow
+    4. Purely residual:         VAR.md            — No cross-scale conditioning (Stage 1)
     5. Intra-level ordering:    Section 3.2       — Concepts ordered by CoT position
     6. Builder-Predictor separation: Section 4   — Builder for groundtruth, Predictor for generation
 
@@ -70,22 +68,16 @@ ENCODER INTEGRATION (hybrid-analysis.md Section 1.2):
         # pyramid.level_outputs: List[LevelOutput] — per-level detail
         # pyramid.reconstructed_hidden: [B, L, D] — for recon loss
 
-        # Stage 2b: Or build one level at a time → SingleLevelOutput
-        builder.clear_cache()
-        level0 = builder.forward_next_level(enc_out.hidden_states, target_level_index=0)
-        # level0.concepts: [B, L_0, D], level0.attention_weights: [B, L_0, L]
-
 DIMENSION FLOW:
     Input:  CoT tokens → encoder → H_CoT [B, L, D_encoder]
             → input_proj → H_proj [B, L, D]
-    Output: PyramidOutput (forward) or SingleLevelOutput (forward_next_level)
+    Output: PyramidOutput (forward)
 
     Level k processing (captured in LevelOutput):
         H_rest_k:      [B, L, D]          (residual hidden states)
         Q_k:           [L_k, D]           (learnable queries)
         A_k:           [B, L_k, L]        (attention weights)
-        C_k_base:      [B, L_k, D]        (base concept — enters residual)
-        C_k:           [B, L_k, D]        (refined concept — goes to decoder)
+        C_k:           [B, L_k, D]        (concept — purely from residual)
         R_k:           [B, L, D]          (reconstruction from level k)
 
 REFERENCES:
@@ -126,7 +118,6 @@ except ImportError:
 #
 # DATA FLOW:
 #   EncoderOutput  →  PyramidOutput (contains List[LevelOutput])
-#                 →  SingleLevelOutput (one level, sequential mode)
 
 
 @dataclass
@@ -159,45 +150,37 @@ class EncoderOutput:
 class LevelOutput:
     """Per-level intermediate/output data from one pyramid level.
 
-    PRINCIPLE (hybrid-analysis.md Section 2.3, Commit-Refinement Separation):
-        Each level produces two concept streams:
-        - C_k_base (commit path): enters residual flow f_rest
-        - refined_k (refinement path): improves output quality only
-        - C_k = C_k_base + refined_k → goes to decoder
-        Only base concepts reconstruct H_proj via R_k = A_k^T @ C_k_base.
+    PRINCIPLE (VAR.md — purely residual Stage 1):
+        Each level produces concepts purely from residual decomposition.
+        C_k = level_proj(A_k @ H_rest_k) — no cross-scale conditioning.
+        R_k = A_k^T @ C_k enters the residual flow.
 
     PURPOSE:
         Capture all per-level data needed for:
         - External loss computation (Section 5):
           L_reconstruction uses R_k (reconstruction)
           L_ordering uses A_k (attention_weights)
-        - Decoder input: concepts (refined)
+        - Stage 2 predictor targets: concepts
         - Visualization / debugging
 
     DIMENSION FLOW (level k):
-        concepts:          [B, L_k, D]  — C_k = C_k_base + refined_k
-        base_concepts:     [B, L_k, D]  — C_k_base (commit path)
+        concepts:          [B, L_k, D]  — C_k (purely from residual)
         attention_weights: [B, L_k, L]  — A_k (soft attention)
-        reconstruction:    [B, L, D]    — R_k = A_k^T @ C_k_base
+        reconstruction:    [B, L, D]    — R_k = A_k^T @ C_k
 
     Attributes:
-        concepts: Final refined concepts [B, L_k, D]
-            C_k = C_k_base + refined_k. This goes to the decoder.
-        base_concepts: Base concepts [B, L_k, D]
-            C_k_base = level_proj(A_k @ H_rest_k).
-            COMMIT path — enters residual flow (Section 2.3).
+        concepts: Concepts from residual decomposition [B, L_k, D]
+            C_k = level_proj(A_k @ H_rest_k).
         attention_weights: Soft attention weights [B, L_k, L]
             A_k = softmax(Q_k @ H_rest_k^T / (sqrt(D) * tau)).
             For ordering loss (Section 5.1.2).
-        reconstruction: Reconstruction from base only [B, L, D]
-            R_k = A_k^T @ C_k_base.
-            Only BASE reconstructs, not refined (Section 2.3).
+        reconstruction: Reconstruction from this level [B, L, D]
+            R_k = A_k^T @ C_k.
     """
 
-    concepts: torch.Tensor  # [B, L_k, D]  — C_k (refined, goes to decoder)
-    base_concepts: torch.Tensor  # [B, L_k, D]  — C_k_base (commit path)
+    concepts: torch.Tensor  # [B, L_k, D]  — C_k (from residual)
     attention_weights: torch.Tensor  # [B, L_k, L]  — A_k (soft attention)
-    reconstruction: torch.Tensor  # [B, L, D]    — R_k = A_k^T @ C_k_base
+    reconstruction: torch.Tensor  # [B, L, D]    — R_k = A_k^T @ C_k
 
 
 @dataclass
@@ -227,10 +210,10 @@ class PyramidOutput:
         residual_hidden:     [B, L, D] — f_rest_K = H_proj - f_hat_K
 
     Attributes:
-        concepts: Refined concepts per level [C_0, ..., C_{K-1}]
-            Each C_k: [B, L_k, D]. Goes to decoder.
+        concepts: Concepts per level [C_0, ..., C_{K-1}]
+            Each C_k: [B, L_k, D]. Purely from residual decomposition.
         level_outputs: Per-level detailed outputs [LevelOutput_0, ..., LevelOutput_{K-1}]
-            Contains base_concepts, attention_weights, reconstruction
+            Contains concepts, attention_weights, reconstruction
             for each level — needed for external loss computation.
         encoder_hidden_states: Original CoT encoder output [B, L, D_encoder]
             H_CoT from frozen reason_model. This is the stable
@@ -273,64 +256,17 @@ class PyramidOutput:
         return [lo.attention_weights for lo in self.level_outputs]
 
     @property
-    def all_base_concepts(self) -> List[torch.Tensor]:
-        """Convenience: extract base concepts from all levels."""
-        return [lo.base_concepts for lo in self.level_outputs]
-
-    @property
     def all_reconstructions(self) -> List[torch.Tensor]:
         """Convenience: extract reconstructions from all levels."""
         return [lo.reconstruction for lo in self.level_outputs]
 
     def cat_concepts(self) -> torch.Tensor:
-        """Concatenate all refined concepts: [B, sum(L_k), D].
+        """Concatenate all concepts: [B, sum(L_k), D].
 
         PURPOSE: Useful for solution loss (Section 5.1.3) where
             all concepts are pooled to predict the solution.
         """
         return torch.cat(self.concepts, dim=1)  # [B, sum(L_k), D]
-
-
-@dataclass
-class SingleLevelOutput:
-    """Output of forward_next_level() — one level at a time.
-
-    PRINCIPLE (hybrid-analysis.md Section 4.1):
-        The Builder can extract concepts level by level. Each level k
-        depends on previous levels through the residual flow:
-        H_rest_k = H_proj - sum_{i<k} R_i.
-
-    PURPOSE:
-        Encapsulate the output of a single level extraction for:
-        - Sequential level-by-level processing
-        - Debugging / visualization of individual levels
-        - Curriculum training strategies
-
-    DIMENSION FLOW (level k):
-        concepts:          [B, L_k, D]  — C_k (refined)
-        base_concepts:     [B, L_k, D]  — C_k_base (commit path)
-        attention_weights: [B, L_k, L]  — A_k
-        projected_hidden:  [B, L, D]    — H_proj
-        level_index:       int          — k
-
-    Attributes:
-        concepts: Final refined concepts [B, L_k, D]
-            C_k = C_k_base + refined_k.
-        base_concepts: Base concepts [B, L_k, D]
-            C_k_base (commit path). Cached internally for
-            subsequent forward_next_level calls.
-        attention_weights: Soft attention weights [B, L_k, L]
-            A_k for this level. For ordering loss (Section 5.1.2).
-        projected_hidden: Projected encoder output [B, L, D]
-            H_proj. Stored for external use (e.g., reconstruction loss).
-        level_index: Level index k (0-indexed)
-    """
-
-    concepts: torch.Tensor  # [B, L_k, D]  — C_k (refined)
-    base_concepts: torch.Tensor  # [B, L_k, D]  — C_k_base (commit path)
-    attention_weights: torch.Tensor  # [B, L_k, L]  — A_k
-    projected_hidden: torch.Tensor  # [B, L, D]    — H_proj
-    level_index: int  # k
 
 
 class ConceptPyramidBuilder(nn.Module):
@@ -349,8 +285,7 @@ class ConceptPyramidBuilder(nn.Module):
         - Intra-level: positional ordering within each level (j=0..L_k-1)
 
     METHOD:
-        forward():             All levels in one pass (training)
-        forward_next_level():  One level at a time (sequential / debugging)
+        forward():  All levels in one pass (training)
 
     ATTRIBUTES:
         reason_model: The decoder-only Transformer (e.g., Qwen), loaded as
@@ -367,7 +302,6 @@ class ConceptPyramidBuilder(nn.Module):
         concept_queries: Learnable queries per level [K levels]
         temperature: Learnable attention temperature
         level_projs: Level-specific output projections
-        level_attn: Cross-attention layers for refinement
         back_proj: Projection from concept_dim back to encoder_dim.
             Maps concept embeddings into the model's input space for
             reasoning loss computation. Initialized as transpose of
@@ -520,43 +454,6 @@ class ConceptPyramidBuilder(nn.Module):
                 for _ in range(self.pyramid_cfg["num_levels"])
             ]
         )
-
-        # =================================================================
-        # Component 5: Cross-Attention Refinement
-        # =================================================================
-        # PRINCIPLE (hybrid-analysis.md Section 2.3):
-        #   Commit-refinement separation:
-        #     C_k_base → enters f_rest (commit path, residual flow)
-        #     refined_k → improves output quality only (refinement path)
-        #     C_k = C_k_base + refined_k → goes to decoder
-        #   Refined concepts do NOT enter residual flow to prevent
-        #   double-counting (Section 2.3).
-        # PURPOSE: Add context-aware refinement that doesn't pollute f_rest.
-        # METHOD: MultiheadAttention for each level k > 0.
-        #   Query: expanded_queries [B, L_k, D]
-        #   Key/Value: context [B, L + ΣL_i, D] = [H_proj, C_0, ..., C_{k-1}]
-        #   Output: refined_k [B, L_k, D]
-        self.level_attn = nn.ModuleList(
-            [
-                nn.MultiheadAttention(
-                    embed_dim=self.pyramid_cfg["hidden_dim"],
-                    num_heads=self.pyramid_cfg["num_heads"],
-                    batch_first=True,
-                )
-                for _ in range(self.pyramid_cfg["num_levels"])
-            ]
-        )
-
-        # =================================================================
-        # Cache for forward_next_level (level-by-level inference)
-        # =================================================================
-        # PURPOSE: Store intermediate results needed for sequential
-        #   level-by-level concept extraction.
-        # METHOD: Lists populated during forward_next_level calls.
-        #   _cached_attentions: A_k for each level (for f_rest computation)
-        #   _cached_base_concepts: C_k_base for each level (for f_hat)
-        self._cached_attentions: List[torch.Tensor] = []
-        self._cached_base_concepts: List[torch.Tensor] = []
 
         # =================================================================
         # Component 6: Back-Projection (concept_dim → encoder_dim)
@@ -1002,8 +899,8 @@ class ConceptPyramidBuilder(nn.Module):
             The Builder extracts groundtruth concepts level by level using
             soft attention over residual hidden states. Each level k:
             (1) Attends to H_rest_k with learnable queries Q_k
-            (2) Extracts base concepts C_k_base (commit path)
-            (3) Refines with cross-attention (refinement path)
+            (2) Extracts concepts C_k = level_proj(A_k @ H_rest_k)
+            (3) Reconstructs R_k = A_k^T @ C_k
             (4) Updates residual: H_rest_{k+1} = H_rest_k - R_k
 
         PURPOSE:
@@ -1012,8 +909,9 @@ class ConceptPyramidBuilder(nn.Module):
 
         METHOD:
             Iterate k=0..K-1, applying soft attention + residual flow
-            + cross-attention refinement at each level. Collect all
-            per-level data into LevelOutput objects, wrap into PyramidOutput.
+            at each level. Purely residual — no cross-scale conditioning.
+            Collect per-level data into LevelOutput objects, wrap into
+            PyramidOutput.
 
         DIMENSION FLOW:
             Input:  encoder_hidden_states [B, L, D_encoder]
@@ -1029,7 +927,7 @@ class ConceptPyramidBuilder(nn.Module):
 
         Returns:
             PyramidOutput containing:
-                concepts: [C_0, ..., C_{K-1}], each [B, L_k, D]
+                concepts: [C_0, ..., C_{K-1}], each [B, L_k, D] (purely residual)
                 level_outputs: [LevelOutput_0, ..., LevelOutput_{K-1}]
                 encoder_hidden_states: [B, L, D_encoder] — original H_CoT
                 projected_hidden: [B, L, D]
@@ -1075,10 +973,10 @@ class ConceptPyramidBuilder(nn.Module):
         #     Level 0 (L_0=1): rank 1 → one global direction
         #     Level 5 (L_5=32): rank 32 → 32 independent directions
         #
-        #   Commit-refinement separation (Section 2.3):
-        #     C_k_base → enters f_rest (commit path)
-        #     refined_k → does NOT enter f_rest (refinement path)
-        #     R_k = A_k^T @ C_k_base — only base reconstructs
+        #   Purely residual (VAR.md — no cross-scale conditioning):
+        #     C_k = level_proj(A_k @ H_rest_k)
+        #     R_k = A_k^T @ C_k
+        #     Each level only sees current residual f_rest, nothing else.
         for level_idx in range(self.pyramid_cfg["num_levels"]):
             # level_idx: k ∈ {0, 1, ..., K-1}
 
@@ -1116,36 +1014,33 @@ class ConceptPyramidBuilder(nn.Module):
                     mask == 0, float("-inf")
                 )
 
-            level_attention = F.softmax(attention_scores, dim=-1)
-            # level_attention: [B, L_k, L] — A_k, attention weights
+            soft_boundaries = F.softmax(attention_scores, dim=-1)
+            # soft_boundaries: [B, L_k, L] — A_k, soft boundary weights
             # NaN check: if a concept has no valid positions to attend to,
             # softmax of all -inf produces NaN. Replace with zeros.
             if attention_mask is not None:
-                level_attention = torch.nan_to_num(level_attention, nan=0.0)
+                soft_boundaries = torch.nan_to_num(soft_boundaries, nan=0.0)
 
-            # ── 3c: Extract BASE concepts (commit path) ──────────────
-            # PRINCIPLE (Section 2.3, Commit-Refinement Separation):
-            #   C_k_base = level_proj(A_k @ H_rest_k)
-            #   This is the COMMIT path — enters residual flow.
-            #   Only base concepts reconstruct H, ensuring clean f_rest.
-            level_concepts_base = torch.bmm(level_attention, residual_hidden)
-            # level_attention: [B, L_k, L]
+            # ── 3c: Extract concepts (purely residual) ─────────────
+            # PRINCIPLE (VAR.md — purely residual Stage 1):
+            #   C_k = level_proj(A_k @ H_rest_k)
+            #   Each level only looks at the current residual.
+            #   No conditioning on previous levels (that's Stage 2).
+            level_concepts = torch.bmm(soft_boundaries, residual_hidden)
+            # soft_boundaries: [B, L_k, L]
             # residual_hidden: [B, L, D]
-            # level_concepts_base: [B, L_k, D] — raw pooled concepts
+            # level_concepts: [B, L_k, D] — raw pooled concepts
 
-            level_concepts_base = self.level_projs[level_idx](level_concepts_base)
-            # level_concepts_base: [B, L_k, D] — projected base concepts
+            level_concepts = self.level_projs[level_idx](level_concepts)
+            # level_concepts: [B, L_k, D] — projected concepts
 
-            # ── 3d: Reconstruct from BASE only ───────────────────────
-            # PRINCIPLE (Section 2.3):
-            #   R_k = A_k^T @ C_k_base (only BASE, not refined)
+            # ── 3d: Reconstruct ────────────────────────────────────
+            # PRINCIPLE (VAR.md Section 5.2.2):
+            #   R_k = A_k^T @ C_k
             #   This is the VAR f_hat update: f_hat += R_k
-            #   Using refined concepts here would double-count context.
-            reconstruction = torch.bmm(
-                level_attention.transpose(1, 2), level_concepts_base
-            )
-            # level_attention.T: [B, L, L_k]
-            # level_concepts_base: [B, L_k, D]
+            reconstruction = torch.bmm(soft_boundaries.transpose(1, 2), level_concepts)
+            # soft_boundaries.T: [B, L, L_k]
+            # level_concepts: [B, L_k, D]
             # reconstruction: [B, L, D] — R_k
 
             # ── 3e: Update residual flow ─────────────────────────────
@@ -1160,45 +1055,15 @@ class ConceptPyramidBuilder(nn.Module):
             residual_hidden = residual_hidden - reconstruction
             # residual_hidden: [B, L, D] — H_rest_{k+1}
 
-            # ── 3f: Cross-attention refinement ───────────────────────
-            # PRINCIPLE (Section 2.3, Refinement Path):
-            #   refined_k = CrossAttn(Q_k, context, context)
-            #   Context = [H_proj, C_0, ..., C_{k-1}]
-            #   refined_k does NOT enter f_rest — only improves output.
-            #   C_k = C_k_base + refined_k → goes to decoder
-            if level_idx > 0:
-                # Build accumulated context
-                prev_concepts_cat = torch.cat(all_level_concepts, dim=1)
-                # prev_concepts_cat: [B, Σ_{i<k} L_i, D]
-
-                context = torch.cat([projected_hidden, prev_concepts_cat], dim=1)
-                # context: [B, L + Σ_{i<k} L_i, D]
-
-                refined_concepts, _ = self.level_attn[level_idx](
-                    expanded_queries, context, context
-                )
-                # expanded_queries: [B, L_k, D] — query
-                # context: [B, L + ΣL_i, D] — key/value
-                # refined_concepts: [B, L_k, D] — refinement output
-
-                # Refined output: goes to decoder, NOT to residual flow
-                level_concepts = level_concepts_base + refined_concepts
-                # level_concepts: [B, L_k, D] — final concept for this level
-            else:
-                # Level 0: no previous concepts, no refinement
-                level_concepts = level_concepts_base
-                # level_concepts: [B, L_k, D] = C_0_base
-
             all_level_concepts.append(level_concepts)
 
-            # ── 3g: Collect per-level output ─────────────────────────
+            # ── 3f: Collect per-level output ──────────────────────────
             # PURPOSE: Wrap per-level data into LevelOutput for
             #   structured access by external loss computation.
             all_level_outputs.append(
                 LevelOutput(
-                    concepts=level_concepts,  # [B, L_k, D] — C_k (refined)
-                    base_concepts=level_concepts_base,  # [B, L_k, D] — C_k_base (commit)
-                    attention_weights=level_attention,  # [B, L_k, L] — A_k
+                    concepts=level_concepts,  # [B, L_k, D] — C_k
+                    attention_weights=soft_boundaries,  # [B, L_k, L] — A_k
                     reconstruction=reconstruction,  # [B, L, D]   — R_k
                 )
             )
@@ -1220,7 +1085,7 @@ class ConceptPyramidBuilder(nn.Module):
         # PURPOSE: Return structured PyramidOutput for external
         #   loss computation (hybrid-analysis.md Section 5).
         return PyramidOutput(
-            concepts=all_level_concepts,  # [C_0, ..., C_{K-1}]
+            concepts=all_level_concepts,  # [C_0, ..., C_{K-1}] (purely residual)
             level_outputs=all_level_outputs,  # [LevelOutput_0, ...]
             encoder_hidden_states=encoder_hidden_states,  # [B, L, D_encoder] — H_CoT
             projected_hidden=projected_hidden,  # [B, L, D] — H_proj
@@ -1233,185 +1098,3 @@ class ConceptPyramidBuilder(nn.Module):
             ),  # [L_0, ..., L_{K-1}]
             attention_mask=attention_mask,  # [B, L] (optional)
         )
-
-    def forward_next_level(
-        self,
-        encoder_hidden_states: torch.Tensor,
-        target_level_index: int,
-        previous_level_concepts: Optional[List[torch.Tensor]] = None,
-    ) -> SingleLevelOutput:
-        """Build concepts for a single level (sequential mode).
-
-        PRINCIPLE (hybrid-analysis.md Section 4.1):
-            The Builder extracts concepts level by level. Each level k
-            depends on previous levels through the residual flow:
-            H_rest_k = H_proj - Σ_{i<k} R_i.
-            This method computes one level at a time, using cached
-            attention and base concepts from previous calls.
-
-        PURPOSE:
-            Extract concepts for a single level. Useful for:
-            - Sequential level-by-level processing
-            - Debugging / visualization of individual levels
-            - Curriculum training strategies
-
-        METHOD:
-            1. Project encoder hidden states
-            2. Compute residual from cached previous levels
-            3. Apply soft attention with queries
-            4. Refine with cross-attention
-            5. Cache results for subsequent calls
-            6. Wrap into SingleLevelOutput
-
-        DIMENSION FLOW:
-            Input:
-                encoder_hidden_states: [B, L, D_encoder]
-                previous_level_concepts: [C_0, ..., C_{k-1}] or None
-                target_level_index: int (0-indexed level k)
-            Output:
-                SingleLevelOutput with concepts [B, L_k, D], etc.
-
-        Args:
-            encoder_hidden_states: Hidden states [B, L, D_encoder]
-            previous_level_concepts: Previous concepts or None for level 0
-            target_level_index: Level to extract (0-indexed)
-
-        Returns:
-            SingleLevelOutput with:
-                concepts: [B, L_k, D] — refined concepts
-                base_concepts: [B, L_k, D] — base concepts (commit path)
-                attention_weights: [B, L_k, L] — A_k
-                projected_hidden: [B, L, D] — H_proj
-                level_index: int — k
-        """
-        batch_size, seq_len, _ = encoder_hidden_states.shape
-        # batch_size: B, seq_len: L, _: D_encoder
-
-        # =================================================================
-        # Step 1: Project encoder hidden states
-        # =================================================================
-        # PRINCIPLE (hybrid-analysis.md Section 1.2):
-        #   H_proj = LayerNorm(Linear(H_CoT))
-        projected_hidden = self.input_proj_norm(self.input_proj(encoder_hidden_states))
-        # projected_hidden: [B, L, D]
-
-        # =================================================================
-        # Step 2: Compute residual from previous levels
-        # =================================================================
-        # PRINCIPLE (hybrid-analysis.md Section 2.1):
-        #   H_rest_k = H_proj - Σ_{i<k} R_i = H_proj - f_hat
-        #   Uses cached attentions and base concepts from previous calls.
-        #   CRITICAL: only C_k_BASE enters f_rest (Section 2.3).
-        if previous_level_concepts is None or len(previous_level_concepts) == 0:
-            # Level 0: no previous levels, use full H_proj
-            residual_hidden = projected_hidden
-            # residual_hidden: [B, L, D] = H_proj
-        else:
-            # Level k > 0: subtract reconstruction from previous BASE concepts
-            reconstructed_hidden = torch.zeros_like(projected_hidden)
-            # reconstructed_hidden: [B, L, D] — f_hat accumulator
-
-            for prev_base_concept, prev_attention in zip(
-                self._cached_base_concepts, self._cached_attentions
-            ):
-                # prev_attention: [B, L_prev, L] — A_i
-                # prev_base_concept: [B, L_prev, D] — C_i_base (BASE only)
-                # Reconstruction: A_i^T @ C_i_base → [B, L, D]
-                reconstructed_hidden = reconstructed_hidden + torch.bmm(
-                    prev_attention.transpose(1, 2), prev_base_concept
-                )
-                # reconstructed_hidden: [B, L, D] — accumulating f_hat
-
-            # Residual = H_proj - f_hat (f_rest = "still needs encoding")
-            residual_hidden = projected_hidden - reconstructed_hidden
-            # residual_hidden: [B, L, D] = H_rest_k
-
-        # =================================================================
-        # Step 3: Extract BASE concepts via soft attention
-        # =================================================================
-        # PRINCIPLE (Section 3.2): A_k = softmax(Q_k @ H_rest_k^T / (√D × τ))
-        level_queries = self.concept_queries[target_level_index]
-        # level_queries: [L_k, D]
-
-        expanded_queries = level_queries.unsqueeze(0).expand(batch_size, -1, -1)
-        # expanded_queries: [B, L_k, D]
-
-        attention_scores = torch.bmm(expanded_queries, residual_hidden.transpose(1, 2))
-        # attention_scores: [B, L_k, L]
-
-        attention_scores = attention_scores / (
-            math.sqrt(self.pyramid_cfg["hidden_dim"]) * self.temperature
-        )
-        # attention_scores: [B, L_k, L] — scaled
-
-        level_attention = F.softmax(attention_scores, dim=-1)
-        # level_attention: [B, L_k, L] — A_k
-
-        # Cache attention for future residual computation
-        if target_level_index >= len(self._cached_attentions):
-            self._cached_attentions.append(level_attention.detach())
-        else:
-            self._cached_attentions[target_level_index] = level_attention.detach()
-
-        # Extract and project base concepts
-        level_concepts_base = torch.bmm(level_attention, residual_hidden)
-        # level_concepts_base: [B, L_k, D] — raw pooled
-
-        level_concepts_base = self.level_projs[target_level_index](level_concepts_base)
-        # level_concepts_base: [B, L_k, D] — projected
-
-        # Cache BASE concepts for future residual computation
-        # (only BASE enters f_rest, not refined — Section 2.3)
-        if target_level_index >= len(self._cached_base_concepts):
-            self._cached_base_concepts.append(level_concepts_base.detach())
-        else:
-            self._cached_base_concepts[target_level_index] = (
-                level_concepts_base.detach()
-            )
-
-        # =================================================================
-        # Step 4: Cross-attention refinement
-        # =================================================================
-        # PRINCIPLE (Section 2.3): refined_k does NOT enter f_rest.
-        if target_level_index > 0 and previous_level_concepts is not None:
-            # Context: [H_proj, C_0, ..., C_{k-1}]
-            prev_concepts_cat = torch.cat(previous_level_concepts, dim=1)
-            # prev_concepts_cat: [B, Σ_{i<k} L_i, D]
-
-            context = torch.cat([projected_hidden, prev_concepts_cat], dim=1)
-            # context: [B, L + Σ_{i<k} L_i, D]
-
-            refined_concepts, _ = self.level_attn[target_level_index](
-                expanded_queries, context, context
-            )
-            # refined_concepts: [B, L_k, D]
-
-            level_concepts = level_concepts_base + refined_concepts
-            # level_concepts: [B, L_k, D]
-        else:
-            level_concepts = level_concepts_base
-            # level_concepts: [B, L_k, D] = C_0_base
-
-        # =================================================================
-        # Step 5: Build SingleLevelOutput
-        # =================================================================
-        # PURPOSE: Wrap per-level data into SingleLevelOutput for
-        #   structured access by downstream consumers.
-        return SingleLevelOutput(
-            concepts=level_concepts,  # [B, L_k, D] — C_k (refined)
-            base_concepts=level_concepts_base,  # [B, L_k, D] — C_k_base (commit)
-            attention_weights=level_attention,  # [B, L_k, L] — A_k
-            projected_hidden=projected_hidden,  # [B, L, D]   — H_proj
-            level_index=target_level_index,  # k
-        )
-
-    def clear_cache(self):
-        """Clear cached attentions and base concepts.
-
-        PURPOSE:
-            Reset the cache used by forward_next_level.
-            Must be called before starting a new sequence of
-            forward_next_level calls.
-        """
-        self._cached_attentions = []
-        self._cached_base_concepts = []
