@@ -77,7 +77,6 @@ from nlcpV3.concept_hybrid_builder import (
     EncoderOutput,
     LevelOutput,
     PyramidOutput,
-    SingleLevelOutput,
 )
 from nlcpV3.data_loader import BuilderInput
 from nlcpV3.concept_transformer import ConceptTransformer
@@ -111,7 +110,6 @@ __all__ = [
     "EncoderOutput",
     "LevelOutput",
     "PyramidOutput",
-    "SingleLevelOutput",
     # Other components
     "ConceptTransformer",
     "SolutionDecoder",

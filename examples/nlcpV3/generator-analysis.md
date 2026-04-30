@@ -167,7 +167,7 @@ Each method extracts multi-scale concepts: `[B, L, D_encoder]` -> `[C_0, ..., C_
 | Differentiability            | 5/5   | Fully differentiable                    |
 
 **Strengths:** Strongest causal guarantee; refinement; global view then refine
-**Weaknesses:** Not truly coarse-to-fine (extract all then refine); O(N^2); forward_next_level bypasses refinement
+**Weaknesses:** Not truly coarse-to-fine (extract all then refine); O(N^2)
 **Innovation:** HIGH — two-stage + causal refinement novel
 
 ---
