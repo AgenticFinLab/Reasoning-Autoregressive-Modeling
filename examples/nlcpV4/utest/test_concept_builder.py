@@ -287,6 +287,12 @@ def run_pipeline(config, device):
     log_check("residual loss >= 0", loss_dict["residual"] >= 0)
     log_check("reasoning loss is finite", reasoning_raw == reasoning_raw)
     log_check("reasoning loss is positive", reasoning_raw > 0)
+    log_check(
+        "reasoning_texts populated",
+        pyramid.reasoning_texts is not None
+        and len(pyramid.reasoning_texts) == batch.batch_size,
+    )
+    logging.info("  Sample reasoning_texts[0]: %s", pyramid.reasoning_texts[0][:200])
 
     # ==================================================================
     # Step 6: Gradient Flow — backward through combined loss

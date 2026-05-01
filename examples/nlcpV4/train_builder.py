@@ -447,7 +447,7 @@ def train_builder(config: dict, config_path: Path):
 
                 # ── Quick eval (skip when full eval fires at same step) ──
                 if eval_enabled and not (global_step % eval_interval == 0):
-                    eval_losses = evaluate_builder(
+                    eval_losses, reasoning_texts = evaluate_builder(
                         builder,
                         eval_dataloader,
                         loss_weights,
@@ -463,6 +463,7 @@ def train_builder(config: dict, config_path: Path):
                         eval_history,
                         log_dir,
                         "eval_quick",
+                        reasoning_texts,
                     )
 
             if global_step % checkpoint_interval == 0:
@@ -488,7 +489,7 @@ def train_builder(config: dict, config_path: Path):
 
             # ── Full eval at eval_interval ──────────────────────
             if eval_enabled and global_step % eval_interval == 0:
-                eval_losses = evaluate_builder(
+                eval_losses, reasoning_texts = evaluate_builder(
                     builder,
                     eval_dataloader,
                     loss_weights,
@@ -504,6 +505,7 @@ def train_builder(config: dict, config_path: Path):
                     eval_history,
                     log_dir,
                     "eval",
+                    reasoning_texts,
                 )
                 # Best eval checkpoint
                 if eval_losses["total"] < best_eval_loss:

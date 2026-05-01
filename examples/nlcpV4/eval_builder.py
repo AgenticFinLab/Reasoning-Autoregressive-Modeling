@@ -53,6 +53,7 @@ def log_eval_results(
     eval_history,
     log_dir,
     swanlab_prefix,
+    reasoning_texts,
 ):
     """Log eval results (raw/weighted) to console, terminal, SwanLab, eval_history."""
     ew = {
@@ -118,6 +119,16 @@ def log_eval_results(
     with open(log_dir / "eval_history.json", "w", encoding="utf-8") as f:
         json.dump(eval_history, f, indent=2, default=str)
 
+    # Save reasoning decoded texts (crash-safe, append per eval)
+    if reasoning_texts:
+        entry = {
+            "step": global_step,
+            "eval_type": eval_type,
+            "texts": reasoning_texts,
+        }
+        with open(log_dir / "eval_reasoning_texts.jsonl", "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, default=str) + "\n")
+
 
 # ── Evaluation loop ──────────────────────────────────────────────────
 
@@ -129,8 +140,8 @@ def evaluate_builder(
     loss_weights: dict,
     ordering_loss_type: str,
     max_batches: int,
-) -> dict:
-    """Run evaluation on test data and return averaged loss dict.
+) -> tuple[dict, list[str]]:
+    """Run evaluation on test data and return averaged loss dict + decoded texts.
 
     Args:
         builder: The model to evaluate.
@@ -140,16 +151,19 @@ def evaluate_builder(
         max_batches: Maximum batches to evaluate. 0 = all batches.
 
     Returns:
-        Averaged loss dict with keys: total, recon, ordering, residual, reasoning.
+        Tuple of (averaged_loss_dict, reasoning_texts).
+        averaged_loss_dict has keys: total, recon, ordering, residual, reasoning.
+        reasoning_texts is a flat list of decoded strings from all batches.
     """
     builder.eval()
     all_losses = []
+    all_reasoning_texts = []
 
     for i, batch in enumerate(eval_dataloader):
         if max_batches > 0 and i >= max_batches:
             break
 
-        # Forward pass: batch → pyramid (encode + build + reasoning)
+        # Forward pass: batch -> pyramid (encode + build + reasoning)
         pyramid = builder(batch)
 
         _, loss_dict = compute_builder_loss(
@@ -158,14 +172,17 @@ def evaluate_builder(
 
         all_losses.append(loss_dict)
 
+        if pyramid.reasoning_texts is not None:
+            all_reasoning_texts.extend(pyramid.reasoning_texts)
+
     builder.train()
 
     if not all_losses:
-        return {"total": 0.0, "recon": 0.0, "ordering": 0.0, "residual": 0.0}
+        return {"total": 0.0, "recon": 0.0, "ordering": 0.0, "residual": 0.0}, []
 
     # Average across all batches
     avg = {}
     keys = all_losses[0].keys()
     for k in keys:
         avg[k] = sum(d.get(k, 0.0) for d in all_losses) / len(all_losses)
-    return avg
+    return avg, all_reasoning_texts

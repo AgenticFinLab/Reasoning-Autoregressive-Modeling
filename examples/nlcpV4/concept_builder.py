@@ -47,8 +47,8 @@ ENCODER INTEGRATION (hybrid-analysis.md Section 1.2):
     supports effective reasoning.
 
     back_proj (D → D_encoder) maps concept embeddings back to encoder
-    map concept embeddings back to the model's input space. The NTP loss
-    is computed as: Q + back_proj(concepts) → reason_model → solution logits.
+    space. The NTP loss is computed as:
+    [Q_embeds, back_proj(concepts), S_embeds] → reason_model → solution logits.
 
     Usage:
         config = load_config("path/to/config.yml")  # Raw dict
@@ -110,7 +110,7 @@ except ImportError:
 #
 # DESIGN SOURCE (hybrid-analysis.md):
 #   - Section 1.2: Encoder → H_CoT
-#   - Section 2.1-2.3: Residual flow (f_hat, f_rest, commit-refinement)
+#   - Section 2.1-2.3: Residual flow (f_hat, f_rest)
 #   - Section 3.2: Soft attention A_k
 #   - Section 4.1: Builder mechanism overview
 #
@@ -230,6 +230,17 @@ class PyramidOutput:
         level_lengths: Concepts per level [L_0, L_1, ..., L_{K-1}]
         attention_mask: Optional mask [B, L] for loss computation.
             1=valid token, 0=pad. Passed through from forward() input.
+        reasoning_logits: Teacher-forced logits [B, L_S, V].
+            Predicted from the [Q, Concepts, S] input sequence.
+            Logits at positions [L_Q+total_C-1, L_Q+total_C+L_S-2]
+            predict solution tokens S_0 through S_{L_S-1}.
+            None if no solution provided.
+        reasoning_target_ids: Ground-truth solution token IDs [B, L_S].
+            Padding positions set to -100 for ignore_index in CE loss.
+            None if no solution provided.
+        reasoning_texts: Teacher-forced decoded predictions.
+            Argmax of reasoning_logits decoded via tokenizer.
+            List of B strings. None if no solution provided.
     """
 
     concepts: List[torch.Tensor]
@@ -244,6 +255,7 @@ class PyramidOutput:
     attention_mask: Optional[torch.Tensor] = None
     reasoning_logits: Optional[torch.Tensor] = None
     reasoning_target_ids: Optional[torch.Tensor] = None
+    reasoning_texts: Optional[List[str]] = None
 
     @property
     def total_concepts(self) -> int:
@@ -804,25 +816,37 @@ class ConceptPyramidBuilder(nn.Module):
         question_ids: torch.Tensor,
         question_attention_mask: torch.Tensor,
         solution_ids: torch.Tensor,
+        solution_attention_mask: torch.Tensor,
     ) -> None:
         """Compute reasoning logits and store in PyramidOutput for loss computation.
 
         PRINCIPLE:
-            The concept pyramid extracted from CoT must support effective
-            reasoning. This method validates that by feeding Q + concept
-            embeddings into the reason_model's lm_head. The resulting logits
-            and target IDs are stored in pyramid.reasoning_logits and
-            pyramid.reasoning_target_ids, so that compute_builder_loss()
-            in losses.py can compute cross-entropy — keeping all loss
-            computation centralized.
+            The concept pyramid replaces CoT in the autoregressive chain.
+            The original reasoning flow is Q -> CoT -> Solution.
+            With concepts replacing CoT, the flow becomes Q -> Concepts -> Solution.
 
-            Data flow:
-                1. Concatenate concepts (all levels) → [B, total_C, D]
-                2. back_proj: concepts [B, total_C, D] → [B, total_C, D_encoder]
-                3. embed Q tokens: [B, L_Q, D_encoder]
-                4. Concatenate: [concept_embeds; Q_embeds] → [B, total_C+L_Q, D_encoder]
-                5. Forward through reason_model (full, includes lm_head)
-                6. Slice solution logits and store in pyramid
+            This method validates that the extracted concepts retain enough
+            information to bridge Q to Solution. The resulting logits and
+            target IDs are stored in PyramidOutput so that
+            compute_builder_loss() in losses.py can compute cross-entropy
+            — keeping all loss computation centralized.
+
+            Data flow (teacher-forcing):
+                1. Concatenate concepts (all levels) -> [B, total_C, D]
+                2. back_proj: concepts [B, total_C, D] -> [B, total_C, D_enc]
+                3. embed Q tokens: [B, L_Q, D_enc]
+                4. embed S tokens: [B, L_S, D_enc]
+                5. Concatenate [Q_embeds, concept_embeds, S_embeds]
+                   -> [B, L_Q + total_C + L_S, D_enc]
+                6. Attention mask [Q_mask, ones(total_C), S_mask]
+                   -> [B, L_Q + total_C + L_S]
+                7. Forward through reason_model -> logits
+                   [B, L_Q + total_C + L_S, V]
+                8. Extract solution-prediction logits:
+                   logits[:, L_Q+total_C-1 : L_Q+total_C+L_S-1, :]
+                   -> [B, L_S, V]
+                9. Build targets: solution_ids with pad positions set to -100
+               10. Store in pyramid + argmax decode for reasoning_texts
 
         PURPOSE:
             Validate that the concept pyramid supports reasoning. A pyramid
@@ -834,6 +858,7 @@ class ConceptPyramidBuilder(nn.Module):
             question_ids: Token IDs for the question [B, L_Q]
             question_attention_mask: Attention mask for question [B, L_Q]
             solution_ids: Token IDs for the solution (target) [B, L_S]
+            solution_attention_mask: Attention mask for solution [B, L_S]
         """
         assert self.back_proj is not None, "back_proj is None"
 
@@ -842,56 +867,75 @@ class ConceptPyramidBuilder(nn.Module):
 
         # Step 1: Concatenate all concept levels: [B, total_C, D]
         concepts = pyramid.cat_concepts()
+        total_C = concepts.shape[1]
 
-        # Step 2: Back-project concepts to encoder dimension: [B, total_C, D_encoder]
+        # Step 2: Back-project concepts to encoder dimension: [B, total_C, D_enc]
         concept_embeds = self.back_proj(concepts)
 
-        # Step 3: Get Q token embeddings from the model's embed_tokens
+        # Step 3: Get token embeddings from the model's embed_tokens
         backbone = self._get_backbone()
         embed_layer = backbone.get_input_embeddings()
-        # Q_embeds: [B, L_Q, D_encoder]
+
+        # Q_embeds: [B, L_Q, D_enc]
         Q_embeds = embed_layer(question_ids)
+        L_Q = Q_embeds.shape[1]
 
-        # Step 4: Concatenate concept embeddings + Q embeddings
-        #   [concept_embeds; Q_embeds] as input to the decoder
-        # decoder_input_embeds: [B, total_C + L_Q, D_encoder]
-        decoder_input_embeds = torch.cat([concept_embeds, Q_embeds], dim=1)
+        # S_embeds: [B, L_S, D_enc]
+        S_embeds = embed_layer(solution_ids)
+        L_S = S_embeds.shape[1]
 
-        # Attention mask: concepts are all valid (no padding),
-        # then append the question attention mask
+        # Step 4: Concatenate [Q_embeds, concept_embeds, S_embeds]
+        # Mirrors the original autoregressive flow: Q -> CoT -> Solution
+        # decoder_input_embeds: [B, L_Q + total_C + L_S, D_enc]
+        decoder_input_embeds = torch.cat([Q_embeds, concept_embeds, S_embeds], dim=1)
+
+        # Step 5: Build attention mask [Q_mask, ones(total_C), S_mask]
+        # Concepts have no padding, so mask is all ones
         # concept_mask: [B, total_C]
         concept_mask = torch.ones(
             batch_size,
-            concept_embeds.shape[1],
+            total_C,
             device=device,
             dtype=question_attention_mask.dtype,
         )
-        # decoder_attention_mask: [B, total_C + L_Q]
+        # decoder_attention_mask: [B, L_Q + total_C + L_S]
         decoder_attention_mask = torch.cat(
-            [concept_mask, question_attention_mask], dim=1
+            [question_attention_mask, concept_mask, solution_attention_mask],
+            dim=1,
         )
 
-        # Step 5: Forward through reason_model (full, includes lm_head)
-        #   Use inputs_embeds instead of input_ids since we provide embeddings directly
+        # Step 6: Forward through reason_model (full, includes lm_head)
+        # Use inputs_embeds since we provide mixed embeddings directly
         outputs = self.reason_model(
             inputs_embeds=decoder_input_embeds,
             attention_mask=decoder_attention_mask,
         )
-        # logits: [B, total_C + L_Q, V]
+        # logits: [B, L_Q + total_C + L_S, V]
         logits = outputs.logits
 
-        # Step 6: Slice solution logits and store in pyramid
-        #   We only care about the logits at positions after concepts
-        #   The solution should be predicted autoregressively at the
-        #   Q token positions (teacher-forcing: shift left)
-        total_C = concept_embeds.shape[1]
-        # solution_logits: [B, L_Q, V]
-        solution_logits = logits[:, total_C:, :]
+        # Step 7: Extract solution-prediction logits
+        # In a causal LM, logits at position t predict token at t+1.
+        # The last concept position (L_Q + total_C - 1) predicts S_0.
+        # The position (L_Q + total_C + L_S - 2) predicts S_{L_S-1}.
+        # solution_logits: [B, L_S, V]
+        sol_start = L_Q + total_C - 1
+        sol_end = L_Q + total_C + L_S - 1
+        solution_logits = logits[:, sol_start:sol_end, :]
 
-        # Align lengths: min of logits and solution_ids
-        L_min = min(solution_logits.shape[1], solution_ids.shape[1])
-        pyramid.reasoning_logits = solution_logits[:, :L_min, :]
-        pyramid.reasoning_target_ids = solution_ids[:, :L_min]
+        # Step 8: Build targets with -100 for padding positions
+        # Where solution_attention_mask == 0, set target to -100 (ignored by CE)
+        targets = solution_ids.clone()
+        targets[solution_attention_mask == 0] = -100
+
+        # Step 9: Store in pyramid
+        pyramid.reasoning_logits = solution_logits
+        pyramid.reasoning_target_ids = targets
+
+        # Step 10: Teacher-forced argmax decode: [B, L_S] -> List[str]
+        predicted_ids = solution_logits.argmax(dim=-1)
+        pyramid.reasoning_texts = self.tokenizer.batch_decode(
+            predicted_ids, skip_special_tokens=True
+        )
 
     def _build_pyramid(
         self,
@@ -1118,13 +1162,14 @@ class ConceptPyramidBuilder(nn.Module):
         )
 
     def forward(self, batch: BuilderInput) -> PyramidOutput:
-        """Full forward pass: batch data → concept pyramid.
+        """Full forward pass: batch data -> concept pyramid.
 
         Pipeline:
-            1. encode_cot(batch.cot_answers) → hidden states
-            2. _build_pyramid(hidden_states) → PyramidOutput
-            3. If batch.has_solution: _prepare_reasoning() →
-               populate pyramid.reasoning_logits/reasoning_target_ids
+            1. encode_cot(batch.cot_answers) -> hidden states
+            2. _build_pyramid(hidden_states) -> PyramidOutput
+            3. If batch.has_solution: _prepare_reasoning() ->
+               populate pyramid.reasoning_logits/reasoning_target_ids/reasoning_texts
+               using the correct autoregressive ordering [Q, Concepts, S]
 
         This is the standard entry point for training and evaluation.
         After calling forward(), pass the returned PyramidOutput to
@@ -1135,9 +1180,10 @@ class ConceptPyramidBuilder(nn.Module):
 
         Returns:
             PyramidOutput with all fields populated. If batch.has_solution,
-            reasoning_logits and reasoning_target_ids are also set.
+            reasoning_logits, reasoning_target_ids, and reasoning_texts
+            are also set.
         """
-        # Step 1: Encode CoT → hidden states
+        # Step 1: Encode CoT -> hidden states
         enc_out = self.encode_cot(batch.cot_answers)
 
         # Step 2: Build concept pyramid
@@ -1166,7 +1212,8 @@ class ConceptPyramidBuilder(nn.Module):
                 max_length=max_length,
             )
             sol_ids = sol_tokens["input_ids"].to(device)
+            sol_mask = sol_tokens["attention_mask"].to(device)
 
-            self._prepare_reasoning(pyramid, q_ids, q_mask, sol_ids)
+            self._prepare_reasoning(pyramid, q_ids, q_mask, sol_ids, sol_mask)
 
         return pyramid

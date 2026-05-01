@@ -4,7 +4,8 @@ This module centralises all loss computation logic:
   - Ordering loss: margin-based and Gaussian-target variants
   - Reconstruction loss: masked MSE in encoder space
   - Residual loss: masked L1 in concept space
-  - compute_builder_loss: weighted combination of the above three
+  - Reasoning loss: NTP cross-entropy on solution tokens
+  - compute_builder_loss: weighted combination of all four losses
 
 Used by:
     examples/nlcpV4/eval_builder.py  (evaluation loop)
@@ -179,7 +180,7 @@ def compute_builder_loss(
     )
     loss_dict["total"] = total_loss.item()
 
-    # ── Reasoning loss (NTP: Q + concepts → solution) ──────────────────
+    # ── Reasoning loss (NTP: [Q, concepts, S] → predict solution) ─────
     # If prepare_reasoning() was called, pyramid carries logits + target IDs.
     # Cross-entropy is computed here to keep ALL loss logic in losses.py.
     if pyramid.reasoning_logits is not None:

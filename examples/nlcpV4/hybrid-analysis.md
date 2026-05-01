@@ -110,7 +110,7 @@ This section provides a high-level overview of how the hybrid design achieves th
 │          ├── Learns: Given Q and previous concepts, predict next level       │
 │          └── Output: Predicted concepts matching Builder's groundtruth       │
 │                                                                              │
-│  Loss: L_recon + L_ordering + L_reasoning (Builder)                      │
+│  Loss: L_recon + L_ordering + L_residual + L_reasoning (Builder)          │
 │        L_prediction (Predictor, MSE vs frozen Builder GT)                │
 │                                                                              │
 └─────────────────────────────────────────────────────────────────────────────┘
@@ -497,11 +497,12 @@ L_recon = ||H_recon - H_CoT||²
 
 **Loss** (Stage 1 dual objectives):
 ```
-L_builder = L_recon + λ_order × L_ordering + λ_reasoning × L_reasoning
+L_builder = L_recon + λ_order × L_ordering + λ_residual × L_residual + λ_reasoning × L_reasoning
 
 - L_recon: ||back_proj(H_hat_K) - H_CoT||²  (reconstruction in encoder space)
 - L_ordering: Intra-level concept ordering (Section 3.2)
-- L_reasoning: NTP cross-entropy — [concepts + Q] → predict Solution tokens
+- L_residual: L1 norm of final residual ||f_rest_K||  (concept-space regularization)
+- L_reasoning: NTP cross-entropy — teacher-forced [Q, concepts, S] → predict Solution tokens
     (ensures pyramid is useful for reasoning, not just reconstruction)
 ```
 
@@ -625,15 +626,22 @@ Ensures concepts within each level are ordered by CoT position (Section 3.2).
 #### 5.1.3 Reasoning Loss (NTP)
 
 ```
-L_reasoning = CrossEntropy(reason_model([concept_embeds; Q_embeds]), solution_tokens)
+L_reasoning = CrossEntropy(reason_model([Q_embeds; concept_embeds; S_embeds]), solution_tokens)
 ```
 
-Validates that the concept pyramid supports reasoning. Concepts are back-projected to encoder space, concatenated with question embeddings, and fed through the reason_model's lm_head. Cross-entropy loss on solution tokens ensures the pyramid is useful for reasoning, not just reconstruction.
+Validates that the concept pyramid supports reasoning. The input sequence
+follows the causal ordering [Q, Concepts, S] — mirroring the original
+Q -> CoT -> Solution flow. Question and solution tokens are embedded via
+the frozen embed_tokens, concepts are back-projected to encoder space via
+back_proj, and the concatenated sequence is fed through the frozen
+reason_model (including lm_head) with teacher-forcing. Cross-entropy loss
+on solution-position logits ensures the pyramid is useful for reasoning,
+not just reconstruction.
 
 #### 5.1.4 Total Builder Loss
 
 ```
-L_builder = L_recon + λ_order × L_order + λ_reasoning × L_reasoning
+L_builder = L_recon + λ_order × L_order + λ_residual × L_residual + λ_reasoning × L_reasoning
 ```
 
 ### 5.2 ConceptPredictor Loss

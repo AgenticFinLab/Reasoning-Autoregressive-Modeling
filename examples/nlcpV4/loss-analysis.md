@@ -10,7 +10,7 @@ total_loss = recon_w × L_recon + ordering_w × L_ordering + residual_w × L_res
 
 All four losses are **always computed** (no gating). Weights control gradient contribution; setting a weight to 0 disables gradient flow but the loss is still logged for monitoring.
 
-**Code**: [`losses.py` L89–182](examples/nlcpV4/losses.py#L89-L182) (base 3 losses assembled in `compute_builder_loss`), [`train_builder.py` L366–394](examples/nlcpV4/train_builder.py#L366-L394) (reasoning loss added in training loop when `batch.has_solution`).
+**Code**: [`losses.py` L89–198](examples/nlcpV4/losses.py#L89-L198) (all four losses assembled in `compute_builder_loss`), [`train_builder.py` L349–354](examples/nlcpV4/train_builder.py#L349-L354) (forward + loss in training loop).
 
 ---
 
@@ -126,7 +126,7 @@ L_ordering → exp_pos → A_k → attention_scores / (√D × τ)
   → f_rest_k → ... → input_proj, input_proj_norm
 ```
 
-Does **not** flow through `back_proj`, `level_projs`, or `level_attn`.
+Does **not** flow through `back_proj` or `level_projs`.
 
 ---
 
@@ -171,7 +171,7 @@ L_residual → |f_rest_K| → f_rest_K = H_proj - f_hat_K
   → H_proj → input_proj, input_proj_norm
 ```
 
-Does **not** flow through `back_proj` or `level_attn`.
+Does **not** flow through `back_proj`.
 
 ### Relationship to recon_loss
 
@@ -195,24 +195,30 @@ A small residual in D space does NOT guarantee small recon error in D_encoder sp
 
 $$L_\text{reasoning} = \text{CrossEntropy}\bigl(\text{logits}_\text{solution},\; \text{solution\_ids}\bigr)$$
 
-where `logits_solution` is produced by feeding `[back_proj(concepts); Q_embeds]` through the frozen `reason_model`.
+where `logits_solution` is produced by feeding `[Q_embeds, back_proj(concepts), S_embeds]` through the frozen `reason_model` with teacher-forcing, then slicing the logits at solution-prediction positions.
 
 ### What it measures
 
-Whether the extracted concepts, combined with the question, can **predict the correct solution tokens**. This is the only loss that validates the **semantic usefulness** of concepts (not just geometric reconstruction fidelity).
+Whether the extracted concepts, placed between Q and S in the autoregressive chain (replacing CoT), can **predict the correct solution tokens**. This is the only loss that validates the **semantic usefulness** of concepts (not just geometric reconstruction fidelity).
 
-### Data flow
+The original autoregressive flow is `Q -> CoT -> Solution`. With concepts replacing CoT, the reasoning loss validates the flow `Q -> Concepts -> Solution`.
 
-| Step | Operation                   | Tensor / Shape                                                       | Code Location                                                                 |
-|------|-----------------------------|----------------------------------------------------------------------|-------------------------------------------------------------------------------|
-| 1    | Concatenate all concepts    | `concepts = cat(C_0, ..., C_{K-1})` → `[B, total_C, D]`              | [`concept_builder.py` L833](examples/nlcpV4/concept_builder.py#L833)          |
-| 2    | Back-project to encoder dim | `concept_embeds = back_proj(concepts)` → `[B, total_C, D_enc]`       | [`concept_builder.py` L836](examples/nlcpV4/concept_builder.py#L836)          |
-| 3    | Embed question tokens       | `Q_embeds = embed_tokens(Q_ids)` → `[B, L_Q, D_enc]`                 | [`concept_builder.py` L841](examples/nlcpV4/concept_builder.py#L841)          |
-| 4    | Concatenate input           | `input = [concept_embeds; Q_embeds]` → `[B, total_C+L_Q, D_enc]`     | [`concept_builder.py` L845–847](examples/nlcpV4/concept_builder.py#L845-L847) |
-| 5    | Build attention mask        | `mask = [ones(total_C); Q_mask]` → `[B, total_C+L_Q]`                | [`concept_builder.py` L851–859](examples/nlcpV4/concept_builder.py#L851-L859) |
-| 6    | Forward full reason_model   | `logits = reason_model(inputs_embeds=input)` → `[B, total_C+L_Q, V]` | [`concept_builder.py` L863–867](examples/nlcpV4/concept_builder.py#L863-L867) |
-| 7    | Extract solution logits     | `sol_logits = logits[:, total_C:, :]` → `[B, L_Q, V]`                | [`concept_builder.py` L878](examples/nlcpV4/concept_builder.py#L878)          |
-| 8    | Cross-entropy               | `CE(sol_logits[:,:L_min], sol_ids[:,:L_min])`                        | [`concept_builder.py` L883–887](examples/nlcpV4/concept_builder.py#L883-L887) |
+### Data flow (teacher-forcing)
+
+| Step | Operation                   | Tensor / Shape                                                                  |
+|------|-----------------------------|---------------------------------------------------------------------------------|
+| 1    | Concatenate all concepts    | `concepts = cat(C_0, ..., C_{K-1})` -> `[B, total_C, D]`                        |
+| 2    | Back-project to encoder dim | `concept_embeds = back_proj(concepts)` -> `[B, total_C, D_enc]`                 |
+| 3    | Embed question tokens       | `Q_embeds = embed_tokens(Q_ids)` -> `[B, L_Q, D_enc]`                           |
+| 4    | Embed solution tokens       | `S_embeds = embed_tokens(S_ids)` -> `[B, L_S, D_enc]`                           |
+| 5    | Concatenate input           | `input = [Q_embeds, concept_embeds, S_embeds]` -> `[B, L_Q+total_C+L_S, D_enc]` |
+| 6    | Build attention mask        | `mask = [Q_mask, ones(total_C), S_mask]` -> `[B, L_Q+total_C+L_S]`              |
+| 7    | Forward full reason_model   | `logits = reason_model(inputs_embeds=input)` -> `[B, L_Q+total_C+L_S, V]`       |
+| 8    | Extract solution logits     | `sol_logits = logits[:, L_Q+total_C-1 : L_Q+total_C+L_S-1, :]` -> `[B, L_S, V]` |
+| 9    | Build targets               | `targets = S_ids` with pad positions set to `-100`                              |
+| 10   | Cross-entropy               | `CE(sol_logits, targets, ignore_index=-100)`                                    |
+
+**Why this logit slice?** In a causal LM, logits at position `t` predict the token at position `t+1`. The last concept position `(L_Q + total_C - 1)` predicts `S_0`, and position `(L_Q + total_C + L_S - 2)` predicts `S_{L_S-1}`. So the slice `[L_Q+total_C-1, L_Q+total_C+L_S-1)` gives exactly `L_S` logits aligned with the solution tokens.
 
 ### Training loop integration
 
@@ -228,36 +234,37 @@ total_loss, loss_dict = compute_builder_loss(pyramid, loss_weights, ordering_los
 
 ### Key details
 
-- **Uses the FULL `reason_model`** (backbone + lm_head): `self.reason_model(inputs_embeds=...)` ([L863](examples/nlcpV4/concept_builder.py#L863)), not just the backbone.
-- **`reason_model` is frozen**: all params have `requires_grad=False`. Gradients flow through `inputs_embeds` (the concatenated concept+Q embeddings), reaching `back_proj` and upstream pyramid parameters.
+- **Uses the FULL `reason_model`** (backbone + lm_head): `self.reason_model(inputs_embeds=...)`, not just the backbone.
+- **`reason_model` is frozen**: all params have `requires_grad=False`. Gradients flow through `inputs_embeds` (the concatenated Q+concept+S embeddings), reaching `back_proj` and upstream pyramid parameters.
 - **`back_proj` is shared** with recon_loss: same layer maps concepts to D_encoder space for both reconstruction and reasoning.
-- **`ignore_index=-100`**: standard HF padding token exclusion in cross-entropy (L886).
-- **`L_min = min(L_Q, L_S)`**: handles length mismatch between question-position logits and solution tokens (L958).
+- **`ignore_index=-100`**: padding positions in solution_ids are set to -100, excluded from cross-entropy.
+- **Teacher-forced argmax decode**: after computing logits, `argmax(dim=-1)` + `tokenizer.batch_decode()` produces `reasoning_texts` (List[str]) stored in PyramidOutput for eval logging.
 
 ### Gradient flow
 
 ```
-L_reasoning → CE(logits, sol_ids)
-  → logits = reason_model(inputs_embeds)  [frozen: grad passes through inputs_embeds only]
-  → decoder_input_embeds = [concept_embeds; Q_embeds]
-    → concept_embeds = back_proj(concepts)
-      → back_proj.weight
-      → concepts = cat(C_0, ..., C_{K-1})
-        → C_k = C_k_base + refined_k (for k>0)
-          → C_k_base → level_projs[k], A_k, f_rest_k → input_proj, input_proj_norm
-          → refined_k → level_attn[k] (cross-attention), concept_queries[k]
-    → Q_embeds = embed_tokens(Q_ids) [frozen: no grad]
+L_reasoning -> CE(sol_logits, targets)
+  -> sol_logits = logits[:, L_Q+total_C-1 : L_Q+total_C+L_S-1, :]
+  -> logits = reason_model(inputs_embeds)  [frozen: grad passes through inputs_embeds only]
+  -> decoder_input_embeds = [Q_embeds, concept_embeds, S_embeds]
+    -> Q_embeds = embed_tokens(Q_ids) [frozen: no grad]
+    -> concept_embeds = back_proj(concepts)
+      -> back_proj.weight
+      -> concepts = cat(C_0, ..., C_{K-1})
+        -> C_k = level_proj_k(A_k @ f_rest_k)  [purely residual]
+          -> level_projs[k], A_k, f_rest_k -> input_proj, input_proj_norm
+    -> S_embeds = embed_tokens(S_ids) [frozen: no grad]
 ```
 
-Note: `reason_model` parameters do NOT receive gradients (frozen). `embed_tokens` is part of the frozen model, so Q_embeds also has no grad. Only `concept_embeds` carries gradients backward.
+Note: `reason_model` parameters do NOT receive gradients (frozen). `embed_tokens` is part of the frozen model, so both Q_embeds and S_embeds have no grad. Only `concept_embeds` carries gradients backward.
 
 ---
 
 ## Total Loss Assembly
 
-### In `compute_builder_loss` (base 3 losses)
+### In `compute_builder_loss` (all four losses)
 
-**Code**: [`losses.py` L173–182](examples/nlcpV4/losses.py#L173-L182)
+**Code**: [`losses.py` L89–198](examples/nlcpV4/losses.py#L89-L198)
 
 ```python
 total_loss = (
@@ -265,11 +272,12 @@ total_loss = (
     + loss_weights["ordering_loss_weight"] * ordering_loss   # margin-based positional ordering
     + loss_weights["residual_loss_weight"] * res_loss        # L1 in D space
 )
+# Reasoning loss added if pyramid.reasoning_logits is populated
+if pyramid.reasoning_logits is not None:
+    total_loss += loss_weights["reasoning_loss_weight"] * reasoning_loss
 ```
 
-### In training loop (reasoning loss added)
-
-**Code**: [`train_builder.py` L349–354](examples/nlcpV4/train_builder.py#L349-L354)
+All four losses are computed inside `compute_builder_loss()`. The training loop simply calls:
 
 ```python
 pyramid = builder(batch)  # encode + pyramid + reasoning (if has_solution)
@@ -282,17 +290,16 @@ total_loss, loss_dict = compute_builder_loss(pyramid, loss_weights, ordering_los
 
 All four losses share (subsets of) the same trainable parameter set:
 
-| Parameter                    | Shape                 | Updated by which losses                   |
-|------------------------------|-----------------------|-------------------------------------------|
-| `input_proj.weight`          | `[D, D_encoder]`      | recon, ordering, residual, reasoning      |
-| `input_proj.bias`            | `[D]`                 | recon, ordering, residual, reasoning      |
-| `input_proj_norm.weight`     | `[D]`                 | recon, ordering, residual, reasoning      |
-| `input_proj_norm.bias`       | `[D]`                 | recon, ordering, residual, reasoning      |
-| `concept_queries[k]`         | `[L_k, D]` × K levels | recon, ordering, residual, reasoning      |
-| `temperature`                | `[1]`                 | recon, ordering, residual, reasoning      |
-| `level_projs[k].weight/bias` | `[D, D]` × K levels   | recon, residual, reasoning                |
-| `level_attn[k]` (MHA params) | varies × K levels     | **reasoning only** (via refined concepts) |
-| `back_proj.weight`           | `[D_encoder, D]`      | **recon, reasoning only**                 |
+| Parameter                    | Shape                 | Updated by which losses              |
+|------------------------------|-----------------------|--------------------------------------|
+| `input_proj.weight`          | `[D, D_encoder]`      | recon, ordering, residual, reasoning |
+| `input_proj.bias`            | `[D]`                 | recon, ordering, residual, reasoning |
+| `input_proj_norm.weight`     | `[D]`                 | recon, ordering, residual, reasoning |
+| `input_proj_norm.bias`       | `[D]`                 | recon, ordering, residual, reasoning |
+| `concept_queries[k]`         | `[L_k, D]` × K levels | recon, ordering, residual, reasoning |
+| `temperature`                | `[1]`                 | recon, ordering, residual, reasoning |
+| `level_projs[k].weight/bias` | `[D, D]` × K levels   | recon, residual, reasoning           |
+| `back_proj.weight`           | `[D_encoder, D]`      | **recon, reasoning only**            |
 
 ### Frozen parameters
 
@@ -316,7 +323,7 @@ Freezing is controlled by `training.reason_model.freeze` (default: true for VAR-
 | Reconstruction      | `F.mse_loss(f_hat, f_BChw)` in C space                    | `MSE(back_proj(f_hat), H_CoT)` round-trip through D       |
 | Quantization        | Hard (nearest codebook) + STE                             | Soft (attention-weighted pooling)                         |
 | Additional losses   | VQ commitment loss (`β × MSE`)                            | ordering, residual, reasoning                             |
-| Code ref            | [`quant.py` L95](third-part/VAR-main/models/quant.py#L95) | [`losses.py` L89–182](examples/nlcpV4/losses.py#L89-L182) |
+| Code ref            | [`quant.py` L95](third-part/VAR-main/models/quant.py#L95) | [`losses.py` L89–198](examples/nlcpV4/losses.py#L89-L198) |
 
 ### Key difference: round-trip reconstruction
 
@@ -347,7 +354,7 @@ This means `back_proj` must learn a meaningful inverse of `input_proj`. The init
 
 These two objectives may **conflict**: recon wants `back_proj` to faithfully invert `input_proj` (geometric fidelity), while reasoning wants `back_proj` to produce embeddings the LM head can decode into correct solutions (semantic utility). The shared `back_proj` must balance both.
 
-**Note**: The reconstruction path uses `f_hat_K` (accumulated base-concept reconstructions), while the reasoning path uses `cat(C_k)` (refined concepts including cross-attention output). These are **different tensors** — the reasoning path includes refinement information that the reconstruction path does not.
+**Note**: The reconstruction path uses `f_hat_K` (accumulated reconstructions from `A_k^T @ C_k`), while the reasoning path uses `cat(C_k)` (the raw concepts concatenated across levels). These are **different tensors** — reconstructions are spread back over the full sequence length L, while concepts are compact (total_C tokens).
 
 ### 2. `residual_loss` and `recon_loss` are complementary, not redundant
 
@@ -366,6 +373,6 @@ The ordering loss depends **only on attention weights `A_k`**, not on concept qu
 
 Without `reasoning_loss`, the pyramid could converge to a mathematically valid decomposition that is semantically empty — concepts that perfectly reconstruct H_CoT but carry no useful reasoning information. The reasoning loss forces the concept representation to support actual solution prediction, preventing degenerate geometric-only solutions.
 
-### 5. `level_attn` (cross-attention refinement) is only trained by reasoning loss
+### 5. All Builder parameters are trained by the same losses
 
-The cross-attention refinement layers (`level_attn[k]`) produce `refined_k`, which is added to `C_k_base` to form the final concept `C_k`. Since only `C_k_base` (not `refined_k`) enters the reconstruction flow (`R_k = A_k^T @ C_k_base`), the refinement layers receive **no gradients from recon_loss, residual_loss, or ordering_loss**. They are trained exclusively through `reasoning_loss` (via the refined concepts entering the reasoning path). If `reasoning_loss_weight = 0`, the refinement layers are effectively dead parameters.
+Since the architecture is purely residual (no cross-attention refinement layers), every trainable parameter in the Builder receives gradients from at least two loss components. There are no dead parameters that depend on a single loss weight being non-zero. This simplifies hyperparameter tuning — setting any individual loss weight to zero only reduces gradient signal, it does not create untrained parameters.

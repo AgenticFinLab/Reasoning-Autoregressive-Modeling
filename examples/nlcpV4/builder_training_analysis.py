@@ -130,7 +130,8 @@ def run_checkpoint_eval(config: dict, project_root: Path) -> dict | None:
     loss_weights = train_cfg["loss_weights"]
     ordering_loss_type = train_cfg["ordering_loss_type"]
 
-    eval_losses = evaluate_builder(
+    # Discard reasoning_texts — not needed for plotting
+    eval_losses, _ = evaluate_builder(
         builder=builder,
         eval_dataloader=eval_dataloader,
         loss_weights=loss_weights,

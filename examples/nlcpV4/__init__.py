@@ -30,7 +30,7 @@ DESIGN SOURCE:
 MODULE STRUCTURE:
     - concept_builder: Phase 1 — ConceptPyramidBuilder (training only)
     - concept_predictor: Phase 2 — ConceptPredictor (next-level prediction)
-    - losses: Loss functions (reconstruction, ordering, residual)
+    - losses: Loss functions (reconstruction, ordering, residual, reasoning)
     - eval_builder: Evaluation loop and logging
     - data_loader: DataLoader for Builder training
     - train_builder: Training script for ConceptPyramidBuilder
