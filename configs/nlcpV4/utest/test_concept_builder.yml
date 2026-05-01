@@ -1,16 +1,16 @@
 # =============================================================================
-# NLCP V3 ConceptPyramidBuilder Test Configuration
+# NLCP V4 ConceptPyramidBuilder Test Configuration
 # =============================================================================
 # Purpose: Configuration for test_concept_builder.py unit tests
 # Usage:
 #   # Mock mode (fast, no model download):
-#   python examples/nlcpV3/utest/test_concept_builder.py
+#   python examples/nlcpV4/utest/test_concept_builder.py
 #
 #   # Real model mode (loads Qwen from HuggingFace):
-#   python examples/nlcpV3/utest/test_concept_builder.py -c configs/nlcpV3/utest/test_concept_builder.yml
+#   python examples/nlcpV4/utest/test_concept_builder.py -c configs/nlcpV4/utest/test_concept_builder.yml
 #
 #   # With GSM8K integration test:
-#   python examples/nlcpV3/utest/test_concept_builder.py -c configs/nlcpV3/utest/test_concept_builder.yml --test gsm8k
+#   python examples/nlcpV4/utest/test_concept_builder.py -c configs/nlcpV4/utest/test_concept_builder.yml --test gsm8k
 # =============================================================================
 
 # Data configuration for GSM8K integration tests
@@ -96,9 +96,9 @@ training:
 
 # Log configuration
 log:
-  save_folder: "EXPERIMENT/nlcpV3/utest/concept_builder"
-  checkpoint_path: "EXPERIMENT/nlcpV3/utest/concept_builder/checkpoints"
-  log_path: "EXPERIMENT/nlcpV3/utest/concept_builder/logs"
+  save_folder: "EXPERIMENT/nlcpV4/utest/concept_builder"
+  checkpoint_path: "EXPERIMENT/nlcpV4/utest/concept_builder/checkpoints"
+  log_path: "EXPERIMENT/nlcpV4/utest/concept_builder/logs"
   log_level: "INFO"
 
 # Evaluation configuration (disabled for testing)

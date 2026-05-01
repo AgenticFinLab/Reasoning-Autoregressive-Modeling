@@ -28,6 +28,34 @@
 #   2. Specific locations where the new field will be used
 #   3. Expected behavior and outcomes
 #
+# !!! STRICT FIELD PLACEMENT RULES !!!
+# =============================================================================
+# Each field MUST reside in its semantically correct block. Violations create
+# maintenance burden and config parsing inconsistencies across the project.
+#
+# BLOCK OWNERSHIP (fields belong to the block that OWNS the concept):
+#
+#   data:        Dataset identity and loading (name, path, split, subset,
+#                shuffle, drop_last, etc.)
+#   environment: Runtime context (seed, device, dotenv, num_workers, etc.)
+#   model:       Architecture definition ONLY (model identity, dimensions,
+#                layers, heads — anything that defines WHAT the model IS)
+#   training:    Optimization and learning (batch_size, epochs, lr, weight_decay,
+#                warmup, gradient_clip, loss_weights, trainability, lora, resume,
+#                ordering_loss_type — anything that defines HOW to train)
+#   log:         All output, logging and checkpointing (save_folder, log_path,
+#                checkpoint_path, log_level, log_step_interval,
+#                checkpoint_step_interval — anything about WHEN/WHERE to write)
+#   evaluation:  Eval datasets, metrics, eval_step_interval
+#                (-1 = disabled, no separate "enabled" flag needed)
+#
+# COMMON MISTAKES TO AVOID:
+#   ✗ log_step_interval in training   → ✓ belongs in log
+#   ✗ checkpoint_step_interval in training → ✓ belongs in log
+#   ✗ eval_step_interval in training  → ✓ belongs in evaluation
+#   ✗ freeze/lora in model            → ✓ belongs in training (training strategy)
+#   ✗ hidden_dim in training          → ✓ belongs in model (architecture)
+#
 # This constraint ensures config parsing consistency and framework compatibility.
 # =============================================================================
 #
@@ -199,25 +227,21 @@ log:
 # Evaluation runs on held-out test sets to measure generalization.
 # =============================================================================
 evaluation:
-  # Enable/disable periodic evaluation
-  enabled: true
-
-  # Evaluation interval (in training steps)
-  # Runs evaluation every N training steps
+  # Evaluation interval (in training steps). -1 = disabled.
   eval_step_interval: 100
 
-  # Evaluation datasets configuration
-  # Each dataset entry specifies:
-  #   - name: Display name for logging
-  #   - path: Local cache path
-  #   - split: Dataset split (typically "test" or "validation")
-  #   - num_samples: Number of samples to evaluate (null for full set)
-  # Note: Dataset names below are PLACEHOLDERS - replace with your dataset.
-  datasets:
-    - name: "YourDataset_test"
-      path: "EXPERIMENT/data/YourDataset"
-      split: "test"
-      num_samples: 100
+  # Evaluation data configuration
+  # Same structure as the data block, plus two num_samples fields:
+  #   log_num_samples  : samples used for quick eval at log_step_interval
+  #   eval_num_samples : samples used for full eval at eval_step_interval
+  # Value semantics: (0,1] = proportion of test set; >1 = exact sample count
+  data:
+    data_name: "YourDataset"
+    data_path: "EXPERIMENT/data/YourDataset"
+    split: "test"
+    subset: ""
+    log_num_samples: 40      # quick eval at every log_step_interval
+    eval_num_samples: 1.0    # full eval at every eval_step_interval
 
   # Metrics to compute during evaluation
   # Available metrics depend on dataset and task type

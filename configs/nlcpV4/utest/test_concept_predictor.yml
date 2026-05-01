@@ -1,0 +1,95 @@
+# =============================================================================
+# NLCP V4 ConceptPredictor Test Configuration
+# =============================================================================
+# Purpose: Configuration for test_concept_predictor.py diagnostic tests
+# Usage:
+#   python examples/nlcpV4/utest/test_concept_predictor.py \
+#       -c configs/nlcpV4/utest/test_concept_predictor.yml
+# =============================================================================
+
+# Data configuration for GSM8K integration tests
+data:
+  data_name: "GSM8K"
+  data_path: "EXPERIMENT/data/GSM8K"
+  split: "train"
+  subset: ""
+
+# Environment configuration
+environment:
+  dotenv_path: ".env"
+  seed: 42
+  dataloader_num_workers: 0
+  device_map:
+    model:
+      device: "auto"
+      priority: 1
+
+# Model configuration
+model:
+  # Reason model (shared backbone for builder and predictor)
+  reason_model:
+    reason_model_name: "Qwen/Qwen2.5-0.5B"
+    reason_model_num_layers: -1
+
+  # Concept pyramid structure (shared between builder and predictor)
+  pyramid:
+    hidden_dim: 896
+    num_heads: 8
+    num_levels: 6
+    level_lengths: [1, 2, 4, 8, 16, 32]
+    max_seq_len: 512
+
+  # Builder-specific parameters
+  builder:
+    use_positional_query_init: true
+    positional_init_alpha: 0.5
+
+  # Predictor-specific parameters
+  predictor:
+    # Model selection:
+    #   true  → reuse builder.reason_model (requires builder= in __init__)
+    #   false → load separate model from predictor_model_name
+    use_shared_model: true
+    # Only used when use_shared_model=false:
+    predictor_model_name: "Qwen/Qwen2.5-0.5B"
+    predictor_num_layers: -1
+    # Concept Transformer configuration
+    num_transformer_layers: 4
+    dropout: 0.1
+
+# Training configuration
+training:
+  batch_size: 4
+  num_epochs: 1
+  learning_rate: 1.0e-4
+  weight_decay: 0.01
+
+  # Builder training strategy
+  reason_model:
+    freeze: true
+    lora: null
+
+  # Predictor training strategy
+  predictor:
+    freeze: false
+    lora: null
+
+  # Loss weights (builder losses for pyramid construction)
+  loss_weights:
+    reasoning_loss_weight: 0.5
+    ordering_loss_weight: 0.5
+    recon_loss_weight: 0.1
+    ordering_margin: 1.0
+    residual_loss_weight: 1.0
+  ordering_loss_type: margin
+
+# Log configuration
+log:
+  save_folder: "EXPERIMENT/nlcpV4/utest/concept_predictor"
+  checkpoint_path: "EXPERIMENT/nlcpV4/utest/concept_predictor/checkpoints"
+  log_path: "EXPERIMENT/nlcpV4/utest/concept_predictor/logs"
+  log_level: "INFO"
+
+# Evaluation configuration (disabled for testing)
+evaluation:
+  enabled: false

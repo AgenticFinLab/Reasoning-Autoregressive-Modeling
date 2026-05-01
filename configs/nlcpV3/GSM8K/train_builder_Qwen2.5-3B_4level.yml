@@ -87,9 +87,6 @@ model:
 # weight_decay            : L2 regularization coefficient.
 # warmup_ratio            : Fraction of total steps for linear LR warmup.
 # gradient_clip           : Maximum gradient norm for clipping (prevents explosion).
-# log_step_interval       : Log training metrics every N steps.
-# checkpoint_step_interval: Save checkpoint every N steps (0 = disable).
-# eval_step_interval      : Evaluation frequency during training (0 = disable).
 # resume                  : Checkpoint path to resume from (empty = scratch).
 #
 # loss_weights:
@@ -108,9 +105,6 @@ training:
   weight_decay: 0.01
   warmup_ratio: 0.1
   gradient_clip: 1.0
-  log_step_interval: 10
-  checkpoint_step_interval: 500
-  eval_step_interval: 0
   resume: ''
   reason_model:
     freeze: true
@@ -135,3 +129,18 @@ log:
   checkpoint_path: EXPERIMENT/nlcpV3/builder/GSM8K_Qwen2.5-3B_4level/checkpoints
   log_path: EXPERIMENT/nlcpV3/builder/GSM8K_Qwen2.5-3B_4level/logs
   log_level: INFO
+  # Step intervals (all values are training steps)
+  log_step_interval: 10
+  checkpoint_step_interval: 500
+
+# Evaluation configuration
+# -----------------------------------------------------------------------------
+evaluation:
+  eval_step_interval: 500   # -1 = disabled
+  data:
+    data_name: GSM8K
+    data_path: EXPERIMENT/data/GSM8K
+    split: test
+    subset: ''
+    log_num_samples: 40      # samples for log_step_interval eval; (0,1] = proportion, >1 = count
+    eval_num_samples: 1.0    # samples for eval_step_interval eval; (0,1] = proportion, >1 = count

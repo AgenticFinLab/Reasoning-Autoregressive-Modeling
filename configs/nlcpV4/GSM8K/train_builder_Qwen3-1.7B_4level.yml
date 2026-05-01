@@ -1,10 +1,10 @@
 # =============================================================================
-# NLCP V3 Concept Pyramid Builder Training Configuration
+# NLCP V4 Concept Pyramid Builder Training Configuration
 # =============================================================================
-# Purpose: Train ConceptPyramidBuilder on GSM8K with Qwen/Qwen2.5-1.5B
-# Pyramid Levels: 5 (ablation study)
+# Purpose: Train ConceptPyramidBuilder on GSM8K with Qwen/Qwen3-1.7B
+# Pyramid Levels: 4 (ablation study)
 # Usage:
-#   python examples/nlcpV3/train_builder.py -c configs/nlcpV3/GSM8K/train_builder_Qwen2.5-1.5B_5level.yml
+#   python examples/nlcpV4/train_builder.py -c configs/nlcpV4/GSM8K/train_builder_Qwen3-1.7B_4level.yml
 # =============================================================================
 
 # Data configuration
@@ -62,19 +62,18 @@ environment:
 # -----------------------------------------------------------------------------
 model:
   reason_model:
-    reason_model_name: Qwen/Qwen2.5-1.5B
+    reason_model_name: Qwen/Qwen3-1.7B
     reason_model_num_layers: -1
   pyramid:
-    hidden_dim: 1536
+    hidden_dim: 2048
     # Must equal encoder hidden_size to avoid lossy projection (VAR-faithful)
     num_heads: 8
-    num_levels: 5
+    num_levels: 4
     level_lengths:
     - 1
     - 2
     - 4
     - 8
-    - 16
     max_seq_len: 512
   builder:
     use_positional_query_init: true
@@ -126,9 +125,9 @@ training:
 # log_level      : Console/logging verbosity (DEBUG/INFO/WARNING/ERROR).
 # -----------------------------------------------------------------------------
 log:
-  save_folder: EXPERIMENT/nlcpV3/builder/GSM8K_Qwen2.5-1.5B_5level
-  checkpoint_path: EXPERIMENT/nlcpV3/builder/GSM8K_Qwen2.5-1.5B_5level/checkpoints
-  log_path: EXPERIMENT/nlcpV3/builder/GSM8K_Qwen2.5-1.5B_5level/logs
+  save_folder: EXPERIMENT/nlcpV4/builder/GSM8K_Qwen3-1.7B_4level
+  checkpoint_path: EXPERIMENT/nlcpV4/builder/GSM8K_Qwen3-1.7B_4level/checkpoints
+  log_path: EXPERIMENT/nlcpV4/builder/GSM8K_Qwen3-1.7B_4level/logs
   log_level: INFO
   # Step intervals (all values are training steps)
   log_step_interval: 10
