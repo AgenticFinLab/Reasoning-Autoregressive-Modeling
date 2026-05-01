@@ -2,10 +2,11 @@
 
 Run with:
     python3 examples/nlcpV4/utest/test_concept_builder.py \
-        -c configs/nlcpV4/utest/test_concept_builder.yml
+        -c configs/nlcpV4/GSM8K/train_builder_Qwen2.5-0.5B_6level.yml
 
 DESIGN PHILOSOPHY:
     Single end-to-end pipeline driven by real GSM8K CoT data.
+    Uses the same config files as real training (configs/nlcpV4/GSM8K/).
     Each pipeline step is verified and logged in detail.
     Diagnostic (log-based), not assertion-based — randomly initialized
     weights produce stochastic outputs before training.
