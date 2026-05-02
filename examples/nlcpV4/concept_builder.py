@@ -870,7 +870,7 @@ class ConceptPyramidBuilder(nn.Module):
         total_C = concepts.shape[1]
 
         # Step 2: Back-project concepts to encoder dimension: [B, total_C, D_enc]
-        concept_embeds = self.back_proj(concepts)
+        concept_embeds = self.back_decode(concepts)
 
         # Step 3: Get token embeddings from the model's embed_tokens
         backbone = self._get_backbone()
@@ -936,6 +936,32 @@ class ConceptPyramidBuilder(nn.Module):
         pyramid.reasoning_texts = self.tokenizer.batch_decode(
             predicted_ids, skip_special_tokens=True
         )
+
+    def back_decode(self, concept_space_tensor: torch.Tensor) -> torch.Tensor:
+        """Decode a tensor from concept space (D) back to encoder space (D_encoder).
+
+        PRINCIPLE (VAR-faithful reconstruction):
+            Reconstruction loss must compare against the ORIGINAL stable
+            encoder output (H_CoT), not the projected version (H_proj).
+            back_decode maps tensors from concept space D back to D_encoder.
+            L_recon = ||back_decode(f_hat_K) - H_CoT||^2
+
+        Currently a thin wrapper around the `back_proj` Linear layer, but
+        may evolve into a full decoder module (LayerNorm, residual blocks,
+        attention, MLPs, etc.) without changing any call sites. Naming
+        mirrors the `back_proj` layer for architectural symmetry.
+
+        Args:
+            concept_space_tensor: [..., D] tensor in concept space.
+
+        Returns:
+            [..., D_encoder] tensor in encoder space.
+        """
+        assert self.back_proj is not None, (
+            "back_proj is None \u2014 enable use_reasoning_loss=True or "
+            "ensure back_proj is constructed for reconstruction."
+        )
+        return self.back_proj(concept_space_tensor)
 
     def _build_pyramid(
         self,
@@ -1125,12 +1151,10 @@ class ConceptPyramidBuilder(nn.Module):
         # =================================================================
         # Step 4: Back-project reconstruction to encoder space
         # =================================================================
-        # PRINCIPLE (VAR-faithful reconstruction):
-        #   Reconstruction loss must compare against the ORIGINAL stable
-        #   encoder output (H_CoT), not the projected version (H_proj).
-        #   back_proj maps f_hat_K from concept space D back to D_encoder.
-        #   L_recon = ||back_proj(f_hat_K) - H_CoT||^2
-        reconstructed_encoder_hidden = self.back_proj(reconstructed_accumulator)
+        # See `back_decode` for the VAR-faithful
+        # reconstruction principle. Delegated to a helper so the
+        # back-projection logic can be flexibly modified in one place.
+        reconstructed_encoder_hidden = self.back_decode(reconstructed_accumulator)
         # reconstructed_encoder_hidden: [B, L, D_encoder]
 
         # =================================================================

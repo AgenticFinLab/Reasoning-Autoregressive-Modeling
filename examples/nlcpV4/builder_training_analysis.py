@@ -18,16 +18,15 @@ from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
-import torch
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(PROJECT_ROOT / "examples"))
 
-from lmbase.utils.env_tools import get_device
-from nlcpV4.concept_builder import ConceptPyramidBuilder
-from nlcpV4.data_loader import NLCPV4DataLoader
-from nlcpV4.eval_builder import evaluate_builder
+# Lightweight imports only. Heavy imports (torch, ConceptPyramidBuilder,
+# NLCPV4DataLoader, evaluate_builder) are deferred into `run_checkpoint_eval`
+# so that analysis with an existing eval_history.json does not require
+# torch / transformers / swanlab / nlcpV4 package dependencies.
 from ram.utils import load_config
 
 logger = logging.getLogger(__name__)
@@ -71,6 +70,14 @@ def run_checkpoint_eval(config: dict, project_root: Path) -> dict | None:
     Returns averaged loss dict (keys: total, recon, ordering, residual,
     optionally reasoning), or None if no checkpoint is found.
     """
+    # Lazy imports: only load heavy deps when actually running inference.
+    import torch
+
+    from lmbase.utils.env_tools import get_device
+    from nlcpV4.concept_builder import ConceptPyramidBuilder
+    from nlcpV4.data_loader import NLCPV4DataLoader
+    from nlcpV4.eval_builder import evaluate_builder
+
     # Locate best checkpoint
     checkpoint_dir = Path(config["log"]["checkpoint_path"])
     if not checkpoint_dir.is_absolute():
@@ -178,7 +185,8 @@ def _plot_eval_on_ax(
 ):
     """Overlay eval data on a training loss subplot.
 
-    If eval_quick/eval_full exist, plot them as scatter points.
+    If eval_quick/eval_full exist, plot them as line + marker so they
+    are visually distinct from the solid training curve.
     If both are empty but ckpt_eval is available, plot a single
     marker + horizontal dashed line.
     """
@@ -190,10 +198,12 @@ def _plot_eval_on_ax(
         ax.plot(
             eq_steps,
             eq_vals,
-            ".",
+            linestyle="--",
+            marker=".",
             color="tab:cyan",
-            markersize=2,
-            alpha=0.5,
+            linewidth=1.0,
+            markersize=4,
+            alpha=0.8,
             label="eval(quick)",
         )
     if eval_full:
@@ -202,10 +212,12 @@ def _plot_eval_on_ax(
         ax.plot(
             ef_steps,
             ef_vals,
-            "s",
+            linestyle=":",
+            marker="s",
             color="tab:red",
-            markersize=4,
-            alpha=0.8,
+            linewidth=1.2,
+            markersize=6,
+            alpha=0.9,
             label="eval(full)",
         )
 
@@ -240,10 +252,12 @@ def _plot_eval_total_on_ax(
         ax.plot(
             eq_steps,
             eq_total,
-            ".",
+            linestyle="--",
+            marker=".",
             color="tab:cyan",
-            markersize=2,
-            alpha=0.5,
+            linewidth=1.0,
+            markersize=4,
+            alpha=0.8,
             label="eval(quick)",
         )
     if eval_full:
@@ -252,10 +266,12 @@ def _plot_eval_total_on_ax(
         ax.plot(
             ef_steps,
             ef_total,
-            "s",
+            linestyle=":",
+            marker="s",
             color="tab:red",
-            markersize=4,
-            alpha=0.8,
+            linewidth=1.2,
+            markersize=6,
+            alpha=0.9,
             label="eval(full)",
         )
 
@@ -335,72 +351,97 @@ def main():
     ax = axes[0, 0]
     ax.plot(steps, total, alpha=0.15, color="black", linewidth=0.5)
     s = smooth(total, window)
-    ax.plot(steps[: len(s)] + window // 2, s, color="black", linewidth=1.5)
+    ax.plot(
+        steps[: len(s)] + window // 2,
+        s,
+        color="black",
+        linewidth=1.5,
+        label="train",
+    )
     _plot_eval_total_on_ax(ax, eval_quick, eval_full, ckpt_eval, last_step)
     ax.set_title("Total Loss (weighted sum)")
     ax.set_xlabel("Step")
     ax.set_ylabel("Loss")
     ax.grid(True, alpha=0.3)
-    if eval_quick or eval_full or ckpt_eval:
-        ax.legend(fontsize=7)
+    ax.legend(fontsize=8)
 
     # Weighted recon loss
     ax = axes[0, 1]
     ax.plot(steps, recon_w, alpha=0.15, color="tab:blue", linewidth=0.5)
     s = smooth(recon_w, window)
-    ax.plot(steps[: len(s)] + window // 2, s, color="tab:blue", linewidth=1.5)
+    ax.plot(
+        steps[: len(s)] + window // 2,
+        s,
+        color="tab:blue",
+        linewidth=1.5,
+        label="train",
+    )
     _plot_eval_on_ax(ax, eval_quick, eval_full, "recon", w_recon, ckpt_eval, last_step)
-    ax.set_title(f"Recon Loss (×{w_recon})")
+    ax.set_title(f"Recon Loss (\u00d7{w_recon})")
     ax.set_xlabel("Step")
     ax.set_ylabel("Loss")
     ax.grid(True, alpha=0.3)
-    if eval_quick or eval_full or ckpt_eval:
-        ax.legend(fontsize=7)
+    ax.legend(fontsize=8)
 
     # Weighted ordering loss
     ax = axes[1, 0]
     ax.plot(steps, ordering_w, alpha=0.15, color="tab:orange", linewidth=0.5)
     s = smooth(ordering_w, window)
-    ax.plot(steps[: len(s)] + window // 2, s, color="tab:orange", linewidth=1.5)
+    ax.plot(
+        steps[: len(s)] + window // 2,
+        s,
+        color="tab:orange",
+        linewidth=1.5,
+        label="train",
+    )
     _plot_eval_on_ax(
         ax, eval_quick, eval_full, "ordering", w_ordering, ckpt_eval, last_step
     )
-    ax.set_title(f"Ordering Loss (×{w_ordering})")
+    ax.set_title(f"Ordering Loss (\u00d7{w_ordering})")
     ax.set_xlabel("Step")
     ax.set_ylabel("Loss")
     ax.grid(True, alpha=0.3)
-    if eval_quick or eval_full or ckpt_eval:
-        ax.legend(fontsize=7)
+    ax.legend(fontsize=8)
 
     # Weighted residual loss
     ax = axes[1, 1]
     ax.plot(steps, residual_w, alpha=0.15, color="tab:green", linewidth=0.5)
     s = smooth(residual_w, window)
-    ax.plot(steps[: len(s)] + window // 2, s, color="tab:green", linewidth=1.5)
+    ax.plot(
+        steps[: len(s)] + window // 2,
+        s,
+        color="tab:green",
+        linewidth=1.5,
+        label="train",
+    )
     _plot_eval_on_ax(
         ax, eval_quick, eval_full, "residual", w_residual, ckpt_eval, last_step
     )
-    ax.set_title(f"Residual Loss (×{w_residual})")
+    ax.set_title(f"Residual Loss (\u00d7{w_residual})")
     ax.set_xlabel("Step")
     ax.set_ylabel("Loss")
     ax.grid(True, alpha=0.3)
-    if eval_quick or eval_full or ckpt_eval:
-        ax.legend(fontsize=7)
+    ax.legend(fontsize=8)
 
     # Weighted reasoning loss
     ax = axes[2, 0]
     ax.plot(steps, reasoning_w, alpha=0.15, color="tab:red", linewidth=0.5)
     s = smooth(reasoning_w, window)
-    ax.plot(steps[: len(s)] + window // 2, s, color="tab:red", linewidth=1.5)
+    ax.plot(
+        steps[: len(s)] + window // 2,
+        s,
+        color="tab:red",
+        linewidth=1.5,
+        label="train",
+    )
     _plot_eval_on_ax(
         ax, eval_quick, eval_full, "reasoning", w_reasoning, ckpt_eval, last_step
     )
-    ax.set_title(f"Reasoning Loss (×{w_reasoning})")
+    ax.set_title(f"Reasoning Loss (\u00d7{w_reasoning})")
     ax.set_xlabel("Step")
     ax.set_ylabel("Loss")
     ax.grid(True, alpha=0.3)
-    if eval_quick or eval_full or ckpt_eval:
-        ax.legend(fontsize=7)
+    ax.legend(fontsize=8)
 
     # Learning rate
     ax = axes[2, 1]
@@ -462,8 +503,89 @@ def main():
     ax2.grid(True, alpha=0.3)
     plt.tight_layout()
 
+    # ── Figure 3: All weighted eval losses overlaid ───────────────
+    # Mirrors Figure 2 but for eval data. Colors match Figure 2 per loss
+    # component; quick uses dashed + dot, full uses dotted + square.
+    fig3, ax3 = plt.subplots(figsize=(14, 6))
+    ax3.set_title(f"All Weighted Eval Losses: {experiment_name}")
+
+    eval_components = [
+        ("recon", w_recon, f"recon (\u00d7{w_recon})", "tab:blue"),
+        ("ordering", w_ordering, f"ordering (\u00d7{w_ordering})", "tab:orange"),
+        ("residual", w_residual, f"residual (\u00d7{w_residual})", "tab:green"),
+        ("reasoning", w_reasoning, f"reasoning (\u00d7{w_reasoning})", "tab:red"),
+        ("total", 1.0, "total", "black"),
+    ]
+
+    has_any_eval = bool(eval_quick) or bool(eval_full)
+
+    if eval_quick:
+        eq_steps = np.array([r["step"] for r in eval_quick])
+        for key, weight, label, color in eval_components:
+            if key == "total":
+                vals = np.array([r["total"] for r in eval_quick])
+            else:
+                vals = np.array([r.get(key, 0.0) * weight for r in eval_quick])
+            ax3.plot(
+                eq_steps,
+                vals,
+                linestyle="--",
+                marker=".",
+                color=color,
+                linewidth=1.0,
+                markersize=4,
+                alpha=0.8,
+                label=f"{label} [quick]",
+            )
+
+    if eval_full:
+        ef_steps = np.array([r["step"] for r in eval_full])
+        for key, weight, label, color in eval_components:
+            if key == "total":
+                vals = np.array([r["total"] for r in eval_full])
+            else:
+                vals = np.array([r.get(key, 0.0) * weight for r in eval_full])
+            ax3.plot(
+                ef_steps,
+                vals,
+                linestyle=":",
+                marker="s",
+                color=color,
+                linewidth=1.2,
+                markersize=6,
+                alpha=0.9,
+                label=f"{label} [full]",
+            )
+
+    # Fallback: checkpoint eval as single points when no eval history
+    if not has_any_eval and ckpt_eval is not None:
+        for key, weight, label, color in eval_components:
+            val = (
+                ckpt_eval.get(key, 0.0) * weight
+                if key != "total"
+                else ckpt_eval["total"]
+            )
+            ax3.plot(
+                last_step,
+                val,
+                "*",
+                color=color,
+                markersize=14,
+                zorder=5,
+                label=f"{label} [best ckpt]",
+            )
+            ax3.axhline(y=val, color=color, linestyle="--", linewidth=0.8, alpha=0.4)
+
+    ax3.set_xlabel("Step")
+    ax3.set_ylabel("Loss")
+    if has_any_eval or ckpt_eval is not None:
+        ax3.legend(fontsize=8, ncol=2)
+    ax3.grid(True, alpha=0.3)
+    plt.tight_layout()
+
     fig.savefig(log_dir / "training_losses.png", dpi=150, bbox_inches="tight")
     fig2.savefig(log_dir / "training_losses_overlay.png", dpi=150, bbox_inches="tight")
+    fig3.savefig(log_dir / "eval_losses_overlay.png", dpi=150, bbox_inches="tight")
     print("Saved to %s" % log_dir)
 
 
