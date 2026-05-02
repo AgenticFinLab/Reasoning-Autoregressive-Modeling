@@ -54,8 +54,17 @@ def log_eval_results(
     log_dir,
     swanlab_prefix,
     reasoning_texts,
+    eval_samples,
+    eval_sample_history,
 ):
-    """Log eval results (raw/weighted) to console, terminal, SwanLab, eval_history."""
+    """Log eval results (raw/weighted) to console, terminal, SwanLab, eval_history.
+
+    Also appends a record to ``eval_sample_history`` documenting which
+    samples were consumed by this eval invocation (``main_id`` from the
+    lmbase source row, question, groundtruth solution), and persists it
+    to ``log_dir / eval_sample_history.json`` so loss-history rows can
+    be reconciled with the exact data that produced them.
+    """
     ew = {
         "recon": eval_losses["recon"] * loss_weights["recon_loss_weight"],
         "ordering": eval_losses["ordering"] * loss_weights["ordering_loss_weight"],
@@ -129,6 +138,21 @@ def log_eval_results(
         with open(log_dir / "eval_reasoning_texts.jsonl", "a", encoding="utf-8") as f:
             f.write(json.dumps(entry, default=str) + "\n")
 
+    # Sample history: one record per eval invocation listing the exact
+    # rows consumed so the caller can re-verify which inputs produced
+    # the losses above without re-running the model.
+    eval_sample_history.append(
+        {
+            "step": global_step,
+            "eval_type": eval_type,
+            "timestamp": datetime.datetime.now().isoformat(),
+            "num_samples": len(eval_samples),
+            "samples": eval_samples,
+        }
+    )
+    with open(log_dir / "eval_sample_history.json", "w", encoding="utf-8") as f:
+        json.dump(eval_sample_history, f, indent=2, default=str)
+
 
 # ── Evaluation loop ──────────────────────────────────────────────────
 
@@ -140,8 +164,8 @@ def evaluate_builder(
     loss_weights: dict,
     ordering_loss_type: str,
     max_batches: int,
-) -> tuple[dict, list[str]]:
-    """Run evaluation on test data and return averaged loss dict + decoded texts.
+) -> tuple[dict, list[str], list[dict]]:
+    """Run evaluation on test data and return averaged loss + texts + samples.
 
     Args:
         builder: The model to evaluate.
@@ -151,13 +175,19 @@ def evaluate_builder(
         max_batches: Maximum batches to evaluate. 0 = all batches.
 
     Returns:
-        Tuple of (averaged_loss_dict, reasoning_texts).
-        averaged_loss_dict has keys: total, recon, ordering, residual, reasoning.
-        reasoning_texts is a flat list of decoded strings from all batches.
+        Tuple ``(averaged_loss_dict, reasoning_texts, samples)``.
+        - ``averaged_loss_dict`` has keys: total, recon, ordering, residual, reasoning.
+        - ``reasoning_texts`` is a flat list of teacher-forced decoded
+          strings from all batches (empty if no solutions).
+        - ``samples`` is a list of per-sample records
+          ``{batch_idx, pos_in_batch, main_id, question, solution}`` in
+          the exact order they were consumed. ``main_id`` comes from
+          the lmbase source row, so rows align 1:1 with the dataset.
     """
     builder.eval()
     all_losses = []
     all_reasoning_texts = []
+    all_samples: list[dict] = []
 
     for i, batch in enumerate(eval_dataloader):
         if max_batches > 0 and i >= max_batches:
@@ -175,14 +205,31 @@ def evaluate_builder(
         if pyramid.reasoning_texts is not None:
             all_reasoning_texts.extend(pyramid.reasoning_texts)
 
+        # Record per-sample metadata so eval_sample_history.json can
+        # reconstruct which inputs were consumed by this eval invocation.
+        for j in range(batch.batch_size):
+            all_samples.append(
+                {
+                    "batch_idx": i,
+                    "pos_in_batch": j,
+                    "main_id": batch.main_ids[j],
+                    "question": batch.questions[j],
+                    "solution": batch.solutions[j] if batch.has_solution else None,
+                }
+            )
+
     builder.train()
 
     if not all_losses:
-        return {"total": 0.0, "recon": 0.0, "ordering": 0.0, "residual": 0.0}, []
+        return (
+            {"total": 0.0, "recon": 0.0, "ordering": 0.0, "residual": 0.0},
+            [],
+            [],
+        )
 
     # Average across all batches
     avg = {}
     keys = all_losses[0].keys()
     for k in keys:
         avg[k] = sum(d.get(k, 0.0) for d in all_losses) / len(all_losses)
-    return avg, all_reasoning_texts
+    return avg, all_reasoning_texts, all_samples

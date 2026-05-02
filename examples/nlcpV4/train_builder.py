@@ -1,11 +1,22 @@
-"""Train NLCP V3 ConceptPyramidBuilder.
+"""Train NLCP V4 ConceptPyramidBuilder.
 
 Usage:
-    python3 examples/nlcpV3/train_builder.py -c configs/nlcpV3/GSM8K/train_builder_Qwen2.5-0.5B_6level.yml
+    python3 examples/nlcpV4/train_builder.py -c configs/nlcpV4/GSM8K/train_builder_Qwen2.5-0.5B_6level.yml
+
+V4 contract (vs V3):
+  - ``ConceptPyramidBuilder.forward(batch: BuilderInput) -> PyramidOutput``
+    handles encoding, pyramid construction, and (when the batch has
+    solutions) reasoning preparation in a single call. No separate
+    ``encode_cot`` / ``compute_reasoning_loss`` plumbing in the trainer.
+  - ``compute_builder_loss`` in ``nlcpV4.losses`` owns ALL loss math
+    (recon + ordering + residual + reasoning) — it reads the reasoning
+    logits/targets directly from ``PyramidOutput``.
+  - ``evaluate_builder`` / ``log_eval_results`` / ``log_terminal_entry``
+    live in ``nlcpV4.eval_builder`` and are reused here, so the trainer
+    contains training-loop logic only.
 """
 
 import argparse
-import datetime
 import json
 import logging
 import math
@@ -15,7 +26,6 @@ from pathlib import Path
 
 import numpy as np
 import torch
-import torch.nn.functional as F
 from dotenv import load_dotenv
 from torch.optim import AdamW
 from tqdm import tqdm
@@ -27,8 +37,14 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(PROJECT_ROOT / "examples"))
 
-from nlcpV3.concept_hybrid_builder import ConceptPyramidBuilder, PyramidOutput
-from nlcpV3.data_loader import NLCPV3DataLoader
+from nlcpV4.concept_builder import ConceptPyramidBuilder
+from nlcpV4.data_loader import NLCPV4DataLoader
+from nlcpV4.eval_builder import (
+    evaluate_builder,
+    log_eval_results,
+    log_terminal_entry,
+)
+from nlcpV4.losses import compute_builder_loss
 from lmbase.utils.env_tools import get_device
 from ram.utils import (
     load_config,
@@ -153,119 +169,6 @@ def _log_model_summary(builder: ConceptPyramidBuilder, config: dict, logger):
         logger.info(line)
 
 
-def _log_terminal_entry(log_path: Path, entry: dict):
-    """Append a structured JSON line to the terminal output log file.
-
-    Each entry is a JSON object with timestamp, step, epoch,
-    loss values, and learning rate. Written immediately to disk
-    so terminal output is preserved even if training crashes.
-    """
-    entry["timestamp"] = datetime.datetime.now().isoformat()
-    with open(log_path, "a", encoding="utf-8") as f:
-        f.write(json.dumps(entry, default=str) + "\n")
-
-
-def _log_eval_results(
-    eval_losses,
-    eval_samples,
-    loss_weights,
-    eval_type,
-    global_step,
-    logger,
-    terminal_log_path,
-    eval_history,
-    eval_sample_history,
-    log_dir,
-    swanlab_prefix,
-):
-    """Log eval results (raw/weighted) to console, terminal, SwanLab, eval_history.
-
-    Also appends a record to ``eval_sample_history`` documenting exactly
-    which samples were consumed by this eval invocation (question text,
-    groundtruth solution, and a short stable sample_id), and persists it
-    to ``log_dir / eval_sample_history.json`` for repeated verification.
-    """
-    ew = {
-        "recon": eval_losses["recon"] * loss_weights["recon_loss_weight"],
-        "ordering": eval_losses["ordering"] * loss_weights["ordering_loss_weight"],
-        "residual": eval_losses["residual"] * loss_weights["residual_loss_weight"],
-    }
-    reasoning_part = ""
-    if "reasoning" in eval_losses:
-        ew["reasoning"] = (
-            eval_losses["reasoning"] * loss_weights["reasoning_loss_weight"]
-        )
-        reasoning_part = " reasoning=%.4f/%.4f" % (
-            eval_losses["reasoning"],
-            ew["reasoning"],
-        )
-    label = "eval(quick)" if eval_type == "quick" else "eval(full) "
-    logger.info(
-        "  %s | total=%.4f recon=%.4f/%.4f ordering=%.4f/%.4f" " residual=%.4f/%.4f%s",
-        label,
-        eval_losses["total"],
-        eval_losses["recon"],
-        ew["recon"],
-        eval_losses["ordering"],
-        ew["ordering"],
-        eval_losses["residual"],
-        ew["residual"],
-        reasoning_part,
-    )
-    # SwanLab
-    metrics = {
-        f"{swanlab_prefix}/total_loss": eval_losses["total"],
-        f"{swanlab_prefix}/recon_raw": eval_losses["recon"],
-        f"{swanlab_prefix}/recon_weighted": ew["recon"],
-        f"{swanlab_prefix}/ordering_raw": eval_losses["ordering"],
-        f"{swanlab_prefix}/ordering_weighted": ew["ordering"],
-        f"{swanlab_prefix}/residual_raw": eval_losses["residual"],
-        f"{swanlab_prefix}/residual_weighted": ew["residual"],
-    }
-    if "reasoning" in eval_losses:
-        metrics[f"{swanlab_prefix}/reasoning_raw"] = eval_losses["reasoning"]
-        metrics[f"{swanlab_prefix}/reasoning_weighted"] = ew["reasoning"]
-    swanlab.log(metrics, step=global_step)
-    # Terminal log
-    _log_terminal_entry(
-        terminal_log_path,
-        {
-            "step": global_step,
-            "eval_type": eval_type,
-            **{f"eval_{k}": round(v, 6) for k, v in eval_losses.items()},
-            **{f"eval_{k}_w": round(v, 6) for k, v in ew.items()},
-        },
-    )
-    # Eval history + save immediately (crash-safe)
-    eval_history.append(
-        {
-            "step": global_step,
-            "eval_type": eval_type,
-            **eval_losses,
-            **{f"{k}_w": v for k, v in ew.items()},
-        }
-    )
-    with open(log_dir / "eval_history.json", "w", encoding="utf-8") as f:
-        json.dump(eval_history, f, indent=2, default=str)
-
-    # Sample history: one record per eval invocation containing the
-    # exact list of samples consumed. Persist alongside eval_history.json
-    # so the caller can reconcile loss-history rows with which data was
-    # evaluated, and can repeat the check offline without re-running the
-    # model.
-    eval_sample_history.append(
-        {
-            "step": global_step,
-            "eval_type": eval_type,
-            "timestamp": datetime.datetime.now().isoformat(),
-            "num_samples": len(eval_samples),
-            "samples": eval_samples,
-        }
-    )
-    with open(log_dir / "eval_sample_history.json", "w", encoding="utf-8") as f:
-        json.dump(eval_sample_history, f, indent=2, default=str)
-
-
 def parse_args():
     parser = argparse.ArgumentParser(description="Train ConceptPyramidBuilder")
     parser.add_argument(
@@ -275,267 +178,6 @@ def parse_args():
         "--resume", type=str, default="", help="Path to checkpoint to resume from"
     )
     return parser.parse_args()
-
-
-def _ordering_loss_margin(
-    attention_weights: torch.Tensor, margin: float
-) -> torch.Tensor:
-    """Margin-based ordering loss per hybrid-analysis.md Section 5.1.2.
-
-    L_order = Σ_j ReLU(exp_pos[C_j] - exp_pos[C_{j+1}] + margin)
-    where exp_pos[C_j] = Σ_t A_j(t) × t
-
-    Args:
-        attention_weights: [B, L_k, L] attention weights A_k
-        margin: Minimum expected position gap between adjacent concepts
-
-    Returns:
-        Scalar ordering loss
-    """
-    B, Lk, L = attention_weights.shape
-    if Lk <= 1:
-        return torch.tensor(0.0, device=attention_weights.device)
-
-    positions = torch.arange(L, device=attention_weights.device, dtype=torch.float32)
-    # expected_pos: [B, L_k] — expected CoT position for each concept
-    expected_pos = (attention_weights * positions.unsqueeze(0).unsqueeze(0)).sum(dim=-1)
-
-    loss = torch.tensor(0.0, device=attention_weights.device)
-    for j in range(Lk - 1):
-        # Enforce: C_j attends to earlier positions than C_{j+1}
-        loss = (
-            loss + F.relu(expected_pos[:, j] - expected_pos[:, j + 1] + margin).mean()
-        )
-
-    return loss
-
-
-def _ordering_loss_gaussian(
-    attention_weights: torch.Tensor,
-) -> torch.Tensor:
-    """Gaussian-target ordering loss (original implementation).
-
-    Encourages each concept's attention to match a Gaussian centered at
-    its expected segment position. Soft but does not explicitly enforce
-    monotonic ordering.
-
-    Args:
-        attention_weights: [B, L_k, L] attention weights A_k
-
-    Returns:
-        Scalar ordering loss
-    """
-    B, Lk, L = attention_weights.shape
-    if Lk <= 1:
-        return torch.tensor(0.0, device=attention_weights.device)
-
-    centers = torch.linspace(0, L - 1, Lk, device=attention_weights.device)
-    positions = torch.arange(L, device=attention_weights.device).float()
-    sigma = max(L / Lk / 2, 1.0)
-    target = torch.exp(
-        -((positions.unsqueeze(0) - centers.unsqueeze(1)) ** 2) / (2 * sigma**2)
-    )
-    target = target / target.sum(dim=1, keepdim=True)
-    attn = attention_weights.mean(dim=0)  # [L_k, L]
-    return -(target * torch.log(attn + 1e-8)).sum(dim=1).mean()
-
-
-def compute_builder_loss(
-    pyramid: PyramidOutput,
-    loss_weights: dict,
-    ordering_loss_type: str,
-) -> tuple[torch.Tensor, dict]:
-    """Compute recon + ordering + residual losses.
-
-    Args:
-        pyramid: PyramidOutput from builder.forward()
-        loss_weights: Dict with recon_loss_weight, ordering_loss_weight,
-            residual_loss_weight, etc.
-        ordering_loss_type: "margin" (design doc spec, mandatory) or
-            "gaussian" (original soft target). Can also be "both".
-
-    Returns:
-        (total_loss, loss_dict)
-    """
-    loss_dict = {}
-    device = pyramid.projected_hidden.device
-
-    # ── Reconstruction loss ──────────────────────────────────────────
-    # MSE between back-projected reconstruction and original CoT encodings:
-    #   L_recon = ||back_proj(f_hat_K) - H_CoT||^2
-    # This measures how well the pyramid preserves the ORIGINAL encoder
-    # information, analogous to VAR's reconstruction against frozen encoder output.
-    if pyramid.attention_mask is not None:
-        mask = pyramid.attention_mask.unsqueeze(-1)  # [B, L, 1]
-        recon_diff = (
-            pyramid.reconstructed_encoder_hidden - pyramid.encoder_hidden_states
-        ) * mask
-        num_valid_elements = (
-            mask.sum() * pyramid.encoder_hidden_states.shape[-1]
-        )  # tokens × D_encoder
-        recon_loss = (recon_diff**2).sum() / num_valid_elements
-    else:
-        recon_loss = F.mse_loss(
-            pyramid.reconstructed_encoder_hidden, pyramid.encoder_hidden_states
-        )
-    loss_dict["recon"] = recon_loss.item()
-
-    # ── Ordering loss ────────────────────────────────────────────────
-    ordering_loss = torch.tensor(0.0, device=device)
-    ordering_margin = loss_weights["ordering_margin"]
-    levels_with_ordering = 0
-
-    for lo in pyramid.level_outputs:
-        Lk = lo.attention_weights.shape[1]
-        if Lk <= 1:
-            continue
-        levels_with_ordering += 1
-
-        if ordering_loss_type == "margin":
-            level_order_loss = _ordering_loss_margin(
-                lo.attention_weights, margin=ordering_margin
-            )
-        elif ordering_loss_type == "gaussian":
-            level_order_loss = _ordering_loss_gaussian(lo.attention_weights)
-        elif ordering_loss_type == "both":
-            level_order_loss = _ordering_loss_margin(
-                lo.attention_weights, margin=ordering_margin
-            ) + _ordering_loss_gaussian(lo.attention_weights)
-        else:
-            raise ValueError(f"Unknown ordering_loss_type: {ordering_loss_type}")
-
-        ordering_loss = ordering_loss + level_order_loss
-
-    if levels_with_ordering > 0:
-        ordering_loss = ordering_loss / levels_with_ordering
-    loss_dict["ordering"] = ordering_loss.item()
-
-    # ── Residual loss ────────────────────────────────────────────────
-    # L1 averaged over all valid elements (B, L, D), consistent with
-    # the per-element mean convention used by reconstruction loss.
-    if pyramid.attention_mask is not None:
-        mask = pyramid.attention_mask.unsqueeze(-1)
-        num_valid_elements = (
-            mask.sum() * pyramid.residual_hidden.shape[-1]
-        )  # tokens × D
-        res_loss = (pyramid.residual_hidden.abs() * mask).sum() / num_valid_elements
-    else:
-        res_loss = pyramid.residual_hidden.abs().mean()
-    loss_dict["residual"] = res_loss.item()
-
-    # ── Total loss ───────────────────────────────────────────────────
-    residual_weight = loss_weights["residual_loss_weight"]
-    total_loss = (
-        loss_weights["recon_loss_weight"] * recon_loss
-        + loss_weights["ordering_loss_weight"] * ordering_loss
-        + residual_weight * res_loss
-    )
-    loss_dict["total"] = total_loss.item()
-
-    return total_loss, loss_dict
-
-
-@torch.no_grad()
-def evaluate_builder(
-    builder: ConceptPyramidBuilder,
-    eval_dataloader: NLCPV3DataLoader,
-    loss_weights: dict,
-    ordering_loss_type: str,
-    device: str,
-    pyramid_cfg: dict,
-    max_batches: int = 0,
-) -> dict:
-    """Run evaluation on test data and return averaged loss dict.
-
-    Args:
-        builder: The model to evaluate.
-        eval_dataloader: DataLoader yielding BuilderInput batches from test set.
-        loss_weights: Loss weight configuration.
-        ordering_loss_type: "margin", "gaussian", or "both".
-        device: Device string.
-        pyramid_cfg: Pyramid config (for max_seq_len).
-        max_batches: Maximum batches to evaluate. 0 = all batches.
-
-    Returns:
-        Tuple ``(avg_loss_dict, samples_list)`` where ``avg_loss_dict`` has
-        keys ``total, recon, ordering, residual, reasoning`` (reasoning
-        only if the batch had solutions) averaged across consumed
-        batches, and ``samples_list`` is a list of per-sample records
-        (``batch_idx``, ``pos_in_batch``, ``main_id``, ``question``,
-        ``solution``) in the exact order they were evaluated.
-    """
-    builder.eval()
-    all_losses = []
-    all_samples = []
-
-    for i, batch in enumerate(eval_dataloader):
-        if max_batches > 0 and i >= max_batches:
-            break
-
-        enc_out = builder.encode_cot(batch.cot_answers)
-        pyramid = builder(enc_out.hidden_states, attention_mask=enc_out.attention_mask)
-        _, loss_dict = compute_builder_loss(
-            pyramid, loss_weights, ordering_loss_type=ordering_loss_type
-        )
-
-        if batch.has_solution:
-            q_tokens = builder.tokenizer(
-                batch.questions,
-                return_tensors="pt",
-                padding=True,
-                truncation=True,
-                max_length=pyramid_cfg["max_seq_len"],
-            )
-            q_ids = q_tokens["input_ids"].to(device)
-            q_mask = q_tokens["attention_mask"].to(device)
-
-            sol_tokens = builder.tokenizer(
-                batch.solutions,
-                return_tensors="pt",
-                padding=True,
-                truncation=True,
-                max_length=pyramid_cfg["max_seq_len"],
-            )
-            sol_ids = sol_tokens["input_ids"].to(device)
-
-            reasoning_loss = builder.compute_reasoning_loss(
-                pyramid, q_ids, q_mask, sol_ids
-            )
-            loss_dict["reasoning"] = reasoning_loss.item()
-            loss_dict["total"] = (
-                loss_dict["total"]
-                + loss_weights["reasoning_loss_weight"] * reasoning_loss.item()
-            )
-
-        all_losses.append(loss_dict)
-
-        # Record per-sample metadata so eval_sample_history.json can
-        # reconstruct which inputs were consumed by this eval invocation.
-        # ``main_id`` comes straight from the lmbase dataset record
-        # (e.g. "ID1"), so rows here align 1:1 with source dataset rows
-        # and can be re-looked up without any hashing on our side.
-        for j in range(batch.batch_size):
-            all_samples.append(
-                {
-                    "batch_idx": i,
-                    "pos_in_batch": j,
-                    "main_id": batch.main_ids[j],
-                    "question": batch.questions[j],
-                    "solution": batch.solutions[j] if batch.has_solution else None,
-                }
-            )
-
-    builder.train()
-
-    if not all_losses:
-        return {"total": 0.0, "recon": 0.0, "ordering": 0.0, "residual": 0.0}, []
-
-    # Average across all batches
-    avg = {}
-    keys = all_losses[0].keys()
-    for k in keys:
-        avg[k] = sum(d.get(k, 0.0) for d in all_losses) / len(all_losses)
-    return avg, all_samples
 
 
 def save_checkpoint(
@@ -598,7 +240,6 @@ def load_checkpoint(
 def train_builder(config: dict, config_path: Path):
     """Main training loop."""
     # Extract sub-configs
-    pyramid_cfg = config["model"]["pyramid"]
     train_cfg = config["training"]
     data_cfg = config["data"]
     env_cfg = config["environment"]
@@ -679,7 +320,7 @@ def train_builder(config: dict, config_path: Path):
 
     optimizer = AdamW(trainable_params, lr=learning_rate, weight_decay=weight_decay)
 
-    dataloader = NLCPV3DataLoader(
+    dataloader = NLCPV4DataLoader(
         data_cfg=data_cfg,
         batch_size=batch_size,
         include_solution=True,
@@ -699,14 +340,18 @@ def train_builder(config: dict, config_path: Path):
     eval_interval = eval_cfg["eval_step_interval"]
     eval_enabled = eval_interval > 0
     eval_dataloader = None
-    eval_history = []
-    eval_sample_history = []
+    # eval_history holds per-invocation loss rows (eval_history.json);
+    # eval_sample_history holds the matching sample lists
+    # (eval_sample_history.json). Both are written crash-safely after
+    # every eval call so either file can be cross-referenced offline.
+    eval_history: list[dict] = []
+    eval_sample_history: list[dict] = []
     quick_eval_batches = 0
     full_eval_batches = 0
 
     if eval_enabled:
         eval_data_cfg = eval_cfg["data"]
-        eval_dataloader = NLCPV3DataLoader(
+        eval_dataloader = NLCPV4DataLoader(
             data_cfg=eval_data_cfg,
             batch_size=batch_size,
             include_solution=True,
@@ -789,46 +434,16 @@ def train_builder(config: dict, config_path: Path):
         epoch_mid_batch = epoch_num_batches // 2 if epoch_num_batches > 1 else -1
 
         for batch_idx, batch in enumerate(pbar):
-            # Encode CoT → hidden states, then build pyramid
-            enc_out = builder.encode_cot(batch.cot_answers)
-            pyramid = builder(
-                enc_out.hidden_states, attention_mask=enc_out.attention_mask
-            )
+            # V4 API: single forward pass handles encode + pyramid +
+            # reasoning preparation. ``compute_builder_loss`` then
+            # reads ``pyramid.reasoning_logits/reasoning_target_ids``
+            # to add the reasoning term when the batch has solutions.
+            pyramid = builder(batch)
             total_loss, loss_dict = compute_builder_loss(
                 pyramid,
                 loss_weights,
                 ordering_loss_type=ordering_loss_type,
             )
-
-            if batch.has_solution:
-                # Tokenize questions and solutions for reasoning loss
-                q_tokens = builder.tokenizer(
-                    batch.questions,
-                    return_tensors="pt",
-                    padding=True,
-                    truncation=True,
-                    max_length=pyramid_cfg["max_seq_len"],
-                )
-                q_ids = q_tokens["input_ids"].to(device)
-                q_mask = q_tokens["attention_mask"].to(device)
-
-                sol_tokens = builder.tokenizer(
-                    batch.solutions,
-                    return_tensors="pt",
-                    padding=True,
-                    truncation=True,
-                    max_length=pyramid_cfg["max_seq_len"],
-                )
-                sol_ids = sol_tokens["input_ids"].to(device)
-
-                reasoning_loss = builder.compute_reasoning_loss(
-                    pyramid, q_ids, q_mask, sol_ids
-                )
-                total_loss = (
-                    total_loss + loss_weights["reasoning_loss_weight"] * reasoning_loss
-                )
-                loss_dict["reasoning"] = reasoning_loss.item()
-                loss_dict["total"] = total_loss.item()
 
             total_loss.backward()
 
@@ -902,7 +517,7 @@ def train_builder(config: dict, config_path: Path):
                 if "reasoning" in loss_dict:
                     terminal_entry["reasoning"] = round(loss_dict["reasoning"], 6)
                     terminal_entry["reasoning_w"] = round(w["reasoning"], 6)
-                _log_terminal_entry(terminal_log_path, terminal_entry)
+                log_terminal_entry(terminal_log_path, terminal_entry)
 
                 # SwanLab: raw + weighted as separate metrics
                 swanlab_metrics = {
@@ -922,27 +537,25 @@ def train_builder(config: dict, config_path: Path):
 
                 # ── Quick eval (skip when full eval fires at same step) ──
                 if eval_enabled and not (global_step % eval_interval == 0):
-                    eval_losses, eval_samples = evaluate_builder(
+                    eval_losses, reasoning_texts, samples = evaluate_builder(
                         builder,
                         eval_dataloader,
                         loss_weights,
                         ordering_loss_type,
-                        device,
-                        pyramid_cfg,
                         max_batches=quick_eval_batches,
                     )
-                    _log_eval_results(
+                    log_eval_results(
                         eval_losses,
-                        eval_samples,
                         loss_weights,
                         "quick",
                         global_step,
-                        logger,
                         terminal_log_path,
                         eval_history,
-                        eval_sample_history,
                         log_dir,
                         "eval_quick",
+                        reasoning_texts,
+                        samples,
+                        eval_sample_history,
                     )
 
             # ── Checkpoint scheduling ──────────────────────────
@@ -1002,27 +615,25 @@ def train_builder(config: dict, config_path: Path):
 
             # ── Full eval at eval_interval ──────────────────────
             if eval_enabled and global_step % eval_interval == 0:
-                eval_losses, eval_samples = evaluate_builder(
+                eval_losses, reasoning_texts, samples = evaluate_builder(
                     builder,
                     eval_dataloader,
                     loss_weights,
                     ordering_loss_type,
-                    device,
-                    pyramid_cfg,
                     max_batches=full_eval_batches,
                 )
-                _log_eval_results(
+                log_eval_results(
                     eval_losses,
-                    eval_samples,
                     loss_weights,
                     "full",
                     global_step,
-                    logger,
                     terminal_log_path,
                     eval_history,
-                    eval_sample_history,
                     log_dir,
                     "eval",
+                    reasoning_texts,
+                    samples,
+                    eval_sample_history,
                 )
                 # Best eval checkpoint (always tracked; overwrite-by-purge).
                 if eval_losses["total"] < best_eval_loss:
@@ -1055,7 +666,7 @@ def train_builder(config: dict, config_path: Path):
             sum(epoch_losses) / len(epoch_losses) if epoch_losses else float("inf")
         )
         logger.info("Epoch %d avg loss: %.4f", epoch + 1, avg_epoch_loss)
-        _log_terminal_entry(
+        log_terminal_entry(
             terminal_log_path,
             {"epoch": epoch, "avg_epoch_loss": round(avg_epoch_loss, 6)},
         )
