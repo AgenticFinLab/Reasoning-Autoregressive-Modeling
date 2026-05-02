@@ -132,14 +132,33 @@ def _pick_device_fresh() -> str:
         freest GPU, or
       * allocator fragmentation on one GPU pushes us to a fresher one.
 
-    We therefore synchronize + empty_cache, then let ``get_device('auto')``
-    (which internally uses ``torch.cuda.mem_get_info``) pick the GPU with
-    the most free memory right now.
+    We flush PyTorch's caching allocator so freed blocks return to the
+    driver, then let ``get_device('auto')`` (which uses
+    ``torch.cuda.mem_get_info``) pick the GPU with the most free memory.
+
+    Notes:
+      * We intentionally do NOT call ``torch.cuda.synchronize()`` here.
+        ``mem_get_info`` queries the driver directly, independent of
+        PyTorch's allocator / pending ops; and ``synchronize`` would
+        trigger CUDA-context initialization on the current device even
+        when we haven't allocated anything yet (first-iteration crash).
+      * ``empty_cache()`` is wrapped in try/except so a transient
+        allocator hiccup never kills a whole batch run.
+      * We only flush when PyTorch has actually allocated on a device
+        already (``memory_allocated() > 0``); before the first config,
+        there is nothing to flush.
     """
     if torch.cuda.is_available():
-        # Finish any pending ops so mem_get_info reflects real free VRAM.
-        torch.cuda.synchronize()
-        torch.cuda.empty_cache()
+        try:
+            # Only meaningful once we've allocated something; the check
+            # also avoids touching un-initialized CUDA contexts.
+            if any(
+                torch.cuda.memory_allocated(i) > 0
+                for i in range(torch.cuda.device_count())
+            ):
+                torch.cuda.empty_cache()
+        except Exception as e:  # defensive: never let flush kill the run
+            logger.warning("empty_cache() failed (non-fatal): %s", e)
     return str(get_device("auto"))
 
 
