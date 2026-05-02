@@ -2,26 +2,34 @@
 
 Purpose:
     Iterate over every matching YAML config in configs/nlcpV4/{dataset}/
-    and run a single-batch forward pass so researchers can inspect raw /
-    weighted loss components and decide how to adjust loss_weights.
+    and run a short forward pass so researchers can inspect raw / weighted
+    loss components (per-batch and mean/std/min/max aggregates) and decide
+    how to adjust loss_weights.
 
 Behaviour:
     1. Select configs whose filename starts with `train_{module}_`, where
        module is supplied via `-m builder` or `-m predictor`.
     2. Check EXPERIMENT/nlcpV4/{module}/Loss_prepare.json for the config key
        "{dataset}/{config_stem}". If present -> [SKIP].
-    3. Otherwise build the model, fetch ONE batch, run a forward pass with
-       torch.no_grad(), record raw + weighted + total losses, persist to
-       Loss_prepare.json, then free the model and continue.
+    3. Otherwise build the model, fetch N batches (default 1, set via
+       `-n N`), run a forward pass with torch.no_grad() for each, record
+       per-batch raw + weighted + total losses plus mean/std/min/max, then
+       free the model and continue.
+
+Efficiency:
+    * Device selection runs once at startup (no per-config re-probe).
+    * Batches are cached per unique (data_cfg, batch_size, num_batches)
+      key so identical datasets across configs are loaded only once.
 
 Usage:
     python3 examples/RunResults/loss_prepare.py -m builder -d GSM8K
-    python3 examples/RunResults/loss_prepare.py -m predictor -d GSM8K
+    python3 examples/RunResults/loss_prepare.py -m builder -d GSM8K -n 5
 """
 
 import argparse
 import json
 import logging
+import statistics
 import sys
 from pathlib import Path
 
@@ -45,6 +53,11 @@ logger = logging.getLogger("loss_prepare")
 OUT_FILENAME = "Loss_prepare.json"
 VALID_MODULES = ("builder", "predictor")
 
+# Cache fetched batches across configs that share an identical
+# (data_cfg, batch_size, num_batches), so the dataset is loaded at most
+# once per key.
+_BATCH_CACHE: dict = {}
+
 
 def parse_args():
     parser = argparse.ArgumentParser(
@@ -65,6 +78,15 @@ def parse_args():
         type=str,
         required=True,
         help="Dataset name (e.g., GSM8K). Resolves configs/nlcpV4/{dataset}/",
+    )
+    parser.add_argument(
+        "-n",
+        "--num-batches",
+        type=int,
+        default=1,
+        help="Number of batches to sample per config (default: 1). Each "
+        "config runs N forward passes; per-batch losses plus "
+        "mean/std/min/max aggregates are recorded.",
     )
     return parser.parse_args()
 
@@ -88,21 +110,25 @@ def save_loss_prepare(module: str, data: dict) -> None:
         json.dump(data, f, indent=2, default=str)
 
 
-def run_builder_one_batch(config: dict, device: str) -> dict:
-    """Build model, fetch one batch, compute raw + weighted losses."""
-    # Lazy import of heavy deps so this script is cheap when all keys are cached.
-    from nlcpV4.concept_builder import ConceptPyramidBuilder
+# ─── Batch caching ───────────────────────────────────────────────────────────
+
+
+def _cache_key(data_cfg: dict, batch_size: int, num_batches: int) -> str:
+    return json.dumps(
+        {"data_cfg": data_cfg, "batch_size": batch_size, "n": num_batches},
+        sort_keys=True,
+        default=str,
+    )
+
+
+def collect_batches(data_cfg: dict, batch_size: int, num_batches: int) -> list:
+    """Return ``num_batches`` batches for ``data_cfg`` (cached across configs)."""
+    # Lazy import: keeps the script cheap when all keys are cached.
     from nlcpV4.data_loader import NLCPV4DataLoader
-    from nlcpV4.losses import compute_builder_loss
 
-    data_cfg = config["data"]
-    train_cfg = config["training"]
-    loss_weights = train_cfg["loss_weights"]
-    ordering_loss_type = train_cfg["ordering_loss_type"]
-    batch_size = train_cfg["batch_size"]
-
-    builder = ConceptPyramidBuilder(config).to(device)
-    builder.eval()
+    key = _cache_key(data_cfg, batch_size, num_batches)
+    if key in _BATCH_CACHE:
+        return _BATCH_CACHE[key]
 
     dataloader = NLCPV4DataLoader(
         data_cfg=data_cfg,
@@ -112,18 +138,73 @@ def run_builder_one_batch(config: dict, device: str) -> dict:
         drop_last=True,
         num_workers=0,
     )
-    batch = next(iter(dataloader))
+    it = iter(dataloader)
+    batches = []
+    for _ in range(num_batches):
+        try:
+            batches.append(next(it))
+        except StopIteration:
+            break
+    _BATCH_CACHE[key] = batches
+    return batches
 
-    with torch.no_grad():
-        pyramid = builder(batch)
-        _, loss_dict = compute_builder_loss(
-            pyramid,
-            loss_weights,
-            ordering_loss_type=ordering_loss_type,
-        )
 
-    # Raw per-component losses (exclude the aggregate "total")
-    raw = {k: float(v) for k, v in loss_dict.items() if k != "total"}
+# ─── Statistics ──────────────────────────────────────────────────────────────
+
+
+def _stats(values: list) -> dict:
+    """Return mean/std/min/max for a non-empty list of floats."""
+    if not values:
+        return {"mean": 0.0, "std": 0.0, "min": 0.0, "max": 0.0}
+    if len(values) == 1:
+        v = float(values[0])
+        return {"mean": round(v, 6), "std": 0.0, "min": round(v, 6), "max": round(v, 6)}
+    return {
+        "mean": round(float(statistics.mean(values)), 6),
+        "std": round(float(statistics.stdev(values)), 6),  # sample std
+        "min": round(float(min(values)), 6),
+        "max": round(float(max(values)), 6),
+    }
+
+
+def _aggregate(per_batch: list) -> dict:
+    """Compute per-component mean/std/min/max across per_batch records."""
+    if not per_batch:
+        return {"raw": {}, "weighted": {}, "total_weighted": _stats([])}
+    raw_components = list(per_batch[0]["raw"].keys())
+    weighted_components = list(per_batch[0]["weighted"].keys())
+    raw_stats = {
+        c: _stats([b["raw"][c] for b in per_batch if c in b["raw"]])
+        for c in raw_components
+    }
+    weighted_stats = {
+        c: _stats([b["weighted"][c] for b in per_batch if c in b["weighted"]])
+        for c in weighted_components
+    }
+    total_stats = _stats([b["total_weighted"] for b in per_batch])
+    return {
+        "raw": raw_stats,
+        "weighted": weighted_stats,
+        "total_weighted": total_stats,
+    }
+
+
+# ─── Per-module runners ──────────────────────────────────────────────────────
+
+
+def run_builder_n_batches(config: dict, device: str, batches: list) -> dict:
+    """Build model and compute raw + weighted losses for each batch."""
+    # Lazy import of heavy deps.
+    from nlcpV4.concept_builder import ConceptPyramidBuilder
+    from nlcpV4.losses import compute_builder_loss
+
+    train_cfg = config["training"]
+    loss_weights = train_cfg["loss_weights"]
+    ordering_loss_type = train_cfg["ordering_loss_type"]
+    batch_size = train_cfg["batch_size"]
+
+    builder = ConceptPyramidBuilder(config).to(device)
+    builder.eval()
 
     # Map from loss component -> weight key in config
     weight_key_map = {
@@ -132,30 +213,50 @@ def run_builder_one_batch(config: dict, device: str) -> dict:
         "residual": "residual_loss_weight",
         "reasoning": "reasoning_loss_weight",
     }
-    weights = {
-        k: float(loss_weights[wk])
-        for k, wk in weight_key_map.items()
-        if k in raw and wk in loss_weights
-    }
-    weighted = {k: raw[k] * weights[k] for k in weights}
+
+    per_batch = []
+    weights: dict = {}
+    with torch.no_grad():
+        for batch in batches:
+            pyramid = builder(batch)
+            _, loss_dict = compute_builder_loss(
+                pyramid,
+                loss_weights,
+                ordering_loss_type=ordering_loss_type,
+            )
+            raw = {k: float(v) for k, v in loss_dict.items() if k != "total"}
+            if not weights:
+                weights = {
+                    k: float(loss_weights[wk])
+                    for k, wk in weight_key_map.items()
+                    if k in raw and wk in loss_weights
+                }
+            weighted = {k: raw[k] * weights[k] for k in weights}
+            per_batch.append(
+                {
+                    "raw": {k: round(v, 6) for k, v in raw.items()},
+                    "weighted": {k: round(v, 6) for k, v in weighted.items()},
+                    "total_weighted": round(float(loss_dict["total"]), 6),
+                }
+            )
+            del pyramid
 
     result = {
         "batch_size": int(batch_size),
-        "raw": {k: round(v, 6) for k, v in raw.items()},
+        "num_batches": len(per_batch),
         "weights": weights,
-        "weighted": {k: round(v, 6) for k, v in weighted.items()},
-        "total_weighted": round(float(loss_dict["total"]), 6),
+        "per_batch": per_batch,
+        "stats": _aggregate(per_batch),
     }
 
     # Release memory before next config.
-    del builder, dataloader, batch, pyramid
+    del builder
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
-
     return result
 
 
-def run_predictor_one_batch(config: dict, device: str) -> dict:
+def run_predictor_n_batches(config: dict, device: str, batches: list) -> dict:
     """Placeholder: predictor training is not yet integrated."""
     raise NotImplementedError(
         "predictor loss_prepare is not implemented yet "
@@ -163,10 +264,14 @@ def run_predictor_one_batch(config: dict, device: str) -> dict:
     )
 
 
+# ─── Entry point ─────────────────────────────────────────────────────────────
+
+
 def main():
     args = parse_args()
     module: str = args.module
     dataset: str = args.dataset
+    num_batches: int = max(1, int(args.num_batches))
 
     configs_dir = PROJECT_ROOT / "configs" / "nlcpV4" / dataset
     if not configs_dir.is_dir():
@@ -184,12 +289,17 @@ def main():
     # Load .env once (HF_TOKEN etc.)
     load_dotenv(PROJECT_ROOT / ".env")
 
+    # Device probe + base seed run ONCE; per-config only re-seeds without
+    # re-selecting the GPU (avoids the repeated "GPU Selection" printout).
+    first_seed = int(load_config(str(yml_files[0]))["environment"]["seed"])
+    setup_environment({"seed": first_seed, "device": "auto"})
     device = str(get_device("auto"))
     logger.info(
-        "Device=%s | module=%s | dataset=%s | %d config(s) found",
+        "Device=%s | module=%s | dataset=%s | num_batches=%d | %d config(s) found",
         device,
         module,
         dataset,
+        num_batches,
         len(yml_files),
     )
 
@@ -213,14 +323,24 @@ def main():
             n_skip += 1
             continue
 
-        logger.info("[RUN ] %s (module=%s)", key, module)
-        setup_environment({"seed": config["environment"]["seed"], "device": "auto"})
+        logger.info("[RUN ] %s (module=%s, n=%d)", key, module, num_batches)
+
+        # Cheap per-config re-seed without re-probing the device.
+        seed = int(config["environment"]["seed"])
+        torch.manual_seed(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(seed)
 
         try:
+            batches = collect_batches(
+                config["data"],
+                int(config["training"]["batch_size"]),
+                num_batches,
+            )
             if module == "builder":
-                result = run_builder_one_batch(config, device)
+                result = run_builder_n_batches(config, device, batches)
             else:
-                result = run_predictor_one_batch(config, device)
+                result = run_predictor_n_batches(config, device, batches)
         except Exception as e:
             logger.error("Failed on %s: %s", key, e, exc_info=True)
             n_fail += 1
@@ -231,13 +351,17 @@ def main():
         store[key] = result
         save_loss_prepare(module, store)
 
+        total_stats = result["stats"]["total_weighted"]
         weighted_summary = ", ".join(
-            f"{k}={v:.4f}" for k, v in result["weighted"].items()
+            f"{k}={v['mean']:.4f}\u00b1{v['std']:.4f}"
+            for k, v in result["stats"]["weighted"].items()
         )
         logger.info(
-            "[SAVE] %s | total=%.4f | %s",
+            "[SAVE] %s | total=%.4f\u00b1%.4f (n=%d) | %s",
             key,
-            result["total_weighted"],
+            total_stats["mean"],
+            total_stats["std"],
+            result["num_batches"],
             weighted_summary,
         )
         n_run += 1
