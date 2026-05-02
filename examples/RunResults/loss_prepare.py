@@ -1,14 +1,13 @@
 """Prepare loss values across all configs in a dataset for weight tuning.
 
 Purpose:
-    Iterate over every YAML config in configs/nlcpV4/{dataset}/ and run a
-    single-batch forward pass so researchers can inspect raw / weighted
-    loss components and decide how to adjust loss_weights.
+    Iterate over every matching YAML config in configs/nlcpV4/{dataset}/
+    and run a single-batch forward pass so researchers can inspect raw /
+    weighted loss components and decide how to adjust loss_weights.
 
 Behaviour:
-    1. Auto-detect module type (builder / predictor) from the config filename
-       (train_builder_* -> builder, train_predictor_* -> predictor) or from
-       the log.save_folder path when the filename is ambiguous.
+    1. Select configs whose filename starts with `train_{module}_`, where
+       module is supplied via `-m builder` or `-m predictor`.
     2. Check EXPERIMENT/nlcpV4/{module}/Loss_prepare.json for the config key
        "{dataset}/{config_stem}". If present -> [SKIP].
     3. Otherwise build the model, fetch ONE batch, run a forward pass with
@@ -16,7 +15,8 @@ Behaviour:
        Loss_prepare.json, then free the model and continue.
 
 Usage:
-    python3 examples/RunResults/loss_prepare.py -d GSM8K
+    python3 examples/RunResults/loss_prepare.py -m builder -d GSM8K
+    python3 examples/RunResults/loss_prepare.py -m predictor -d GSM8K
 """
 
 import argparse
@@ -51,6 +51,15 @@ def parse_args():
         description="Prepare loss inspection across a dataset's configs"
     )
     parser.add_argument(
+        "-m",
+        "--module",
+        type=str,
+        required=True,
+        choices=sorted(VALID_MODULES),
+        help="Module name: 'builder' or 'predictor'. Only configs whose "
+        "filename starts with 'train_{module}_' will be processed.",
+    )
+    parser.add_argument(
         "-d",
         "--dataset",
         type=str,
@@ -58,22 +67,6 @@ def parse_args():
         help="Dataset name (e.g., GSM8K). Resolves configs/nlcpV4/{dataset}/",
     )
     return parser.parse_args()
-
-
-def detect_module_type(config_path: Path, config: dict) -> str:
-    """Infer 'builder' or 'predictor' from filename first, then save_folder."""
-    stem = config_path.stem
-    if stem.startswith("train_builder"):
-        return "builder"
-    if stem.startswith("train_predictor"):
-        return "predictor"
-
-    save_folder = config.get("log", {}).get("save_folder", "")
-    for m in VALID_MODULES:
-        if f"/{m}/" in save_folder or save_folder.endswith(f"/{m}"):
-            return m
-
-    raise ValueError(f"Cannot detect module type (builder/predictor) for {config_path}")
 
 
 def loss_prepare_path(module: str) -> Path:
@@ -172,14 +165,20 @@ def run_predictor_one_batch(config: dict, device: str) -> dict:
 
 def main():
     args = parse_args()
-    configs_dir = PROJECT_ROOT / "configs" / "nlcpV4" / args.dataset
+    module: str = args.module
+    dataset: str = args.dataset
+
+    configs_dir = PROJECT_ROOT / "configs" / "nlcpV4" / dataset
     if not configs_dir.is_dir():
         logger.error("Configs dir not found: %s", configs_dir)
         sys.exit(1)
 
-    yml_files = sorted(configs_dir.glob("*.yml"))
+    # Only process configs matching the requested module, identified by
+    # the conventional `train_{module}_*.yml` filename prefix.
+    prefix = f"train_{module}_"
+    yml_files = sorted(configs_dir.glob(f"{prefix}*.yml"))
     if not yml_files:
-        logger.error("No YAML configs in %s", configs_dir)
+        logger.error("No YAML configs matching '%s*.yml' under %s", prefix, configs_dir)
         sys.exit(1)
 
     # Load .env once (HF_TOKEN etc.)
@@ -187,9 +186,10 @@ def main():
 
     device = str(get_device("auto"))
     logger.info(
-        "Device=%s | dataset=%s | %d configs found",
+        "Device=%s | module=%s | dataset=%s | %d config(s) found",
         device,
-        args.dataset,
+        module,
+        dataset,
         len(yml_files),
     )
 
@@ -205,14 +205,7 @@ def main():
             n_fail += 1
             continue
 
-        try:
-            module = detect_module_type(config_path, config)
-        except ValueError as e:
-            logger.error("%s", e)
-            n_fail += 1
-            continue
-
-        key = f"{args.dataset}/{config_path.stem}"
+        key = f"{dataset}/{config_path.stem}"
         store = load_loss_prepare(module)
 
         if key in store:
@@ -250,7 +243,8 @@ def main():
         n_run += 1
 
     logger.info(
-        "Done. run=%d skip=%d fail=%d total=%d",
+        "Done. module=%s run=%d skip=%d fail=%d total=%d",
+        module,
         n_run,
         n_skip,
         n_fail,
