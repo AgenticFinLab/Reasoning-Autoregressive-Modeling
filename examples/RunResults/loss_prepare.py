@@ -187,7 +187,22 @@ def _aggregate(per_batch: list) -> dict:
 
 
 def run_builder_n_batches(config: dict, device: str, batches: list) -> dict:
-    """Build model and compute raw + weighted losses for each batch."""
+    """Build model and compute raw + weighted losses for each batch.
+
+    Memory hygiene: with ``-n > 1`` this function is the main GPU-memory
+    hot spot, so a few defensive tweaks are applied to prevent OOM on
+    models that barely fit at ``n=1``:
+
+    * ``requires_grad_(False)`` on every parameter — kills autograd
+      bookkeeping independently of ``inference_mode``.
+    * ``torch.inference_mode()`` instead of ``torch.no_grad()`` —
+      stricter, no version counters, no grad tracking metadata.
+    * Explicit ``del pyramid, total_loss, loss_dict`` at the end of
+      each batch so the CUDA caching allocator can reuse those slots
+      on the NEXT iteration instead of fragmenting.
+    * ``torch.cuda.empty_cache()`` per batch — forces fragmented
+      allocations back into the global pool between forward passes.
+    """
     # Lazy import of heavy deps.
     from nlcpV4.concept_builder import ConceptPyramidBuilder
     from nlcpV4.losses import compute_builder_loss
@@ -199,6 +214,11 @@ def run_builder_n_batches(config: dict, device: str, batches: list) -> dict:
 
     builder = ConceptPyramidBuilder(config).to(device)
     builder.eval()
+    # Disable autograd bookkeeping on every parameter. Even under
+    # no_grad/inference_mode, leaving requires_grad=True keeps some
+    # lazily-allocated state; turning it off is cheap insurance.
+    for p in builder.parameters():
+        p.requires_grad_(False)
 
     weight_key_map = {
         "recon": "recon_loss_weight",
@@ -209,10 +229,10 @@ def run_builder_n_batches(config: dict, device: str, batches: list) -> dict:
 
     per_batch = []
     weights: dict = {}
-    with torch.no_grad():
+    with torch.inference_mode():
         for batch in batches:
             pyramid = builder(batch)
-            _, loss_dict = compute_builder_loss(
+            total_loss, loss_dict = compute_builder_loss(
                 pyramid,
                 loss_weights,
                 ordering_loss_type=ordering_loss_type,
@@ -232,7 +252,12 @@ def run_builder_n_batches(config: dict, device: str, batches: list) -> dict:
                     "total_weighted": round(float(loss_dict["total"]), 6),
                 }
             )
-            del pyramid
+            # Drop ALL GPU tensor refs before the next forward so the
+            # CUDA allocator can reuse the same slots instead of
+            # allocating fresh ones (which causes fragmentation).
+            del pyramid, total_loss, loss_dict
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
     result = {
         "batch_size": int(batch_size),
