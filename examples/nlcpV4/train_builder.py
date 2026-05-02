@@ -167,16 +167,24 @@ def _log_terminal_entry(log_path: Path, entry: dict):
 
 def _log_eval_results(
     eval_losses,
+    eval_samples,
     loss_weights,
     eval_type,
     global_step,
     logger,
     terminal_log_path,
     eval_history,
+    eval_sample_history,
     log_dir,
     swanlab_prefix,
 ):
-    """Log eval results (raw/weighted) to console, terminal, SwanLab, eval_history."""
+    """Log eval results (raw/weighted) to console, terminal, SwanLab, eval_history.
+
+    Also appends a record to ``eval_sample_history`` documenting exactly
+    which samples were consumed by this eval invocation (question text,
+    groundtruth solution, and a short stable sample_id), and persists it
+    to ``log_dir / eval_sample_history.json`` for repeated verification.
+    """
     ew = {
         "recon": eval_losses["recon"] * loss_weights["recon_loss_weight"],
         "ordering": eval_losses["ordering"] * loss_weights["ordering_loss_weight"],
@@ -239,6 +247,23 @@ def _log_eval_results(
     )
     with open(log_dir / "eval_history.json", "w", encoding="utf-8") as f:
         json.dump(eval_history, f, indent=2, default=str)
+
+    # Sample history: one record per eval invocation containing the
+    # exact list of samples consumed. Persist alongside eval_history.json
+    # so the caller can reconcile loss-history rows with which data was
+    # evaluated, and can repeat the check offline without re-running the
+    # model.
+    eval_sample_history.append(
+        {
+            "step": global_step,
+            "eval_type": eval_type,
+            "timestamp": datetime.datetime.now().isoformat(),
+            "num_samples": len(eval_samples),
+            "samples": eval_samples,
+        }
+    )
+    with open(log_dir / "eval_sample_history.json", "w", encoding="utf-8") as f:
+        json.dump(eval_sample_history, f, indent=2, default=str)
 
 
 def parse_args():
@@ -432,10 +457,16 @@ def evaluate_builder(
         max_batches: Maximum batches to evaluate. 0 = all batches.
 
     Returns:
-        Averaged loss dict with keys: total, recon, ordering, residual, reasoning.
+        Tuple ``(avg_loss_dict, samples_list)`` where ``avg_loss_dict`` has
+        keys ``total, recon, ordering, residual, reasoning`` (reasoning
+        only if the batch had solutions) averaged across consumed
+        batches, and ``samples_list`` is a list of per-sample records
+        (``batch_idx``, ``pos_in_batch``, ``main_id``, ``question``,
+        ``solution``) in the exact order they were evaluated.
     """
     builder.eval()
     all_losses = []
+    all_samples = []
 
     for i, batch in enumerate(eval_dataloader):
         if max_batches > 0 and i >= max_batches:
@@ -478,17 +509,33 @@ def evaluate_builder(
 
         all_losses.append(loss_dict)
 
+        # Record per-sample metadata so eval_sample_history.json can
+        # reconstruct which inputs were consumed by this eval invocation.
+        # ``main_id`` comes straight from the lmbase dataset record
+        # (e.g. "ID1"), so rows here align 1:1 with source dataset rows
+        # and can be re-looked up without any hashing on our side.
+        for j in range(batch.batch_size):
+            all_samples.append(
+                {
+                    "batch_idx": i,
+                    "pos_in_batch": j,
+                    "main_id": batch.main_ids[j],
+                    "question": batch.questions[j],
+                    "solution": batch.solutions[j] if batch.has_solution else None,
+                }
+            )
+
     builder.train()
 
     if not all_losses:
-        return {"total": 0.0, "recon": 0.0, "ordering": 0.0, "residual": 0.0}
+        return {"total": 0.0, "recon": 0.0, "ordering": 0.0, "residual": 0.0}, []
 
     # Average across all batches
     avg = {}
     keys = all_losses[0].keys()
     for k in keys:
         avg[k] = sum(d.get(k, 0.0) for d in all_losses) / len(all_losses)
-    return avg
+    return avg, all_samples
 
 
 def save_checkpoint(
@@ -599,10 +646,23 @@ def train_builder(config: dict, config_path: Path):
     dotenv_path = env_cfg.get("dotenv_path", ".env")
     load_dotenv(dotenv_path)
 
-    # Derive experiment name from config filename, e.g.
-    #   configs/nlcpV3/GSM8K/train_builder_Qwen2.5-0.5B_6level.yml
-    #   -> "GSM8K-train_builder_Qwen2.5-0.5B_6level"
-    experiment_name = f"{config_path.parent.name}-{config_path.stem}"
+    # Derive experiment name from the config file's location under
+    # ``configs/nlcpV4/``. All path segments between that root and the
+    # file (dataset, and any nested variant such as ``AutoWeighted/``)
+    # are joined by ``-`` with the filename stem so the name is unique
+    # and self-describing regardless of directory depth:
+    #   configs/nlcpV4/GSM8K/train_builder_Qwen2.5-0.5B_6level.yml
+    #     -> "GSM8K-train_builder_Qwen2.5-0.5B_6level"
+    #   configs/nlcpV4/GSM8K/AutoWeighted/train_builder_Qwen2.5-0.5B_6level.yml
+    #     -> "GSM8K-AutoWeighted-train_builder_Qwen2.5-0.5B_6level"
+    # Fail-fast: if the config lives outside configs/nlcpV4/, fall back
+    # to the legacy single-parent form so out-of-tree configs still run.
+    configs_root = PROJECT_ROOT / "configs" / "nlcpV4"
+    try:
+        rel_parts = config_path.resolve().relative_to(configs_root).parent.parts
+    except ValueError:
+        rel_parts = (config_path.parent.name,)
+    experiment_name = "-".join([*rel_parts, config_path.stem])
 
     swanlab.init(
         project="ReasoningAR",
@@ -640,6 +700,7 @@ def train_builder(config: dict, config_path: Path):
     eval_enabled = eval_interval > 0
     eval_dataloader = None
     eval_history = []
+    eval_sample_history = []
     quick_eval_batches = 0
     full_eval_batches = 0
 
@@ -861,7 +922,7 @@ def train_builder(config: dict, config_path: Path):
 
                 # ── Quick eval (skip when full eval fires at same step) ──
                 if eval_enabled and not (global_step % eval_interval == 0):
-                    eval_losses = evaluate_builder(
+                    eval_losses, eval_samples = evaluate_builder(
                         builder,
                         eval_dataloader,
                         loss_weights,
@@ -872,12 +933,14 @@ def train_builder(config: dict, config_path: Path):
                     )
                     _log_eval_results(
                         eval_losses,
+                        eval_samples,
                         loss_weights,
                         "quick",
                         global_step,
                         logger,
                         terminal_log_path,
                         eval_history,
+                        eval_sample_history,
                         log_dir,
                         "eval_quick",
                     )
@@ -939,7 +1002,7 @@ def train_builder(config: dict, config_path: Path):
 
             # ── Full eval at eval_interval ──────────────────────
             if eval_enabled and global_step % eval_interval == 0:
-                eval_losses = evaluate_builder(
+                eval_losses, eval_samples = evaluate_builder(
                     builder,
                     eval_dataloader,
                     loss_weights,
@@ -950,12 +1013,14 @@ def train_builder(config: dict, config_path: Path):
                 )
                 _log_eval_results(
                     eval_losses,
+                    eval_samples,
                     loss_weights,
                     "full",
                     global_step,
                     logger,
                     terminal_log_path,
                     eval_history,
+                    eval_sample_history,
                     log_dir,
                     "eval",
                 )
@@ -1022,6 +1087,9 @@ def train_builder(config: dict, config_path: Path):
         if eval_history:
             with open(log_dir / "eval_history.json", "w", encoding="utf-8") as f:
                 json.dump(eval_history, f, indent=2, default=str)
+        if eval_sample_history:
+            with open(log_dir / "eval_sample_history.json", "w", encoding="utf-8") as f:
+                json.dump(eval_sample_history, f, indent=2, default=str)
 
     logger.info("Training complete!")
     # By construction there is at most one best-train and one best-eval file

@@ -28,6 +28,12 @@ Behavior:
        outputs are overwritten.
     3. Otherwise run the analysis: overlay eval curves (quick/full), or
        fall back to checkpoint eval when eval_history.json is empty.
+    4. Y-limits on every loss subplot / overlay are computed from the
+       99.5th percentile of the plotted data so a rare spike step
+       (e.g. a single loss value in the hundreds while the normal
+       regime is in single digits) does not compress the visible
+       scale. The spike point is still drawn — it simply clips
+       outside the visible axis box.
     A compact status table is printed at the end.
 """
 
@@ -115,6 +121,10 @@ def discover_configs(module: str, dataset: str, experiment: str) -> list[Path]:
 
     Config file path convention:
         configs/nlcpV4/{dataset}/train_{module}_{experiment}.yml
+
+    ``dataset`` may include nested subdirectories (e.g. ``GSM8K/AutoWeighted``)
+    to discover configs under a variant folder — ``Path`` division handles
+    the extra separator transparently.
     """
     dataset_dir = CONFIGS_ROOT / dataset
     if not dataset_dir.is_dir():
@@ -132,12 +142,90 @@ def discover_configs(module: str, dataset: str, experiment: str) -> list[Path]:
     return [p]
 
 
+def _derive_experiment_name(config_path: Path) -> str:
+    """Self-describing experiment name from the config's path under ``CONFIGS_ROOT``.
+
+    Joins all path segments between ``configs/nlcpV4/`` and the YAML
+    file with ``-`` plus the filename stem, so nested variants keep
+    the dataset name visible in SwanLab and plot titles:
+
+        configs/nlcpV4/GSM8K/train_builder_Qwen2.5-0.5B_6level.yml
+          -> "GSM8K-train_builder_Qwen2.5-0.5B_6level"
+        configs/nlcpV4/GSM8K/AutoWeighted/train_builder_Qwen2.5-0.5B_6level.yml
+          -> "GSM8K-AutoWeighted-train_builder_Qwen2.5-0.5B_6level"
+
+    Falls back to the legacy single-parent form when the file lives
+    outside ``CONFIGS_ROOT`` (keeps back-compat for out-of-tree configs).
+    """
+    try:
+        rel_parts = config_path.resolve().relative_to(CONFIGS_ROOT).parent.parts
+    except ValueError:
+        rel_parts = (config_path.parent.name,)
+    return "-".join([*rel_parts, config_path.stem])
+
+
 def smooth(values, window):
     """Simple moving average smoothing."""
     if window <= 1 or len(values) < window:
         return values
     kernel = np.ones(window) / window
     return np.convolve(values, kernel, mode="valid")
+
+
+def _robust_ylim(*arrays, upper_percentile: float = 99.5, pad_frac: float = 0.08):
+    """Compute a y-axis limit that ignores outlier spikes.
+
+    A single anomalous training step can push a loss value into the
+    hundreds while the normal regime lives in single digits; letting
+    matplotlib auto-scale around that spike compresses the rest of
+    the curve into a flat line at the bottom of the axis. Here we
+    use the ``upper_percentile``-th percentile of the pooled data as
+    the upper bound, so outlier points above that percentile still
+    get drawn but clip outside the visible axis box (matplotlib's
+    default behaviour).
+
+    Args:
+        *arrays: Any number of array-likes (train loss curve, eval
+            curves, etc.). ``None`` entries are skipped; non-finite
+            values are filtered.
+        upper_percentile: Percentile used as the upper y-bound.
+            ``99.5`` keeps 99.5% of points in view and clips only
+            the top 0.5% — plenty of headroom for ordinary training
+            noise, aggressive enough to neutralise single-step
+            spikes.
+        pad_frac: Extra vertical padding as a fraction of the span,
+            applied at both ends.
+
+    Returns:
+        ``(ymin, ymax)`` tuple, or ``None`` when no finite data is
+        available (caller should then skip ``set_ylim``).
+    """
+    collected = []
+    for arr in arrays:
+        if arr is None:
+            continue
+        a = np.asarray(arr, dtype=float).ravel()
+        a = a[np.isfinite(a)]
+        if a.size:
+            collected.append(a)
+    if not collected:
+        return None
+    data = np.concatenate(collected)
+    lo = float(data.min())
+    hi = float(np.percentile(data, upper_percentile))
+    if hi <= lo:
+        hi = float(data.max())
+        if hi <= lo:
+            return None
+    span = hi - lo
+    return (lo - pad_frac * span, hi + pad_frac * span)
+
+
+def _apply_robust_ylim(ax, *arrays, **kwargs) -> None:
+    """Apply :func:`_robust_ylim` to ``ax``; no-op if no finite data."""
+    lim = _robust_ylim(*arrays, **kwargs)
+    if lim is not None:
+        ax.set_ylim(*lim)
 
 
 def load_training_history(log_dir: Path):
@@ -477,6 +565,10 @@ def _build_figures(
     ax.set_ylabel("Loss")
     ax.grid(True, alpha=0.3)
     ax.legend()
+    # Keep the axis scale anchored to the normal regime: a rare spike
+    # step will draw outside the axis box rather than compressing the
+    # rest of the curve. See ``_robust_ylim`` for details.
+    _apply_robust_ylim(ax, total_array)
 
     grid_layout = [
         ("recon", axes[0, 1], "tab:blue"),
@@ -509,6 +601,7 @@ def _build_figures(
         ax.set_ylabel("Loss")
         ax.grid(True, alpha=0.3)
         ax.legend()
+        _apply_robust_ylim(ax, data)
 
     # Learning rate
     ax = axes[2, 1]
@@ -557,6 +650,15 @@ def _build_figures(
     ax2.set_ylabel("Loss")
     ax2.legend()
     ax2.grid(True, alpha=0.3)
+    # Robust ylim across all five curves (4 components + total).
+    _apply_robust_ylim(
+        ax2,
+        comp_arrays["recon"],
+        comp_arrays["ordering"],
+        comp_arrays["residual"],
+        comp_arrays["reasoning"],
+        total_array,
+    )
     plt.tight_layout()
 
     # ── Figure 3: eval overlay ────────────────────────────────────
@@ -628,6 +730,25 @@ def _build_figures(
     if has_any_eval or ckpt_eval is not None:
         ax3.legend(ncol=2)
     ax3.grid(True, alpha=0.3)
+    # Robust ylim based on the exact same values drawn on ax3
+    # (quick / full eval per-component and per-total, plus the ckpt
+    # fallback markers when eval history is empty). Outlier eval
+    # values will clip outside the axis rather than squash the rest.
+    _eval_ylim_arrays: list = []
+    for _records in (eval_quick, eval_full):
+        if not _records:
+            continue
+        for _k, _c in eval_plot_items:
+            _eval_ylim_arrays.append(_eval_values(_records, _k))
+    if not has_any_eval and ckpt_eval is not None:
+        for _k, _c in eval_plot_items:
+            if _k == "total":
+                _eval_ylim_arrays.append(np.array([eval_total_getter(ckpt_eval)]))
+            else:
+                _eval_ylim_arrays.append(
+                    np.array([ckpt_eval.get(_k, 0.0) * comp_weights[_k]])
+                )
+    _apply_robust_ylim(ax3, *_eval_ylim_arrays)
     plt.tight_layout()
 
     fig.savefig(
@@ -691,7 +812,7 @@ def _run_builder_analysis(config_path: Path) -> None:
     w_residual = loss_weights["residual_loss_weight"]
     w_reasoning = loss_weights["reasoning_loss_weight"]
 
-    experiment_name = f"{config_path.parent.name}-{config_path.stem}"
+    experiment_name = _derive_experiment_name(config_path)
 
     # ── Load data ─────────────────────────────────────────────────
     history = load_training_history(log_dir)

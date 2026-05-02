@@ -13,11 +13,17 @@ from lmbase.dataset import registry
 
 @dataclass
 class BuilderInput:
-    """Raw text input: questions, CoT answers, solutions."""
+    """Raw text input: questions, CoT answers, solutions, and sample IDs.
+
+    ``main_ids`` mirrors the lmbase dataset's ``main_id`` field (e.g. ``"ID1"``)
+    so downstream logging can attribute per-sample results back to the
+    source dataset row without hashing or indexing tricks.
+    """
 
     questions: List[str]
     cot_answers: List[str]
     solutions: List[str]
+    main_ids: List[str]
 
     @property
     def batch_size(self) -> int:
@@ -64,14 +70,18 @@ class NLCPV4DataLoader:
         return getattr(sample, attr_name)
 
     def _collate_fn(self, raw_samples: List[Any]) -> BuilderInput:
-        questions, cot_answers, solutions = [], [], []
+        questions, cot_answers, solutions, main_ids = [], [], [], []
         for sample in raw_samples:
             questions.append(self._get_field(sample, "question", "question"))
             cot_answers.append(self._get_field(sample, "cot_answer", "cot_answer"))
+            main_ids.append(self._get_field(sample, "main_id", "main_id"))
             if self.include_solution:
                 solutions.append(self._get_field(sample, "groundtruth", "groundtruth"))
         return BuilderInput(
-            questions=questions, cot_answers=cot_answers, solutions=solutions
+            questions=questions,
+            cot_answers=cot_answers,
+            solutions=solutions,
+            main_ids=main_ids,
         )
 
     def __iter__(self):
