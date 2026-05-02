@@ -61,6 +61,20 @@ Post-mortem logs:
     on disk. ``--keep-alive`` additionally holds the session open after
     the command exits; without it, sessions only stay open on FAILURE
     (non-zero exit code) so you can still inspect the pane.
+
+Conda environment:
+    Before launching any session the launcher runs a pre-flight check:
+      1. Verify ``conda`` is on PATH.
+      2. ``conda env list`` — if the target env (default ``LMSim``,
+         overridable with ``--conda-env``) does NOT exist, auto-create
+         it with ``conda create -n {env} python={version} -y`` where
+         ``version`` comes from ``--python-version`` (default 3.11).
+      3. Each tmux session then sources ``conda.sh``, activates the
+         env, and runs ``python`` (the env's interpreter) on the
+         training script. This keeps the command line clean:
+         ``python examples/nlcpV4/train_{module}.py -c {cfg}``.
+    Creating the env happens once in the LAUNCHER process so parallel
+    sessions never race each other to create the same env.
 """
 
 import argparse
@@ -146,15 +160,102 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
-        "--python",
+        "--conda-env",
         type=str,
-        default=sys.executable,
+        default="LMSim",
         help=(
-            "Python interpreter path to use inside each tmux session "
-            "(default: the interpreter running this launcher)."
+            "Conda env name to activate inside each tmux session. If it "
+            "does not exist, the launcher creates it before fan-out. "
+            "Default: LMSim."
+        ),
+    )
+    parser.add_argument(
+        "--python-version",
+        type=str,
+        default="3.11",
+        help=(
+            "Python version used when auto-creating the conda env. Only "
+            "consulted if the env does not already exist. Default: 3.11."
         ),
     )
     return parser.parse_args()
+
+
+# ── Conda helpers ────────────────────────────────────────────────────
+
+
+def _conda_base() -> Path:
+    """Return the conda base directory (``CONDA_PREFIX`` of the base env).
+
+    Uses ``conda info --base`` so it works regardless of where conda was
+    installed (miniconda/anaconda, user vs system). The returned path
+    hosts ``etc/profile.d/conda.sh`` which the tmux sessions source to
+    get ``conda activate`` in a non-interactive shell.
+    """
+    result = subprocess.run(
+        ["conda", "info", "--base"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return Path(result.stdout.strip())
+
+
+def _conda_env_exists(env_name: str) -> bool:
+    """True iff ``conda env list`` contains an env named exactly ``env_name``.
+
+    Parses ``conda env list --json`` so we match by basename regardless
+    of the envs directory layout (user envs, shared envs, etc.).
+    """
+    import json as _json
+
+    result = subprocess.run(
+        ["conda", "env", "list", "--json"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    data = _json.loads(result.stdout)
+    for env_path in data.get("envs", []):
+        if Path(env_path).name == env_name:
+            return True
+    return False
+
+
+def ensure_conda_env(env_name: str, python_version: str) -> Path:
+    """Guarantee ``env_name`` exists; create it if missing. Return conda base.
+
+    Raises ``RuntimeError`` (with a clear message) if conda itself is
+    not installed — fail-fast so the user does not discover this only
+    after the tmux sessions silently die.
+    """
+    if shutil.which("conda") is None:
+        raise RuntimeError(
+            "conda is not installed or not on PATH. Install Miniconda/"
+            "Anaconda first, or re-run inside a shell where `conda` is "
+            "available."
+        )
+    base = _conda_base()
+    if _conda_env_exists(env_name):
+        print(f"[conda] env {env_name!r} already exists — reusing.")
+        return base
+    print(
+        f"[conda] env {env_name!r} not found — creating with "
+        f"python={python_version} (this may take a minute) ..."
+    )
+    subprocess.run(
+        [
+            "conda",
+            "create",
+            "-n",
+            env_name,
+            f"python={python_version}",
+            "-y",
+        ],
+        check=True,
+    )
+    print(f"[conda] env {env_name!r} created.")
+    return base
 
 
 def resolve_experiment(raw: str, dataset_dir: Path) -> Path:
@@ -251,6 +352,18 @@ def main() -> int:
         print(f"[ERROR] Training script not found: {train_script}", file=sys.stderr)
         return 2
 
+    # ── Conda pre-flight (before log dir, before tmux) ─────────────────
+    # Runs in the LAUNCHER process so parallel tmux sessions do not race
+    # each other to ``conda create`` the same env. Skipped on --dry-run
+    # so plan preview is side-effect-free.
+    conda_base: Path | None = None
+    if not args.dry_run:
+        try:
+            conda_base = ensure_conda_env(args.conda_env, args.python_version)
+        except (RuntimeError, subprocess.CalledProcessError) as e:
+            print(f"[ERROR] conda setup failed: {e}", file=sys.stderr)
+            return 2
+
     # Resolve (and create) the log directory — tmux sessions close as soon
     # as their command exits, so without an on-disk log a quick crash would
     # leave no trace. Every session writes to {log_dir}/{session}.log.
@@ -288,23 +401,32 @@ def main() -> int:
         seen_names.add(session_name)
 
         # Build the shell command executed inside the tmux session.
-        # We cd into PROJECT_ROOT first so relative paths inside the
-        # training script (and any .env lookup) resolve correctly.
-        # Output is tee'd to a log file so even a sub-second crash
-        # (which closes the tmux session immediately) leaves a trace.
+        # Sequence (run inside a single ``bash -o pipefail -c '...'``):
+        #   1. cd into PROJECT_ROOT (so relative paths + .env resolve)
+        #   2. source conda.sh (gives ``conda activate`` to the non-
+        #      interactive bash spawned by tmux)
+        #   3. conda activate {env}
+        #   4. PYTHONUNBUFFERED=1 python <script> -c <cfg> 2>&1 | tee <log>
+        # ``bash -o pipefail`` propagates Python's exit code through
+        # tee; otherwise tee's success would always mask a crash.
         # PYTHONUNBUFFERED=1 ensures the log captures traceback output
         # that would otherwise be lost in stdout buffers on abort.
         log_path = log_dir / f"{session_name}.log"
-        train_cmd = (
-            f"PYTHONUNBUFFERED=1 {shlex.quote(args.python)} "
-            f"{shlex.quote(str(train_script))} -c {shlex.quote(str(cfg_path))}"
+        # conda_base is None only on --dry-run; still emit a readable
+        # preview by using the placeholder path.
+        conda_sh = (
+            (conda_base / "etc" / "profile.d" / "conda.sh")
+            if conda_base is not None
+            else Path("$(conda info --base)/etc/profile.d/conda.sh")
         )
-        # ``bash -o pipefail`` propagates the Python exit code through
-        # tee; otherwise tee's success would always mask a crash.
-        piped = (
+        inner_cmd = (
             f"cd {shlex.quote(str(PROJECT_ROOT))} && "
-            f"bash -o pipefail -c {shlex.quote(train_cmd + ' 2>&1 | tee ' + shlex.quote(str(log_path)))}"
+            f"source {shlex.quote(str(conda_sh))} && "
+            f"conda activate {shlex.quote(args.conda_env)} && "
+            f"PYTHONUNBUFFERED=1 python {shlex.quote(str(train_script))} "
+            f"-c {shlex.quote(str(cfg_path))} 2>&1 | tee {shlex.quote(str(log_path))}"
         )
+        piped = f"bash -o pipefail -c {shlex.quote(inner_cmd)}"
         if args.keep_alive:
             # Always keep session open, regardless of exit code.
             tail = (
@@ -330,7 +452,7 @@ def main() -> int:
     print(f"Project root   : {PROJECT_ROOT}")
     print(f"Training script: {train_script.relative_to(PROJECT_ROOT)}")
     print(f"Dataset dir    : {dataset_dir.relative_to(PROJECT_ROOT)}")
-    print(f"Python         : {args.python}")
+    print(f"Conda env      : {args.conda_env}")
     print(f"Experiments    : {len(plan)}")
     print()
 
