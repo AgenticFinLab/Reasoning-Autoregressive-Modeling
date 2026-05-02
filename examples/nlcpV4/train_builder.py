@@ -9,9 +9,11 @@ import datetime
 import json
 import logging
 import math
+import random
 import sys
 from pathlib import Path
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 from dotenv import load_dotenv
@@ -28,7 +30,39 @@ sys.path.insert(0, str(PROJECT_ROOT / "examples"))
 from nlcpV3.concept_hybrid_builder import ConceptPyramidBuilder, PyramidOutput
 from nlcpV3.data_loader import NLCPV3DataLoader
 from lmbase.utils.env_tools import get_device
-from ram.utils import load_config, setup_environment
+from ram.utils import (
+    load_config,
+    setup_environment,
+)  # noqa: F401  (kept for back-compat)
+
+
+def _seed_single_device(seed: int, device: str) -> None:
+    """Seed RNGs for CPU + the chosen CUDA device only.
+
+    Why not ``ram.utils.setup_environment`` (which calls
+    ``torch.cuda.manual_seed_all``)?
+
+      ``manual_seed_all`` seeds RNG state on EVERY visible CUDA device.
+      To do that, PyTorch must create a full CUDA context on each GPU
+      (~300-500 MB each). On a shared cluster, any one of those GPUs
+      might be too tight for a new context — the failure is queued as
+      an ASYNC error and surfaces later as a misleading "OOM on your
+      chosen GPU" when ``builder.to(device)`` runs. Since we only ever
+      allocate tensors on ONE device in this script, seeding any other
+      device is both wasteful and risky.
+
+    This helper seeds only the chosen device and leaves other GPUs
+    untouched, so no spurious context-init failures can be parked.
+    """
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available() and device.startswith("cuda:"):
+        dev_idx = int(device.split(":")[1])
+        with torch.cuda.device(dev_idx):
+            torch.cuda.manual_seed(seed)
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
 
 
 def _log_model_summary(builder: ConceptPyramidBuilder, config: dict, logger):
@@ -553,9 +587,13 @@ def train_builder(config: dict, config_path: Path):
     terminal_log_path = log_dir / "terminal_output.jsonl"
 
     seed = env_cfg["seed"]
-    setup_environment({"seed": seed, "device": "auto"})
+    # Pick the device FIRST (NVML-only probe, no CUDA context init on
+    # other GPUs), then seed ONLY that device. Avoids
+    # manual_seed_all's multi-GPU context init — see
+    # _seed_single_device() above for why that matters.
     device = str(get_device("auto"))
-    logger.info("Device: %s", device)
+    _seed_single_device(seed, device)
+    logger.info("Device: %s | seed: %d", device, seed)
 
     # ── Load .env and initialize SwanLab ─────────────────────────────
     dotenv_path = env_cfg.get("dotenv_path", ".env")

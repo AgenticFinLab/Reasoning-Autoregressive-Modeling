@@ -47,6 +47,7 @@ environment:
 # reason_model : Pre-trained causal language model used as the reasoning backbone.
 #   reason_model_name      : HuggingFace model identifier.
 #   reason_model_num_layers: Number of backbone layers to use (-1 = all layers).
+#   torch_dtype            : Backbone weight precision ("float32" / "bfloat16" / "float16").
 #   reason_model_lora      : LoRA configuration (null = disabled).
 #
 # pyramid      : Concept pyramid architecture parameters.
@@ -64,6 +65,7 @@ model:
   reason_model:
     reason_model_name: Qwen/Qwen3-4B
     reason_model_num_layers: -1
+    torch_dtype: bfloat16
   pyramid:
     hidden_dim: 2560
     # Must equal encoder hidden_size to avoid lossy projection (VAR-faithful)

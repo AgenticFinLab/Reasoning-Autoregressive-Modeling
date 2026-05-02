@@ -536,8 +536,22 @@ class ConceptPyramidBuilder(nn.Module):
         """
         # Step 1: Load pretrained model with lm_head
         # AutoModelForCausalLM = backbone (Qwen2Model) + lm_head
+        #
+        # Precision is mandatory in the YAML (``model.reason_model.torch_dtype``).
+        # We look it up by direct key access: if the field is missing from the
+        # config, Python raises ``KeyError`` immediately — this is intentional
+        # fail-fast behaviour so nobody silently trains at FP32 when they
+        # meant BF16 (or vice versa). Valid values: "float32", "bfloat16",
+        # "float16"; any other string raises ``KeyError`` via the map lookup.
+        _DTYPE_MAP = {
+            "float32": torch.float32,
+            "bfloat16": torch.bfloat16,
+            "float16": torch.float16,
+        }
+        torch_dtype = _DTYPE_MAP[reason_cfg["torch_dtype"]]
         reason_model = AutoModelForCausalLM.from_pretrained(
-            reason_cfg["reason_model_name"]
+            reason_cfg["reason_model_name"],
+            torch_dtype=torch_dtype,
         )
         # hidden_dim: D_reason (e.g., 896 for Qwen2.5-0.5B)
         hidden_dim = reason_model.config.hidden_size

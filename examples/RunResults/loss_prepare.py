@@ -24,6 +24,17 @@ Efficiency:
       batch_size; batches are sampled once per group and reused within
       the group. Without `-f` the run aborts with a clear message.
 
+Re-run tip (IMPORTANT):
+    A single invocation may not succeed for every config — e.g., a
+    shared-cluster GPU race causes a transient OOM, or all GPUs are
+    momentarily tight. Successfully-finished configs are persisted to
+    `Loss_prepare.json` right away, and already-present keys are
+    `[SKIP]`-ed on subsequent runs. So if some configs failed, JUST
+    RE-RUN THE SAME COMMAND one or more times — each pass will pick up
+    where the last one stopped and only retry the configs that are
+    still missing from the result file, until every config has been
+    recorded.
+
 Usage:
     python3 examples/RunResults/loss_prepare.py -m builder -d GSM8K
     python3 examples/RunResults/loss_prepare.py -m builder -d GSM8K -n 5
