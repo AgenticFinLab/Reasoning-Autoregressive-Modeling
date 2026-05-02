@@ -52,6 +52,15 @@ Attaching:
         tmux ls                 # list sessions
         tmux attach -t <name>   # attach (Ctrl-b then d to detach)
         tmux kill-session -t <name>
+
+Post-mortem logs:
+    Every session's stdout+stderr is tee'd to
+    ``logs/run_experiments/{session_name}.log`` under the project root.
+    So even if the command crashes in the first second and the tmux
+    session closes before you can attach, the full traceback is still
+    on disk. ``--keep-alive`` additionally holds the session open after
+    the command exits; without it, sessions only stay open on FAILURE
+    (non-zero exit code) so you can still inspect the pane.
 """
 
 import argparse
@@ -120,9 +129,20 @@ def parse_args() -> argparse.Namespace:
         "--keep-alive",
         action="store_true",
         help=(
-            "Keep the tmux session open after the training command exits "
-            "(useful to inspect the final stack/log). Default: session "
-            "closes automatically when the command finishes."
+            "Always keep the tmux session open after the training command "
+            "exits (success or failure). Default: session stays open only "
+            "on FAILURE (non-zero exit code) so crashes are visible; on "
+            "success the session closes automatically."
+        ),
+    )
+    parser.add_argument(
+        "--log-dir",
+        type=str,
+        default="logs/run_experiments",
+        help=(
+            "Directory (relative to project root, or absolute) where each "
+            "session's combined stdout+stderr is tee'd as "
+            "'{session_name}.log'. Default: logs/run_experiments/"
         ),
     )
     parser.add_argument(
@@ -231,6 +251,16 @@ def main() -> int:
         print(f"[ERROR] Training script not found: {train_script}", file=sys.stderr)
         return 2
 
+    # Resolve (and create) the log directory — tmux sessions close as soon
+    # as their command exits, so without an on-disk log a quick crash would
+    # leave no trace. Every session writes to {log_dir}/{session}.log.
+    log_dir_arg = Path(args.log_dir)
+    log_dir = (
+        log_dir_arg if log_dir_arg.is_absolute() else (PROJECT_ROOT / log_dir_arg)
+    ).resolve()
+    if not args.dry_run:
+        log_dir.mkdir(parents=True, exist_ok=True)
+
     # Resolve all experiments up-front so we abort before launching any
     # session if one path is invalid — avoids partial fan-out.
     try:
@@ -260,17 +290,41 @@ def main() -> int:
         # Build the shell command executed inside the tmux session.
         # We cd into PROJECT_ROOT first so relative paths inside the
         # training script (and any .env lookup) resolve correctly.
-        inner = (
+        # Output is tee'd to a log file so even a sub-second crash
+        # (which closes the tmux session immediately) leaves a trace.
+        # PYTHONUNBUFFERED=1 ensures the log captures traceback output
+        # that would otherwise be lost in stdout buffers on abort.
+        log_path = log_dir / f"{session_name}.log"
+        train_cmd = (
+            f"PYTHONUNBUFFERED=1 {shlex.quote(args.python)} "
+            f"{shlex.quote(str(train_script))} -c {shlex.quote(str(cfg_path))}"
+        )
+        # ``bash -o pipefail`` propagates the Python exit code through
+        # tee; otherwise tee's success would always mask a crash.
+        piped = (
             f"cd {shlex.quote(str(PROJECT_ROOT))} && "
-            f"{shlex.quote(args.python)} {shlex.quote(str(train_script))} "
-            f"-c {shlex.quote(str(cfg_path))}"
+            f"bash -o pipefail -c {shlex.quote(train_cmd + ' 2>&1 | tee ' + shlex.quote(str(log_path)))}"
         )
         if args.keep_alive:
-            # `exec $SHELL` replaces the tmux pane's process with an
-            # interactive shell so the session stays attached after the
-            # training command exits (success or failure).
-            inner = f"{inner}; echo; echo '[run_experiments] training exited — shell kept open'; exec $SHELL"
-        plan.append((raw, cfg_path, session_name, inner))
+            # Always keep session open, regardless of exit code.
+            tail = (
+                f"ec=$?; echo; "
+                f"echo '[run_experiments] exited with code '\"$ec\"' — log: {log_path}'; "
+                f"exec $SHELL"
+            )
+        else:
+            # Keep the session open ONLY on failure so the user can
+            # still inspect the pane; close cleanly on success.
+            tail = (
+                f"ec=$?; "
+                f'if [ "$ec" != "0" ]; then '
+                f"echo; "
+                f"echo '[run_experiments] FAILED with code '\"$ec\"' — log: {log_path}'; "
+                f"exec $SHELL; "
+                f"fi"
+            )
+        inner = f"{piped}; {tail}"
+        plan.append((raw, cfg_path, session_name, inner, log_path))
 
     # ── Preview header ───────────────────────────────────────────────
     print(f"Project root   : {PROJECT_ROOT}")
@@ -283,11 +337,16 @@ def main() -> int:
     # ── Launch loop ──────────────────────────────────────────────────
     launched = 0
     skipped = 0
-    for raw, cfg_path, session_name, inner in plan:
+    for raw, cfg_path, session_name, inner, log_path in plan:
         rel_cfg = cfg_path.relative_to(PROJECT_ROOT)
+        try:
+            rel_log = log_path.relative_to(PROJECT_ROOT)
+        except ValueError:
+            rel_log = log_path
         tmux_cmd = ["tmux", "new-session", "-d", "-s", session_name, inner]
         print(f"[{session_name}]")
         print(f"  config : {rel_cfg}")
+        print(f"  log    : {rel_log}")
         print(f"  command: {inner}")
 
         if args.dry_run:
@@ -327,12 +386,14 @@ def main() -> int:
             f"Launched: {launched} | Skipped: {skipped} | "
             f"Total planned: {len(plan)}"
         )
+        print(f"Logs directory: {log_dir}")
         if launched > 0:
             print(
-                "\nUseful tmux commands:\n"
-                "  tmux ls                  # list sessions\n"
-                "  tmux attach -t <name>    # attach (Ctrl-b d to detach)\n"
-                "  tmux kill-session -t <name>"
+                "\nUseful commands:\n"
+                "  tmux ls                       # list sessions\n"
+                "  tmux attach -t <name>         # attach (Ctrl-b d to detach)\n"
+                "  tmux kill-session -t <name>   # terminate a session\n"
+                f"  tail -f {log_dir}/<name>.log  # watch output even if session closed"
             )
     return 0
 
