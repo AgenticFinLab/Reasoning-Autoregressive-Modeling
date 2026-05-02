@@ -120,7 +120,7 @@ def save_loss_prepare(module: str, data: dict) -> None:
 # ─── Device probing ─────────────────────────────────────────────────────────
 
 
-def _pick_device_fresh() -> str:
+def _pick_device_fresh(exclude: set[int] | None = None) -> str:
     """Re-probe the freest GPU; call this BEFORE each config run.
 
     A single upfront ``get_device('auto')`` would pin us to one GPU for
@@ -132,34 +132,74 @@ def _pick_device_fresh() -> str:
         freest GPU, or
       * allocator fragmentation on one GPU pushes us to a fresher one.
 
-    We flush PyTorch's caching allocator so freed blocks return to the
-    driver, then let ``get_device('auto')`` (which uses
-    ``torch.cuda.mem_get_info``) pick the GPU with the most free memory.
+    Args:
+        exclude: Set of GPU indices to skip (e.g., GPUs that just OOM'd
+            on this config). Pass None for no exclusions.
 
     Notes:
       * We intentionally do NOT call ``torch.cuda.synchronize()`` here.
         ``mem_get_info`` queries the driver directly, independent of
         PyTorch's allocator / pending ops; and ``synchronize`` would
         trigger CUDA-context initialization on the current device even
-        when we haven't allocated anything yet (first-iteration crash).
+        when we haven't allocated anything yet.
       * ``empty_cache()`` is wrapped in try/except so a transient
         allocator hiccup never kills a whole batch run.
       * We only flush when PyTorch has actually allocated on a device
         already (``memory_allocated() > 0``); before the first config,
         there is nothing to flush.
     """
-    if torch.cuda.is_available():
+    if not torch.cuda.is_available():
+        return "cpu"
+
+    exclude = exclude or set()
+
+    # Flush allocator cache so mem_get_info reflects actually-free VRAM.
+    try:
+        if any(
+            torch.cuda.memory_allocated(i) > 0 for i in range(torch.cuda.device_count())
+        ):
+            torch.cuda.empty_cache()
+    except Exception as e:  # defensive: never let flush kill the run
+        logger.warning("empty_cache() failed (non-fatal): %s", e)
+
+    # Inline GPU probing with exclude-support (can't use get_device()
+    # here because select_best_gpu has no exclude parameter).
+    candidates: list[tuple[int, float]] = []
+    for i in range(torch.cuda.device_count()):
+        if i in exclude:
+            continue
         try:
-            # Only meaningful once we've allocated something; the check
-            # also avoids touching un-initialized CUDA contexts.
-            if any(
-                torch.cuda.memory_allocated(i) > 0
-                for i in range(torch.cuda.device_count())
-            ):
-                torch.cuda.empty_cache()
-        except Exception as e:  # defensive: never let flush kill the run
-            logger.warning("empty_cache() failed (non-fatal): %s", e)
-    return str(get_device("auto"))
+            free_mb = torch.cuda.mem_get_info(i)[0] / (1024**2)
+            candidates.append((i, free_mb))
+        except Exception:
+            # Device might be unreachable or context-init failed.
+            continue
+
+    if not candidates:
+        raise RuntimeError(
+            f"All {torch.cuda.device_count()} GPU(s) exhausted or excluded: {exclude}"
+        )
+
+    candidates.sort(key=lambda x: x[1], reverse=True)
+    best_idx, best_free = candidates[0]
+
+    # Mimic select_best_gpu's informative log when running fresh
+    if not exclude:
+        logger.debug(
+            "GPU re-probe: %s -> cuda:%d (%.1f MB free)",
+            ",".join(f"cuda:{i}={m:.0f}MB" for i, m in candidates),
+            best_idx,
+            best_free,
+        )
+    else:
+        logger.info(
+            "GPU fallback (excluded=%s): cuda:%d (%.1f MB free)",
+            sorted(exclude),
+            best_idx,
+            best_free,
+        )
+
+    return f"cuda:{best_idx}"
 
 
 # ─── Batch sampling ──────────────────────────────────────────────────────────
@@ -441,34 +481,92 @@ def main():
             # Re-probe the freest GPU before every config run: previous
             # runs may not yet have released memory, or another process
             # may have grabbed it. This lets us hop to a fresher GPU
-            # whenever one is available.
-            current_device = _pick_device_fresh()
+            # whenever one is available. If a GPU OOMs partway through,
+            # we mark it as excluded and retry on the next-freest one.
+            excluded: set[int] = set()
+            result = None
+            last_exc: Exception | None = None
+            max_attempts = torch.cuda.device_count() if torch.cuda.is_available() else 1
 
-            logger.info(
-                "[RUN ] %s (device=%s, bs=%d, n=%d)",
-                key,
-                current_device,
-                bs,
-                len(shared_batches),
-            )
+            for attempt in range(1, max_attempts + 1):
+                try:
+                    current_device = _pick_device_fresh(exclude=excluded)
+                except Exception as e:
+                    last_exc = e
+                    break
 
-            # Cheap per-config re-seed without re-probing the device.
-            seed = int(config["environment"]["seed"])
-            torch.manual_seed(seed)
-            if torch.cuda.is_available():
-                torch.cuda.manual_seed_all(seed)
+                logger.info(
+                    "[RUN ] %s (device=%s, attempt=%d/%d, bs=%d, n=%d)",
+                    key,
+                    current_device,
+                    attempt,
+                    max_attempts,
+                    bs,
+                    len(shared_batches),
+                )
 
-            try:
-                if module == "builder":
-                    result = run_builder_n_batches(
-                        config, current_device, shared_batches
+                # Per-config seed — seed ONLY the chosen device, not all
+                # devices. ``manual_seed_all`` touches every GPU which
+                # triggers full-context init on each one and can queue
+                # deferred OOM errors from tight GPUs. The chosen device
+                # is enough because we only allocate tensors there.
+                seed = int(config["environment"]["seed"])
+                torch.manual_seed(seed)
+                if torch.cuda.is_available() and current_device.startswith("cuda:"):
+                    dev_idx = int(current_device.split(":")[1])
+                    with torch.cuda.device(dev_idx):
+                        torch.cuda.manual_seed(seed)
+
+                try:
+                    if module == "builder":
+                        result = run_builder_n_batches(
+                            config, current_device, shared_batches
+                        )
+                    else:
+                        result = run_predictor_n_batches(
+                            config, current_device, shared_batches
+                        )
+                    last_exc = None
+                    break  # success
+                except (torch.cuda.OutOfMemoryError, RuntimeError) as e:
+                    msg = str(e).lower()
+                    is_oom = "out of memory" in msg or isinstance(
+                        e, torch.cuda.OutOfMemoryError
                     )
-                else:
-                    result = run_predictor_n_batches(
-                        config, current_device, shared_batches
+                    if not is_oom:
+                        last_exc = e
+                        break
+                    logger.warning(
+                        "[RETRY] %s OOM on %s (attempt %d/%d); trying another GPU.",
+                        key,
+                        current_device,
+                        attempt,
+                        max_attempts,
                     )
-            except Exception as e:
-                logger.error("Failed on %s: %s", key, e, exc_info=True)
+                    # Mark this device as exhausted for the remainder of
+                    # this config's retries and flush its allocator.
+                    if current_device.startswith("cuda:"):
+                        excluded.add(int(current_device.split(":")[1]))
+                    if torch.cuda.is_available():
+                        try:
+                            torch.cuda.empty_cache()
+                        except Exception:
+                            pass
+                    last_exc = e
+                    continue
+                except Exception as e:
+                    # Non-OOM failure: no retry.
+                    last_exc = e
+                    break
+
+            if result is None:
+                logger.error(
+                    "Failed on %s (tried %d GPU(s)): %s",
+                    key,
+                    len(excluded) or 1,
+                    last_exc,
+                    exc_info=last_exc is not None,
+                )
                 n_fail += 1
                 continue
 
