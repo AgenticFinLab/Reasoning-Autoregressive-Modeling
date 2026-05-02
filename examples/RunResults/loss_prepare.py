@@ -11,19 +11,23 @@ Behaviour:
        module is supplied via `-m builder` or `-m predictor`.
     2. Check EXPERIMENT/nlcpV4/{module}/Loss_prepare.json for the config key
        "{dataset}/{config_stem}". If present -> [SKIP].
-    3. Otherwise build the model, fetch N batches (default 1, set via
-       `-n N`), run a forward pass with torch.no_grad() for each, record
-       per-batch raw + weighted + total losses plus mean/std/min/max, then
-       free the model and continue.
+    3. Otherwise build the model, reuse the group-shared batches, run a
+       forward pass with torch.no_grad() for each batch, record per-batch
+       raw + weighted + total losses plus mean/std/min/max aggregates,
+       then free the model and continue.
 
 Efficiency:
-    * Device selection runs once at startup (no per-config re-probe).
-    * Batches are cached per unique (data_cfg, batch_size, num_batches)
-      key so identical datasets across configs are loaded only once.
+    * Device probe runs exactly once at startup.
+    * All YAML configs are expected to share a single `training.batch_size`;
+      if they do, batches are sampled ONCE and reused for every config.
+    * If batch sizes differ, pass `-f/--force` to group configs by
+      batch_size; batches are sampled once per group and reused within
+      the group. Without `-f` the run aborts with a clear message.
 
 Usage:
     python3 examples/RunResults/loss_prepare.py -m builder -d GSM8K
     python3 examples/RunResults/loss_prepare.py -m builder -d GSM8K -n 5
+    python3 examples/RunResults/loss_prepare.py -m builder -d GSM8K -n 5 -f
 """
 
 import argparse
@@ -53,11 +57,6 @@ logger = logging.getLogger("loss_prepare")
 OUT_FILENAME = "Loss_prepare.json"
 VALID_MODULES = ("builder", "predictor")
 
-# Cache fetched batches across configs that share an identical
-# (data_cfg, batch_size, num_batches), so the dataset is loaded at most
-# once per key.
-_BATCH_CACHE: dict = {}
-
 
 def parse_args():
     parser = argparse.ArgumentParser(
@@ -84,9 +83,17 @@ def parse_args():
         "--num-batches",
         type=int,
         default=1,
-        help="Number of batches to sample per config (default: 1). Each "
-        "config runs N forward passes; per-batch losses plus "
-        "mean/std/min/max aggregates are recorded.",
+        help="Number of batches to sample (default: 1). Each config runs "
+        "N forward passes; per-batch losses plus mean/std/min/max "
+        "aggregates are recorded.",
+    )
+    parser.add_argument(
+        "-f",
+        "--force",
+        action="store_true",
+        help="When configs have mixed batch sizes, force the run by "
+        "grouping configs by batch_size and sampling batches once "
+        "per group. Without -f, a mixed run aborts with an error.",
     )
     return parser.parse_args()
 
@@ -110,25 +117,13 @@ def save_loss_prepare(module: str, data: dict) -> None:
         json.dump(data, f, indent=2, default=str)
 
 
-# ─── Batch caching ───────────────────────────────────────────────────────────
-
-
-def _cache_key(data_cfg: dict, batch_size: int, num_batches: int) -> str:
-    return json.dumps(
-        {"data_cfg": data_cfg, "batch_size": batch_size, "n": num_batches},
-        sort_keys=True,
-        default=str,
-    )
+# ─── Batch sampling ──────────────────────────────────────────────────────────
 
 
 def collect_batches(data_cfg: dict, batch_size: int, num_batches: int) -> list:
-    """Return ``num_batches`` batches for ``data_cfg`` (cached across configs)."""
-    # Lazy import: keeps the script cheap when all keys are cached.
+    """Load ``num_batches`` batches from ``data_cfg`` (called once per group)."""
+    # Lazy import of heavy deps.
     from nlcpV4.data_loader import NLCPV4DataLoader
-
-    key = _cache_key(data_cfg, batch_size, num_batches)
-    if key in _BATCH_CACHE:
-        return _BATCH_CACHE[key]
 
     dataloader = NLCPV4DataLoader(
         data_cfg=data_cfg,
@@ -145,7 +140,6 @@ def collect_batches(data_cfg: dict, batch_size: int, num_batches: int) -> list:
             batches.append(next(it))
         except StopIteration:
             break
-    _BATCH_CACHE[key] = batches
     return batches
 
 
@@ -153,7 +147,7 @@ def collect_batches(data_cfg: dict, batch_size: int, num_batches: int) -> list:
 
 
 def _stats(values: list) -> dict:
-    """Return mean/std/min/max for a non-empty list of floats."""
+    """Return mean/std/min/max for a list of floats."""
     if not values:
         return {"mean": 0.0, "std": 0.0, "min": 0.0, "max": 0.0}
     if len(values) == 1:
@@ -206,7 +200,6 @@ def run_builder_n_batches(config: dict, device: str, batches: list) -> dict:
     builder = ConceptPyramidBuilder(config).to(device)
     builder.eval()
 
-    # Map from loss component -> weight key in config
     weight_key_map = {
         "recon": "recon_loss_weight",
         "ordering": "ordering_loss_weight",
@@ -272,6 +265,7 @@ def main():
     module: str = args.module
     dataset: str = args.dataset
     num_batches: int = max(1, int(args.num_batches))
+    force: bool = bool(args.force)
 
     configs_dir = PROJECT_ROOT / "configs" / "nlcpV4" / dataset
     if not configs_dir.is_dir():
@@ -289,90 +283,135 @@ def main():
     # Load .env once (HF_TOKEN etc.)
     load_dotenv(PROJECT_ROOT / ".env")
 
-    # Device probe + base seed run ONCE; per-config only re-seeds without
-    # re-selecting the GPU (avoids the repeated "GPU Selection" printout).
-    first_seed = int(load_config(str(yml_files[0]))["environment"]["seed"])
+    # ---- Pre-load all configs and group by batch_size ----
+    loaded: list = []  # list[(path, config)]
+    for p in yml_files:
+        try:
+            loaded.append((p, load_config(str(p))))
+        except Exception as e:
+            logger.error("Failed to load %s: %s", p.name, e)
+    if not loaded:
+        logger.error("No configs successfully loaded.")
+        sys.exit(1)
+
+    groups: dict = {}  # batch_size -> list[(path, config)]
+    for p, cfg in loaded:
+        bs = int(cfg["training"]["batch_size"])
+        groups.setdefault(bs, []).append((p, cfg))
+
+    bs_list = sorted(groups.keys())
+    if len(bs_list) > 1 and not force:
+        logger.error(
+            "Configs under '%s' have mixed batch sizes: %s. "
+            "Pass -f/--force to group by batch_size and proceed.",
+            configs_dir,
+            bs_list,
+        )
+        sys.exit(1)
+
+    # ---- Device + seeding (standard setup_environment path) ----
+    first_seed = int(loaded[0][1]["environment"]["seed"])
     setup_environment({"seed": first_seed, "device": "auto"})
     device = str(get_device("auto"))
+
     logger.info(
-        "Device=%s | module=%s | dataset=%s | num_batches=%d | %d config(s) found",
+        "Device=%s | module=%s | dataset=%s | num_batches=%d | batch_size_groups=%s | %d config(s)",
         device,
         module,
         dataset,
         num_batches,
-        len(yml_files),
+        bs_list,
+        len(loaded),
     )
 
     n_skip = 0
     n_run = 0
     n_fail = 0
 
-    for config_path in yml_files:
+    # ---- Process each batch_size group ----
+    for bs in bs_list:
+        group = groups[bs]
+        logger.info("---- Group batch_size=%d | %d config(s) ----", bs, len(group))
+
+        # Sample batches ONCE per group, using the first config's data_cfg.
+        group_first_cfg = group[0][1]
         try:
-            config = load_config(str(config_path))
+            shared_batches = collect_batches(group_first_cfg["data"], bs, num_batches)
         except Exception as e:
-            logger.error("Failed to load %s: %s", config_path.name, e)
-            n_fail += 1
-            continue
-
-        key = f"{dataset}/{config_path.stem}"
-        store = load_loss_prepare(module)
-
-        if key in store:
-            logger.info("[SKIP] %s (key already present)", key)
-            n_skip += 1
-            continue
-
-        logger.info("[RUN ] %s (module=%s, n=%d)", key, module, num_batches)
-
-        # Cheap per-config re-seed without re-probing the device.
-        seed = int(config["environment"]["seed"])
-        torch.manual_seed(seed)
-        if torch.cuda.is_available():
-            torch.cuda.manual_seed_all(seed)
-
-        try:
-            batches = collect_batches(
-                config["data"],
-                int(config["training"]["batch_size"]),
-                num_batches,
+            logger.error(
+                "Failed to sample batches for group bs=%d: %s",
+                bs,
+                e,
+                exc_info=True,
             )
-            if module == "builder":
-                result = run_builder_n_batches(config, device, batches)
-            else:
-                result = run_predictor_n_batches(config, device, batches)
-        except Exception as e:
-            logger.error("Failed on %s: %s", key, e, exc_info=True)
-            n_fail += 1
+            n_fail += len(group)
             continue
 
-        # Re-read store right before write to preserve concurrent edits.
-        store = load_loss_prepare(module)
-        store[key] = result
-        save_loss_prepare(module, store)
+        if not shared_batches:
+            logger.error(
+                "No batches produced for group bs=%d; skipping its %d config(s).",
+                bs,
+                len(group),
+            )
+            n_fail += len(group)
+            continue
 
-        total_stats = result["stats"]["total_weighted"]
-        weighted_summary = ", ".join(
-            f"{k}={v['mean']:.4f}\u00b1{v['std']:.4f}"
-            for k, v in result["stats"]["weighted"].items()
-        )
-        logger.info(
-            "[SAVE] %s | total=%.4f\u00b1%.4f (n=%d) | %s",
-            key,
-            total_stats["mean"],
-            total_stats["std"],
-            result["num_batches"],
-            weighted_summary,
-        )
-        n_run += 1
+        for config_path, config in group:
+            key = f"{dataset}/{config_path.stem}"
+            store = load_loss_prepare(module)
+
+            if key in store:
+                logger.info("[SKIP] %s (key already present)", key)
+                n_skip += 1
+                continue
+
+            logger.info("[RUN ] %s (bs=%d, n=%d)", key, bs, len(shared_batches))
+
+            # Cheap per-config re-seed without re-probing the device.
+            seed = int(config["environment"]["seed"])
+            torch.manual_seed(seed)
+            if torch.cuda.is_available():
+                torch.cuda.manual_seed_all(seed)
+
+            try:
+                if module == "builder":
+                    result = run_builder_n_batches(config, device, shared_batches)
+                else:
+                    result = run_predictor_n_batches(config, device, shared_batches)
+            except Exception as e:
+                logger.error("Failed on %s: %s", key, e, exc_info=True)
+                n_fail += 1
+                continue
+
+            # Re-read store right before write to preserve concurrent edits.
+            store = load_loss_prepare(module)
+            store[key] = result
+            save_loss_prepare(module, store)
+
+            total_stats = result["stats"]["total_weighted"]
+            weighted_summary = ", ".join(
+                f"{k}={v['mean']:.4f}\u00b1{v['std']:.4f}"
+                for k, v in result["stats"]["weighted"].items()
+            )
+            logger.info(
+                "[SAVE] %s | bs=%d | total=%.4f\u00b1%.4f (n=%d) | %s",
+                key,
+                bs,
+                total_stats["mean"],
+                total_stats["std"],
+                result["num_batches"],
+                weighted_summary,
+            )
+            n_run += 1
 
     logger.info(
-        "Done. module=%s run=%d skip=%d fail=%d total=%d",
+        "Done. module=%s run=%d skip=%d fail=%d total=%d bs_groups=%s",
         module,
         n_run,
         n_skip,
         n_fail,
-        len(yml_files),
+        len(loaded),
+        bs_list,
     )
 
 
