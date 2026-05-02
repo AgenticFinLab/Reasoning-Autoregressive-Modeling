@@ -3,30 +3,41 @@
 Usage:
     python3 examples/GetResults/run_scp.py -m <module> -e <experiment>
     python3 examples/GetResults/run_scp.py -m <module> -e all
+    python3 examples/GetResults/run_scp.py -m <module> -e all -i checkpoints
+    python3 examples/GetResults/run_scp.py -m <module> -e all -i 'checkpoints/*best.pt'
 
 Arguments:
     -m / --module      Module name: "builder" or "predictor"
     -e / --experiment  Experiment name (directory under EXPERIMENT/nlcpV4/<module>/)
                        Pass "all" to iterate over every experiment discovered
                        from configs/nlcpV4/*/train_<module>_*.yml.
+    -i / --ignore      Glob pattern (relative to the experiment dir) of
+                       artifacts to skip entirely. May be given multiple
+                       times. Examples:
+                         -i checkpoints               -> skip whole dir
+                         -i checkpoints/*best.pt      -> skip by glob
+                         -i logs                      -> skip the logs dir
 
 Behavior:
     1. Build full remote & local paths from the two args.
-    2. For each artifact (each checkpoint file + logs/), check the local copy
-       independently. Present items are skipped with [SKIP].
-    3. If everything is already local -> exit 0 with [DONE].
-    4. Otherwise -> SCP the missing items from remote. Missing remote files
+    2. Drop any artifact whose relative path matches a `-i` pattern.
+    3. For each remaining artifact (each checkpoint file + logs/), check
+       the local copy independently. Present items are skipped with [SKIP].
+    4. If everything is already local or ignored -> exit 0 with [DONE].
+    5. Otherwise -> SCP the missing items from remote. Missing remote files
        are treated as warnings (scp non-zero exit); the loop keeps going.
 
 Example:
     python3 examples/GetResults/run_scp.py -m builder \\
         -e GSM8K_Qwen2.5-0.5B_6level
     python3 examples/GetResults/run_scp.py -m builder -e all
+    python3 examples/GetResults/run_scp.py -m builder -e all -i checkpoints
 """
 
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import subprocess
 import sys
 from pathlib import Path
@@ -79,6 +90,28 @@ def _run_scp(remote_src: str, local_dst: Path, recursive: bool = False) -> int:
     return subprocess.call(cmd)
 
 
+def _matches_ignore(rel_path: str, patterns: list[str]) -> str | None:
+    """Return the first pattern that matches ``rel_path``, or None.
+
+    A pattern matches when:
+      * ``rel_path`` equals the pattern exactly, OR
+      * the pattern is a parent directory of ``rel_path`` (e.g.
+        pattern="checkpoints" matches "checkpoints/foo.pt"), OR
+      * ``fnmatch.fnmatchcase`` matches the pattern against ``rel_path``
+        (supports globs like ``checkpoints/*best.pt``).
+    """
+    rp = rel_path.strip("/")
+    for p in patterns:
+        pat = p.strip("/")
+        if not pat:
+            continue
+        if rp == pat or rp.startswith(pat + "/"):
+            return p
+        if fnmatch.fnmatchcase(rp, pat):
+            return p
+    return None
+
+
 def discover_experiments(module: str) -> list[str]:
     """Scan configs/nlcpV4/<dataset>/train_<module>_<rest>.yml -> experiment names.
 
@@ -103,9 +136,12 @@ def discover_experiments(module: str) -> list[str]:
     return experiments
 
 
-def process_experiment(module: str, experiment: str) -> int:
+def process_experiment(
+    module: str, experiment: str, ignore_patterns: list[str] | None = None
+) -> int:
     """Process a single experiment. Returns 0 on success (incl. all-skipped),
     non-zero when at least one artifact failed to transfer."""
+    ignore_patterns = ignore_patterns or []
     remote_path = f"{REMOTE_BASE}/{module}/{experiment}"
     local_path = LOCAL_BASE / module / experiment
 
@@ -114,6 +150,8 @@ def process_experiment(module: str, experiment: str) -> int:
     print(f"Experiment : {experiment}")
     print(f"Remote     : {REMOTE_HOST}:{remote_path}")
     print(f"Local      : {local_path}")
+    if ignore_patterns:
+        print(f"Ignore     : {ignore_patterns}")
     print("=" * 70)
 
     # --- Per-item idempotent check -------------------------------------
@@ -124,23 +162,33 @@ def process_experiment(module: str, experiment: str) -> int:
 
     ckpt_to_fetch: list[str] = []
     for rel_path in CHECKPOINT_FILES:
+        hit = _matches_ignore(rel_path, ignore_patterns)
+        if hit is not None:
+            print(f"[IGNORE] {rel_path} (matched -i {hit!r})")
+            continue
         local_file = local_path / rel_path
         if local_file.is_file() and local_file.stat().st_size > 0:
             print(f"[SKIP] {rel_path} already exists at {local_file}")
         else:
             ckpt_to_fetch.append(rel_path)
 
-    fetch_logs = not _has_content(local_logs_dir)
-    if not fetch_logs:
-        print(
-            f"[SKIP] {LOGS_DIR}/ already exists and is non-empty at "
-            f"{local_logs_dir}"
-        )
+    logs_ignored = _matches_ignore(LOGS_DIR, ignore_patterns)
+    if logs_ignored is not None:
+        print(f"[IGNORE] {LOGS_DIR}/ (matched -i {logs_ignored!r})")
+        fetch_logs = False
+    else:
+        fetch_logs = not _has_content(local_logs_dir)
+        if not fetch_logs:
+            print(
+                f"[SKIP] {LOGS_DIR}/ already exists and is non-empty at "
+                f"{local_logs_dir}"
+            )
 
     if not ckpt_to_fetch and not fetch_logs:
         print(
-            "\n[DONE] All target artifacts already present locally. "
-            "Remove the specific file/directory to force a re-download."
+            "\n[DONE] All target artifacts already present locally or "
+            "ignored. Remove the specific file/directory to force a "
+            "re-download."
         )
         return 0
 
@@ -224,10 +272,26 @@ def main() -> int:
             "configs/nlcpV4/*/train_<module>_*.yml."
         ),
     )
+    parser.add_argument(
+        "-i",
+        "--ignore",
+        action="append",
+        default=[],
+        metavar="PATTERN",
+        help=(
+            "Artifact pattern to SKIP, relative to the experiment dir. "
+            "May be given multiple times. Matching rules: exact path, "
+            "parent directory prefix, or fnmatch glob. Examples: "
+            "'-i checkpoints' skips the whole checkpoints dir; "
+            "'-i checkpoints/*best.pt' skips files matching the glob; "
+            "'-i logs' skips the logs directory."
+        ),
+    )
     args = parser.parse_args()
 
     module: str = args.module
     experiment: str = args.experiment
+    ignore_patterns: list[str] = list(args.ignore or [])
 
     if experiment == ALL_KEYWORD:
         experiments = discover_experiments(module)
@@ -247,7 +311,7 @@ def main() -> int:
 
         partial: list[str] = []
         for e in experiments:
-            rc = process_experiment(module, e)
+            rc = process_experiment(module, e, ignore_patterns)
             if rc != 0:
                 partial.append(e)
             print()
@@ -264,7 +328,7 @@ def main() -> int:
         return 0
 
     # Single-experiment mode.
-    return process_experiment(module, experiment)
+    return process_experiment(module, experiment, ignore_patterns)
 
 
 if __name__ == "__main__":

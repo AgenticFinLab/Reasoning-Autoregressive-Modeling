@@ -15,12 +15,17 @@ Arguments:
     -e / --experiment  Config stem after 'train_{module}_'
                        (e.g. 'Qwen2.5-0.5B_6level') or 'all' to process
                        every matching config under the dataset.
+    -o / --overlap     If true (default), overwrite existing analysis
+                       outputs. Use ``--no-overlap`` to skip configs whose
+                       outputs already exist.
 
 Behavior:
     For each selected config:
     1. If log directory / training_history.json is missing -> skip with
        [SKIP NO-DATA].
-    2. If all analysis outputs already exist -> skip with [SKIP EXISTS].
+    2. If all analysis outputs already exist AND --no-overlap is set ->
+       skip with [SKIP EXISTS]. With the default ``--overlap``, existing
+       outputs are overwritten.
     3. Otherwise run the analysis: overlay eval curves (quick/full), or
        fall back to checkpoint eval when eval_history.json is empty.
     A compact status table is printed at the end.
@@ -51,12 +56,17 @@ logger = logging.getLogger(__name__)
 CONFIGS_ROOT = PROJECT_ROOT / "configs" / "nlcpV4"
 VALID_MODULES = {"builder", "predictor"}
 ALL_KEYWORD = "all"
-# The three PNGs produced by a successful analysis run. Presence of ALL
-# three is treated as "already analyzed".
+# The six PNGs produced by a successful analysis run (weighted + raw).
+# Presence of ALL six is treated as "already analyzed". They live in
+# <experiment>/train_analysis/, not in the logs/ directory.
+ANALYSIS_OUTPUT_DIR_NAME = "train_analysis"
 ANALYSIS_OUTPUTS = (
     "training_losses.png",
     "training_losses_overlay.png",
     "eval_losses_overlay.png",
+    "training_losses_raw.png",
+    "training_losses_overlay_raw.png",
+    "eval_losses_overlay_raw.png",
 )
 
 
@@ -85,6 +95,16 @@ def parse_args():
         help=(
             "Config stem after 'train_{module}_' (e.g. 'Qwen2.5-0.5B_6level'), "
             "or 'all' to process every matching config under the dataset."
+        ),
+    )
+    parser.add_argument(
+        "-o",
+        "--overlap",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "If true (default), overwrite existing analysis outputs. "
+            "Pass --no-overlap to skip configs whose outputs already exist."
         ),
     )
     return parser.parse_args()
@@ -314,13 +334,22 @@ def _plot_eval_total_on_ax(
     eval_full,
     ckpt_eval,
     last_step,
+    total_getter=None,
 ):
-    """Overlay eval total loss (already weighted) on total-loss subplot."""
+    """Overlay eval total loss on the total-loss subplot.
+
+    ``total_getter(record)`` extracts the per-record total (defaults to
+    ``r["total"]`` which is the *weighted* total). For raw mode callers
+    pass a getter that sums the raw per-component values. The same getter
+    is applied to ``ckpt_eval`` (which shares the record schema).
+    """
+    if total_getter is None:
+        total_getter = lambda r: r["total"]  # noqa: E731
     has_history = bool(eval_quick) or bool(eval_full)
 
     if eval_quick:
         eq_steps = np.array([r["step"] for r in eval_quick])
-        eq_total = np.array([r["total"] for r in eval_quick])
+        eq_total = np.array([total_getter(r) for r in eval_quick])
         ax.plot(
             eq_steps,
             eq_total,
@@ -334,7 +363,7 @@ def _plot_eval_total_on_ax(
         )
     if eval_full:
         ef_steps = np.array([r["step"] for r in eval_full])
-        ef_total = np.array([r["total"] for r in eval_full])
+        ef_total = np.array([total_getter(r) for r in eval_full])
         ax.plot(
             ef_steps,
             ef_total,
@@ -348,7 +377,7 @@ def _plot_eval_total_on_ax(
         )
 
     if not has_history and ckpt_eval is not None:
-        val = ckpt_eval["total"]
+        val = total_getter(ckpt_eval)
         ax.axhline(y=val, color="tab:red", linestyle="--", linewidth=1.0, alpha=0.6)
         ax.plot(
             last_step,
@@ -361,13 +390,296 @@ def _plot_eval_total_on_ax(
         )
 
 
+def _build_figures(
+    *,
+    mode: str,
+    output_dir: Path,
+    experiment_name: str,
+    steps,
+    last_step,
+    window,
+    comp_arrays,
+    total_array,
+    comp_weights,
+    eval_total_getter,
+    eval_quick,
+    eval_full,
+    ckpt_eval,
+    lr_steps,
+    lr_values,
+) -> None:
+    """Build the 3 PNGs for one loss mode and save them under ``output_dir``.
+
+    ``mode`` is 'weighted' or 'raw' and controls filename suffix + titles.
+    ``comp_arrays`` / ``total_array`` are already in the chosen mode.
+    ``comp_weights`` is applied to raw eval per-component values (1.0 in
+    raw mode). ``eval_total_getter`` extracts a per-record total in the
+    chosen mode.
+    """
+    if mode == "weighted":
+        suffix = ""
+        mode_label = "Weighted"
+
+        def comp_title(key):
+            return f"{key.capitalize()} Loss (\u00d7{comp_weights[key]})"
+
+        total_subplot_title = "Total Loss (weighted sum)"
+        overlay_title = f"All Weighted Losses: {experiment_name}"
+        eval_overlay_title = f"All Weighted Eval Losses: {experiment_name}"
+
+        def overlay_label(key):
+            if key == "total":
+                return "total"
+            return f"{key} (\u00d7{comp_weights[key]})"
+
+    elif mode == "raw":
+        suffix = "_raw"
+        mode_label = "Raw"
+
+        def comp_title(key):
+            return f"{key.capitalize()} Loss (raw)"
+
+        total_subplot_title = "Total Loss (raw sum)"
+        overlay_title = f"All Raw Losses: {experiment_name}"
+        eval_overlay_title = f"All Raw Eval Losses: {experiment_name}"
+
+        def overlay_label(key):
+            return key
+
+    else:
+        raise ValueError(f"Unknown mode: {mode}")
+
+    # ── Figure 1: 3x2 grid of component losses + LR ──────────────
+    fig, axes = plt.subplots(3, 2, figsize=(16, 14))
+    fig.suptitle(f"Builder Training Analysis ({mode_label}): {experiment_name}", y=0.98)
+
+    # Total loss (weighted-sum or raw-sum depending on mode)
+    ax = axes[0, 0]
+    ax.plot(steps, total_array, alpha=0.15, color="black", linewidth=0.5)
+    s = smooth(total_array, window)
+    ax.plot(
+        steps[: len(s)] + window // 2,
+        s,
+        color="black",
+        linewidth=1.5,
+        label="train",
+    )
+    _plot_eval_total_on_ax(
+        ax,
+        eval_quick,
+        eval_full,
+        ckpt_eval,
+        last_step,
+        total_getter=eval_total_getter,
+    )
+    ax.set_title(total_subplot_title)
+    ax.set_xlabel("Step")
+    ax.set_ylabel("Loss")
+    ax.grid(True, alpha=0.3)
+    ax.legend()
+
+    grid_layout = [
+        ("recon", axes[0, 1], "tab:blue"),
+        ("ordering", axes[1, 0], "tab:orange"),
+        ("residual", axes[1, 1], "tab:green"),
+        ("reasoning", axes[2, 0], "tab:red"),
+    ]
+    for key, ax, color in grid_layout:
+        data = comp_arrays[key]
+        ax.plot(steps, data, alpha=0.15, color=color, linewidth=0.5)
+        s = smooth(data, window)
+        ax.plot(
+            steps[: len(s)] + window // 2,
+            s,
+            color=color,
+            linewidth=1.5,
+            label="train",
+        )
+        _plot_eval_on_ax(
+            ax,
+            eval_quick,
+            eval_full,
+            key,
+            comp_weights[key],
+            ckpt_eval,
+            last_step,
+        )
+        ax.set_title(comp_title(key))
+        ax.set_xlabel("Step")
+        ax.set_ylabel("Loss")
+        ax.grid(True, alpha=0.3)
+        ax.legend()
+
+    # Learning rate
+    ax = axes[2, 1]
+    ax.plot(lr_steps, lr_values, color="tab:purple", linewidth=1.5)
+    ax.set_title("Learning Rate")
+    ax.set_xlabel("Step")
+    ax.set_ylabel("LR")
+    ax.grid(True, alpha=0.3)
+    ax.ticklabel_format(axis="y", style="scientific", scilimits=(0, 0))
+
+    plt.tight_layout()
+
+    # ── Figure 2: overlay ─────────────────────────────────────────
+    fig2, ax2 = plt.subplots(figsize=(14, 6))
+    ax2.set_title(overlay_title)
+
+    overlay_items = [
+        ("recon", comp_arrays["recon"], "tab:blue"),
+        ("ordering", comp_arrays["ordering"], "tab:orange"),
+        ("residual", comp_arrays["residual"], "tab:green"),
+        ("reasoning", comp_arrays["reasoning"], "tab:red"),
+        ("total", total_array, "black"),
+    ]
+    for key, data, color in overlay_items:
+        ax2.plot(steps, data, alpha=0.08, color=color, linewidth=0.5)
+        s = smooth(data, window)
+        ax2.plot(
+            steps[: len(s)] + window // 2,
+            s,
+            label=overlay_label(key),
+            linewidth=1.5,
+            color=color,
+        )
+
+    # Checkpoint-eval markers when no eval history
+    if not eval_quick and not eval_full and ckpt_eval is not None:
+        for key, _data, color in overlay_items:
+            if key == "total":
+                val = eval_total_getter(ckpt_eval)
+            else:
+                val = ckpt_eval.get(key, 0.0) * comp_weights[key]
+            ax2.plot(last_step, val, "*", color=color, markersize=14, zorder=5)
+            ax2.axhline(y=val, color=color, linestyle="--", linewidth=0.8, alpha=0.4)
+
+    ax2.set_xlabel("Step")
+    ax2.set_ylabel("Loss")
+    ax2.legend()
+    ax2.grid(True, alpha=0.3)
+    plt.tight_layout()
+
+    # ── Figure 3: eval overlay ────────────────────────────────────
+    fig3, ax3 = plt.subplots(figsize=(14, 6))
+    ax3.set_title(eval_overlay_title)
+
+    eval_plot_items = [
+        ("recon", "tab:blue"),
+        ("ordering", "tab:orange"),
+        ("residual", "tab:green"),
+        ("reasoning", "tab:red"),
+        ("total", "black"),
+    ]
+    has_any_eval = bool(eval_quick) or bool(eval_full)
+
+    def _eval_values(records, key):
+        if key == "total":
+            return np.array([eval_total_getter(r) for r in records])
+        return np.array([r.get(key, 0.0) * comp_weights[key] for r in records])
+
+    if eval_quick:
+        eq_steps = np.array([r["step"] for r in eval_quick])
+        for key, color in eval_plot_items:
+            ax3.plot(
+                eq_steps,
+                _eval_values(eval_quick, key),
+                linestyle="--",
+                marker=".",
+                color=color,
+                linewidth=1.0,
+                markersize=4,
+                alpha=0.8,
+                label=f"{overlay_label(key)} [quick]",
+            )
+    if eval_full:
+        ef_steps = np.array([r["step"] for r in eval_full])
+        for key, color in eval_plot_items:
+            ax3.plot(
+                ef_steps,
+                _eval_values(eval_full, key),
+                linestyle=":",
+                marker="s",
+                color=color,
+                linewidth=1.2,
+                markersize=6,
+                alpha=0.9,
+                label=f"{overlay_label(key)} [full]",
+            )
+
+    if not has_any_eval and ckpt_eval is not None:
+        for key, color in eval_plot_items:
+            if key == "total":
+                val = eval_total_getter(ckpt_eval)
+            else:
+                val = ckpt_eval.get(key, 0.0) * comp_weights[key]
+            ax3.plot(
+                last_step,
+                val,
+                "*",
+                color=color,
+                markersize=14,
+                zorder=5,
+                label=f"{overlay_label(key)} [best ckpt]",
+            )
+            ax3.axhline(y=val, color=color, linestyle="--", linewidth=0.8, alpha=0.4)
+
+    ax3.set_xlabel("Step")
+    ax3.set_ylabel("Loss")
+    if has_any_eval or ckpt_eval is not None:
+        ax3.legend(ncol=2)
+    ax3.grid(True, alpha=0.3)
+    plt.tight_layout()
+
+    fig.savefig(
+        output_dir / f"training_losses{suffix}.png", dpi=150, bbox_inches="tight"
+    )
+    fig2.savefig(
+        output_dir / f"training_losses_overlay{suffix}.png",
+        dpi=150,
+        bbox_inches="tight",
+    )
+    fig3.savefig(
+        output_dir / f"eval_losses_overlay{suffix}.png", dpi=150, bbox_inches="tight"
+    )
+    plt.close(fig)
+    plt.close(fig2)
+    plt.close(fig3)
+
+
 def _run_builder_analysis(config_path: Path) -> None:
-    """Run the full analysis for a single config and write 3 PNGs to log_dir.
+    """Run the full analysis for a single config and write 6 PNGs to
+    ``<experiment>/train_analysis/`` (sibling of ``logs/``).
+
+    For each pass (weighted and raw) three figures are produced:
+    training_losses, training_losses_overlay, eval_losses_overlay.
 
     Precondition: caller has already verified that training_history.json
     exists under config.log.log_path.
     """
     config = load_config(str(config_path))
+
+    # --- Plot styling: larger, bold titles/labels/legend/ticks ----
+    # Set once via rcParams so every set_title / set_xlabel /
+    # set_ylabel / legend call inherits the same typography. Safe to
+    # re-apply on each batch iteration (idempotent).
+    plt.rcParams.update(
+        {
+            "font.weight": "bold",
+            "axes.titlesize": 15,
+            "axes.titleweight": "bold",
+            "axes.labelsize": 14,
+            "axes.labelweight": "bold",
+            "figure.titlesize": 18,
+            "figure.titleweight": "bold",
+            "legend.fontsize": 12,
+            "xtick.labelsize": 12,
+            "ytick.labelsize": 12,
+            # Strip top and right border on every Axes (applies to
+            # fig's subplots as well as ax2 / ax3 created later).
+            "axes.spines.top": False,
+            "axes.spines.right": False,
+        }
+    )
 
     log_dir = Path(config["log"]["log_path"])
     if not log_dir.is_absolute():
@@ -415,265 +727,92 @@ def _run_builder_analysis(config_path: Path) -> None:
     lr_steps = np.array([r["step"] for r in terminal if "lr" in r])
     lr_values = np.array([r["lr"] for r in terminal if "lr" in r])
 
-    # ── Figure 1: All weighted losses ─────────────────────────────
-    fig, axes = plt.subplots(3, 2, figsize=(16, 14))
-    fig.suptitle(f"Builder Training Analysis: {experiment_name}", fontsize=14, y=0.98)
+    # ── Output directory: sibling of logs/ ───────────────────────
+    # Saved under <experiment>/train_analysis/ to keep logs/ lightweight.
+    output_dir = log_dir.parent / ANALYSIS_OUTPUT_DIR_NAME
+    output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Total loss
-    ax = axes[0, 0]
-    ax.plot(steps, total, alpha=0.15, color="black", linewidth=0.5)
-    s = smooth(total, window)
-    ax.plot(
-        steps[: len(s)] + window // 2,
-        s,
-        color="black",
-        linewidth=1.5,
-        label="train",
+    # ── Raw component arrays (mirror the weighted arrays) ─────────
+    recon_raw = np.array([r["recon"] for r in history])
+    ordering_raw = np.array([r["ordering"] for r in history])
+    residual_raw = np.array([r["residual"] for r in history])
+    reasoning_raw = np.array([r.get("reasoning", 0.0) for r in history])
+    # Raw total = element-wise sum of raw per-component values.
+    total_raw = recon_raw + ordering_raw + residual_raw + reasoning_raw
+
+    _raw_comps = ("recon", "ordering", "residual", "reasoning")
+
+    # ── Weighted pass ─────────────────────────────────────────
+    _build_figures(
+        mode="weighted",
+        output_dir=output_dir,
+        experiment_name=experiment_name,
+        steps=steps,
+        last_step=last_step,
+        window=window,
+        comp_arrays={
+            "recon": recon_w,
+            "ordering": ordering_w,
+            "residual": residual_w,
+            "reasoning": reasoning_w,
+        },
+        total_array=total,
+        comp_weights={
+            "recon": w_recon,
+            "ordering": w_ordering,
+            "residual": w_residual,
+            "reasoning": w_reasoning,
+        },
+        eval_total_getter=lambda r: r["total"],
+        eval_quick=eval_quick,
+        eval_full=eval_full,
+        ckpt_eval=ckpt_eval,
+        lr_steps=lr_steps,
+        lr_values=lr_values,
     )
-    _plot_eval_total_on_ax(ax, eval_quick, eval_full, ckpt_eval, last_step)
-    ax.set_title("Total Loss (weighted sum)")
-    ax.set_xlabel("Step")
-    ax.set_ylabel("Loss")
-    ax.grid(True, alpha=0.3)
-    ax.legend(fontsize=8)
 
-    # Weighted recon loss
-    ax = axes[0, 1]
-    ax.plot(steps, recon_w, alpha=0.15, color="tab:blue", linewidth=0.5)
-    s = smooth(recon_w, window)
-    ax.plot(
-        steps[: len(s)] + window // 2,
-        s,
-        color="tab:blue",
-        linewidth=1.5,
-        label="train",
+    # ── Raw pass ─────────────────────────────────────────────
+    _build_figures(
+        mode="raw",
+        output_dir=output_dir,
+        experiment_name=experiment_name,
+        steps=steps,
+        last_step=last_step,
+        window=window,
+        comp_arrays={
+            "recon": recon_raw,
+            "ordering": ordering_raw,
+            "residual": residual_raw,
+            "reasoning": reasoning_raw,
+        },
+        total_array=total_raw,
+        comp_weights={k: 1.0 for k in _raw_comps},
+        eval_total_getter=lambda r: sum(r.get(k, 0.0) for k in _raw_comps),
+        eval_quick=eval_quick,
+        eval_full=eval_full,
+        ckpt_eval=ckpt_eval,
+        lr_steps=lr_steps,
+        lr_values=lr_values,
     )
-    _plot_eval_on_ax(ax, eval_quick, eval_full, "recon", w_recon, ckpt_eval, last_step)
-    ax.set_title(f"Recon Loss (\u00d7{w_recon})")
-    ax.set_xlabel("Step")
-    ax.set_ylabel("Loss")
-    ax.grid(True, alpha=0.3)
-    ax.legend(fontsize=8)
 
-    # Weighted ordering loss
-    ax = axes[1, 0]
-    ax.plot(steps, ordering_w, alpha=0.15, color="tab:orange", linewidth=0.5)
-    s = smooth(ordering_w, window)
-    ax.plot(
-        steps[: len(s)] + window // 2,
-        s,
-        color="tab:orange",
-        linewidth=1.5,
-        label="train",
-    )
-    _plot_eval_on_ax(
-        ax, eval_quick, eval_full, "ordering", w_ordering, ckpt_eval, last_step
-    )
-    ax.set_title(f"Ordering Loss (\u00d7{w_ordering})")
-    ax.set_xlabel("Step")
-    ax.set_ylabel("Loss")
-    ax.grid(True, alpha=0.3)
-    ax.legend(fontsize=8)
-
-    # Weighted residual loss
-    ax = axes[1, 1]
-    ax.plot(steps, residual_w, alpha=0.15, color="tab:green", linewidth=0.5)
-    s = smooth(residual_w, window)
-    ax.plot(
-        steps[: len(s)] + window // 2,
-        s,
-        color="tab:green",
-        linewidth=1.5,
-        label="train",
-    )
-    _plot_eval_on_ax(
-        ax, eval_quick, eval_full, "residual", w_residual, ckpt_eval, last_step
-    )
-    ax.set_title(f"Residual Loss (\u00d7{w_residual})")
-    ax.set_xlabel("Step")
-    ax.set_ylabel("Loss")
-    ax.grid(True, alpha=0.3)
-    ax.legend(fontsize=8)
-
-    # Weighted reasoning loss
-    ax = axes[2, 0]
-    ax.plot(steps, reasoning_w, alpha=0.15, color="tab:red", linewidth=0.5)
-    s = smooth(reasoning_w, window)
-    ax.plot(
-        steps[: len(s)] + window // 2,
-        s,
-        color="tab:red",
-        linewidth=1.5,
-        label="train",
-    )
-    _plot_eval_on_ax(
-        ax, eval_quick, eval_full, "reasoning", w_reasoning, ckpt_eval, last_step
-    )
-    ax.set_title(f"Reasoning Loss (\u00d7{w_reasoning})")
-    ax.set_xlabel("Step")
-    ax.set_ylabel("Loss")
-    ax.grid(True, alpha=0.3)
-    ax.legend(fontsize=8)
-
-    # Learning rate
-    ax = axes[2, 1]
-    ax.plot(lr_steps, lr_values, color="tab:purple", linewidth=1.5)
-    ax.set_title("Learning Rate")
-    ax.set_xlabel("Step")
-    ax.set_ylabel("LR")
-    ax.grid(True, alpha=0.3)
-    ax.ticklabel_format(axis="y", style="scientific", scilimits=(0, 0))
-
-    plt.tight_layout()
-
-    # ── Figure 2: All weighted losses overlaid ────────────────────
-    fig2, ax2 = plt.subplots(figsize=(14, 6))
-    ax2.set_title(f"All Weighted Losses: {experiment_name}")
-
-    for data, label, color in [
-        (recon_w, f"recon (×{w_recon})", "tab:blue"),
-        (ordering_w, f"ordering (×{w_ordering})", "tab:orange"),
-        (residual_w, f"residual (×{w_residual})", "tab:green"),
-        (reasoning_w, f"reasoning (×{w_reasoning})", "tab:red"),
-        (total, "total", "black"),
-    ]:
-        ax2.plot(steps, data, alpha=0.08, color=color, linewidth=0.5)
-        s = smooth(data, window)
-        ax2.plot(
-            steps[: len(s)] + window // 2, s, label=label, linewidth=1.5, color=color
-        )
-
-    # Add checkpoint eval single-point markers to overlay if applicable
-    if not eval_hist and ckpt_eval is not None:
-        for key, weight, color in [
-            ("recon", w_recon, "tab:blue"),
-            ("ordering", w_ordering, "tab:orange"),
-            ("residual", w_residual, "tab:green"),
-            ("reasoning", w_reasoning, "tab:red"),
-            ("total", 1.0, "black"),
-        ]:
-            val = ckpt_eval.get(key, 0.0) * weight
-            ax2.plot(
-                last_step,
-                val,
-                "*",
-                color=color,
-                markersize=14,
-                zorder=5,
-            )
-            ax2.axhline(
-                y=val,
-                color=color,
-                linestyle="--",
-                linewidth=0.8,
-                alpha=0.4,
-            )
-
-    ax2.set_xlabel("Step")
-    ax2.set_ylabel("Loss")
-    ax2.legend()
-    ax2.grid(True, alpha=0.3)
-    plt.tight_layout()
-
-    # ── Figure 3: All weighted eval losses overlaid ───────────────
-    # Mirrors Figure 2 but for eval data. Colors match Figure 2 per loss
-    # component; quick uses dashed + dot, full uses dotted + square.
-    fig3, ax3 = plt.subplots(figsize=(14, 6))
-    ax3.set_title(f"All Weighted Eval Losses: {experiment_name}")
-
-    eval_components = [
-        ("recon", w_recon, f"recon (\u00d7{w_recon})", "tab:blue"),
-        ("ordering", w_ordering, f"ordering (\u00d7{w_ordering})", "tab:orange"),
-        ("residual", w_residual, f"residual (\u00d7{w_residual})", "tab:green"),
-        ("reasoning", w_reasoning, f"reasoning (\u00d7{w_reasoning})", "tab:red"),
-        ("total", 1.0, "total", "black"),
-    ]
-
-    has_any_eval = bool(eval_quick) or bool(eval_full)
-
-    if eval_quick:
-        eq_steps = np.array([r["step"] for r in eval_quick])
-        for key, weight, label, color in eval_components:
-            if key == "total":
-                vals = np.array([r["total"] for r in eval_quick])
-            else:
-                vals = np.array([r.get(key, 0.0) * weight for r in eval_quick])
-            ax3.plot(
-                eq_steps,
-                vals,
-                linestyle="--",
-                marker=".",
-                color=color,
-                linewidth=1.0,
-                markersize=4,
-                alpha=0.8,
-                label=f"{label} [quick]",
-            )
-
-    if eval_full:
-        ef_steps = np.array([r["step"] for r in eval_full])
-        for key, weight, label, color in eval_components:
-            if key == "total":
-                vals = np.array([r["total"] for r in eval_full])
-            else:
-                vals = np.array([r.get(key, 0.0) * weight for r in eval_full])
-            ax3.plot(
-                ef_steps,
-                vals,
-                linestyle=":",
-                marker="s",
-                color=color,
-                linewidth=1.2,
-                markersize=6,
-                alpha=0.9,
-                label=f"{label} [full]",
-            )
-
-    # Fallback: checkpoint eval as single points when no eval history
-    if not has_any_eval and ckpt_eval is not None:
-        for key, weight, label, color in eval_components:
-            val = (
-                ckpt_eval.get(key, 0.0) * weight
-                if key != "total"
-                else ckpt_eval["total"]
-            )
-            ax3.plot(
-                last_step,
-                val,
-                "*",
-                color=color,
-                markersize=14,
-                zorder=5,
-                label=f"{label} [best ckpt]",
-            )
-            ax3.axhline(y=val, color=color, linestyle="--", linewidth=0.8, alpha=0.4)
-
-    ax3.set_xlabel("Step")
-    ax3.set_ylabel("Loss")
-    if has_any_eval or ckpt_eval is not None:
-        ax3.legend(fontsize=8, ncol=2)
-    ax3.grid(True, alpha=0.3)
-    plt.tight_layout()
-
-    fig.savefig(log_dir / "training_losses.png", dpi=150, bbox_inches="tight")
-    fig2.savefig(log_dir / "training_losses_overlay.png", dpi=150, bbox_inches="tight")
-    fig3.savefig(log_dir / "eval_losses_overlay.png", dpi=150, bbox_inches="tight")
-    print("Saved to %s" % log_dir)
-
-    # Release matplotlib resources between analyses in batch mode.
-    plt.close(fig)
-    plt.close(fig2)
-    plt.close(fig3)
+    print("Saved to %s" % output_dir)
 
 
-def analyze_one(config_path: Path) -> tuple[str, str]:
+def analyze_one(config_path: Path, overlap: bool = True) -> tuple[str, str]:
     """Analyze a single config. Returns (status, detail) tuple.
 
+    Args:
+        config_path: YAML config file to analyze.
+        overlap: If True (default), always re-run even when outputs
+            already exist (overwriting them). If False, skip configs
+            whose outputs already exist.
+
     status is one of:
-      - 'analyzed'        : analysis ran and 3 PNGs were written.
+      - 'analyzed'        : analysis ran and PNGs were written.
       - 'skip_no_data'    : training_history.json missing (training not started
                             or log_dir absent); skipped.
-      - 'skip_exists'     : all 3 output PNGs already exist; skipped.
+      - 'skip_exists'     : all output PNGs already exist AND overlap=False;
+                            skipped.
       - 'error'           : unexpected error (detail contains the message).
     """
     try:
@@ -689,9 +828,9 @@ def analyze_one(config_path: Path) -> tuple[str, str]:
     if not training_history.is_file():
         return "skip_no_data", f"training_history.json missing at {log_dir}"
 
-    if all((log_dir / name).is_file() for name in ANALYSIS_OUTPUTS):
-        return "skip_exists", f"all outputs already exist at {log_dir}"
-
+    output_dir = log_dir.parent / ANALYSIS_OUTPUT_DIR_NAME
+    if not overlap and all((output_dir / name).is_file() for name in ANALYSIS_OUTPUTS):
+        return "skip_exists", f"all outputs already exist at {output_dir}"
     try:
         _run_builder_analysis(config_path)
     except Exception as exc:  # noqa: BLE001
@@ -699,7 +838,7 @@ def analyze_one(config_path: Path) -> tuple[str, str]:
         plt.close("all")
         return "error", f"{type(exc).__name__}: {exc}"
 
-    return "analyzed", f"wrote 3 PNGs to {log_dir}"
+    return "analyzed", f"wrote {len(ANALYSIS_OUTPUTS)} PNGs to {output_dir}"
 
 
 def _print_summary(rows: list[tuple[str, str, str]]) -> None:
@@ -733,6 +872,7 @@ def main():
     module: str = args.module
     dataset: str = args.dataset
     experiment: str = args.experiment
+    overlap: bool = args.overlap
 
     configs = discover_configs(module, dataset, experiment)
     if not configs:
@@ -740,7 +880,8 @@ def main():
 
     print(
         f"[ANALYZE] module={module} dataset={dataset} "
-        f"experiment={experiment}  ({len(configs)} config file(s))"
+        f"experiment={experiment} overlap={overlap}  "
+        f"({len(configs)} config file(s))"
     )
     for p in configs:
         print(
@@ -753,7 +894,7 @@ def main():
         print("=" * 70)
         print(f"[CONFIG] {cfg_path.name}")
         print("=" * 70)
-        status, detail = analyze_one(cfg_path)
+        status, detail = analyze_one(cfg_path, overlap=overlap)
         if status == "analyzed":
             print(f"[OK]   {detail}")
         elif status == "skip_no_data":
