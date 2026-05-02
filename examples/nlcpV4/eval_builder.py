@@ -189,6 +189,11 @@ def evaluate_builder(
     all_reasoning_texts = []
     all_samples: list[dict] = []
 
+    # No progress bar here: eval runs silently and the single summary
+    # line printed by ``log_eval_results`` after this returns is the
+    # only eval output. This keeps the training log clean — a tqdm
+    # bar's per-iter ``\r`` refresh would otherwise become a separate
+    # line in a tee'd log file.
     for i, batch in enumerate(eval_dataloader):
         if max_batches > 0 and i >= max_batches:
             break

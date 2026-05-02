@@ -429,7 +429,17 @@ def train_builder(config: dict, config_path: Path):
 
     for epoch in range(start_epoch, num_epochs):
         epoch_losses = []
-        pbar = tqdm(dataloader, desc=f"Epoch {epoch+1}/{num_epochs}")
+        # tqdm refresh is throttled to once per ``log_step_interval``
+        # iterations (and at most once per second). This matters when
+        # stdout is tee'd to a log file — tqdm's default per-iteration
+        # ``\r`` refresh becomes a new LINE in the log file rather than
+        # an in-place update, flooding it with "per-step" progress
+        # rows. With ``miniters=log_interval`` the log file gets at
+        # most one progress row per logging interval, matching
+        # ``logger.info``'s own cadence.
+        pbar = tqdm(
+            dataloader, desc=f"Epoch {epoch+1}/{num_epochs}", miniters=log_interval
+        )
         epoch_num_batches = len(dataloader)
         epoch_mid_batch = epoch_num_batches // 2 if epoch_num_batches > 1 else -1
 
