@@ -46,11 +46,51 @@ GPU scheduling (new):
          the launcher polls ``nvidia-smi`` every ``--poll-interval``
          seconds and places queued jobs as memory frees up. Without it,
          overflow jobs are skipped with a clear report.
+      5. Reservation tracking survives across passes. Every assignment
+         records ``(gpu_idx, mem_mb, committed_at)`` in a run-wide
+         ``_Reservation`` list. Each new scheduling pass recomputes
+         ``gpus[].reserved_mb`` from those records so the freshly
+         polled ``free_mb`` from nvidia-smi is NEVER interpreted as
+         "this GPU is empty" during the 30–120 s window where a
+         launched session has not yet allocated its memory. After
+         ``--warmup-seconds`` a reservation is dropped and nvidia-smi
+         is trusted instead — this prevents reservations from
+         accumulating forever as long-running jobs continue. This is
+         the fix for the classic "tmux launched but process not yet
+         allocated" OOM race.
+      6. Pre-flight hard-bail: if any experiment's estimated memory
+         exceeds the largest visible GPU's effective budget, the
+         launcher refuses to start. Otherwise ``--wait-for-gpu``
+         would spin forever on an impossible job.
 
     Opt-out: pass ``--no-gpu-schedule`` to disable the whole mechanism
     and launch everything in parallel (the pre-scheduler behaviour).
 
-Usage:
+Simple mode (``--one-per-gpu``):
+    If you don't want memory packing and just want "N GPUs = N concurrent
+    experiments, queue the rest", pass ``--one-per-gpu``. Semantics:
+      * Memory estimation is skipped entirely.
+      * Each experiment is pinned to exactly one idle GPU.
+      * A GPU counts as idle iff ``free_mb / total_mb >=
+        --gpu-idle-mem-fraction`` (default 0.9 — i.e., nothing else is
+        using it) AND we have no active reservation on it.
+      * Experiments past the idle-GPU count wait in FIFO. The launcher
+        polls every ``--poll-interval`` seconds; as soon as a GPU goes
+        idle again (because a previous session finished and released
+        its memory), the next queued experiment is launched on it.
+      * ``--wait-for-gpu`` is implicit in this mode — the launcher
+        stays alive until the queue drains.
+    This is the recommended mode when each experiment saturates a GPU
+    on its own (7B+ models, full FT). It sidesteps OOM by design.
+
+Usage (one-per-gpu):
+    # 4 GPUs, 8 experiments: 4 run immediately, 4 wait; as each
+    # finishes, the next queued starts on the freed GPU.
+    python3 examples/RunResults/run_experiments.py -m builder -d GSM8K \\
+        --one-per-gpu \\
+        -e exp1.yml exp2.yml exp3.yml exp4.yml \\
+           exp5.yml exp6.yml exp7.yml exp8.yml
+
     # Launch two baseline experiments in parallel:
     python3 examples/RunResults/run_experiments.py -m builder -d GSM8K \\
         -e train_builder_Qwen2.5-0.5B_2level.yml \\
@@ -109,7 +149,7 @@ import shutil
 import subprocess
 import sys
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 # ── Project paths ────────────────────────────────────────────────────
@@ -282,6 +322,64 @@ def parse_args() -> argparse.Namespace:
         default=30,
         help=("Seconds between GPU polls when --wait-for-gpu is set. " "Default 30."),
     )
+    parser.add_argument(
+        "--warmup-seconds",
+        type=int,
+        default=90,
+        help=(
+            "How long a just-launched experiment's memory reservation is "
+            "kept in the scheduler's books BEFORE we trust nvidia-smi to "
+            "reflect its actual allocation. A freshly launched session "
+            "typically takes 30\u2013120 s (conda activate + python + torch "
+            "+ HF model load) before its memory appears in nvidia-smi. "
+            "During this window, the scheduler must still count the "
+            "reservation or it will double-schedule. Default 90s."
+        ),
+    )
+    parser.add_argument(
+        "--launch-stagger",
+        type=float,
+        default=0.0,
+        help=(
+            "Seconds to sleep between consecutive tmux launches. "
+            "0 (default) launches all assigned sessions back-to-back. "
+            "Set to e.g. 5.0 to smear out CUDA init and HF weight-load "
+            "pressure when packing multiple jobs on the same GPU."
+        ),
+    )
+    # ── Simple "one experiment per GPU" mode ──────────────────────────
+    parser.add_argument(
+        "--one-per-gpu",
+        action="store_true",
+        help=(
+            "Simple scheduling mode: pin EXACTLY ONE experiment per GPU. "
+            "Skips memory estimation entirely and instead limits "
+            "concurrency to the number of currently-idle GPUs (as "
+            "reported by nvidia-smi). When more experiments than idle "
+            "GPUs are supplied, the excess ones wait in a FIFO queue and "
+            "the launcher polls every --poll-interval seconds; as soon "
+            "as a GPU goes idle again, the next queued experiment is "
+            "launched on it. Use this when each experiment is big enough "
+            "to saturate a GPU on its own (the common case for 7B+ "
+            "backbones or full fine-tuning) — it sidesteps OOM entirely "
+            "by never co-locating two jobs on the same device. Implicitly "
+            "enables --wait-for-gpu behaviour so the queue drains to "
+            "completion."
+        ),
+    )
+    parser.add_argument(
+        "--gpu-idle-mem-fraction",
+        type=float,
+        default=0.9,
+        help=(
+            "Only used with --one-per-gpu. A GPU counts as 'idle' (and "
+            "thus eligible to accept a new experiment) only if its "
+            "currently free memory is at least this fraction of total "
+            "memory. Default 0.9 (≥ 90%% free). Raise toward 1.0 to be "
+            "stricter (e.g., refuse a GPU with ANY other process on it); "
+            "lower if you want to tolerate a small amount of shared use."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -433,6 +531,59 @@ def parse_gpu_restriction(spec: str | None) -> list[int] | None:
             continue
         out.append(int(tok))
     return out if out else None
+
+
+# =====================================================================
+# Run-wide reservation tracking (survives across scheduling passes)
+# =====================================================================
+
+
+@dataclass
+class _Reservation:
+    """One memory reservation made by the scheduler in this run.
+
+    Each successful ``schedule_assignments`` placement produces exactly
+    one of these. They are kept in a module-level list so subsequent
+    scheduling passes (wait-for-gpu polling) can reconstruct the true
+    available budget per GPU — crucially, DURING the window where a
+    tmux-launched session has not yet allocated its GPU memory and
+    ``nvidia-smi`` still reports that memory as free.
+    """
+
+    gpu_index: int
+    mem_mb: int
+    committed_at: float  # time.time() when the reservation was made
+
+
+def _apply_reservations(
+    gpus: list[GPUInfo],
+    reservations: list[_Reservation],
+    now: float,
+    warmup_seconds: float,
+) -> list[_Reservation]:
+    """Set ``g.reserved_mb`` on each gpu to reflect UN-SETTLED reservations.
+
+    Semantics:
+      * A reservation is "un-settled" if ``now - committed_at <
+        warmup_seconds``. We believe the process has not yet allocated
+        its memory and nvidia-smi's ``free_mb`` over-reports reality.
+      * A reservation is "settled" if it has aged past warmup. At that
+        point nvidia-smi should be reflecting the actual usage, so
+        continuing to subtract our reservation would DOUBLE-count. We
+        drop it.
+
+    Returns the new list of still-active reservations (with settled
+    ones pruned) so callers can replace their state.
+    """
+    active: list[_Reservation] = []
+    by_idx: dict[int, int] = {}
+    for r in reservations:
+        if (now - r.committed_at) < warmup_seconds:
+            active.append(r)
+            by_idx[r.gpu_index] = by_idx.get(r.gpu_index, 0) + r.mem_mb
+    for g in gpus:
+        g.reserved_mb = by_idx.get(g.index, 0)
+    return active
 
 
 # =====================================================================
@@ -612,6 +763,61 @@ def schedule_assignments(
         candidates.sort(key=lambda g: g.available_mb(gpu_memory_fraction))
         chosen = candidates[0]
         chosen.reserved_mb += exp.mem_mb
+        exp.gpu_index = chosen.index
+        assigned.append(exp)
+
+    return assigned, queued
+
+
+def schedule_one_per_gpu(
+    experiments: list[Experiment],
+    gpus: list[GPUInfo],
+    idle_mem_fraction: float,
+) -> tuple[list[Experiment], list[Experiment]]:
+    """Pin at most ONE experiment per GPU, FIFO order.
+
+    A GPU is eligible iff BOTH conditions hold:
+      * No active reservation of ours on it (``reserved_mb == 0``).
+        The caller is expected to have replayed the reservation ledger
+        via ``_apply_reservations`` so that this reflects sessions we
+        launched within the warmup window. Any reservation, regardless
+        of size, means "this slot is taken by us".
+      * Currently idle: ``free_mb / total_mb >= idle_mem_fraction``.
+        This protects against stealing a GPU that another user is
+        already using, and (after warmup) confirms that a previously
+        launched session has released its memory.
+
+    Experiments are assigned in FIFO order (list order), one per
+    eligible GPU. Anything past the idle-GPU count stays queued.
+
+    MUTATES ``gpus``: bumps ``reserved_mb`` on each chosen GPU by 1 so
+    that within the SAME pass a second experiment cannot claim the
+    same slot. The actual memory figure doesn't matter in this mode —
+    only the "slot taken" flag does.
+    """
+    assigned: list[Experiment] = []
+    queued: list[Experiment] = []
+
+    # Preserve caller order; do NOT sort by memory (it's irrelevant here).
+    it = iter(experiments)
+    for exp in it:
+        chosen: GPUInfo | None = None
+        for g in gpus:
+            if g.reserved_mb > 0:
+                continue  # our own active reservation — slot taken
+            if g.total_mb <= 0:
+                continue
+            if (g.free_mb / g.total_mb) < idle_mem_fraction:
+                continue  # external process is using this GPU
+            chosen = g
+            break
+        if chosen is None:
+            queued.append(exp)
+            # All remaining experiments must also queue — no GPU left.
+            for rest in it:
+                queued.append(rest)
+            break
+        chosen.reserved_mb += 1  # mark slot taken for this pass
         exp.gpu_index = chosen.index
         assigned.append(exp)
 
@@ -861,7 +1067,16 @@ def main() -> int:
             return 2
         seen_names.add(session_name)
 
-        if args.mem_per_exp_mb is not None:
+        if args.one_per_gpu:
+            # In "one experiment per GPU" mode the memory estimate is
+            # irrelevant — we allocate entire GPUs, not fractions of
+            # them. Skip estimation so we never fail on a YAML that
+            # the heuristic can't parse. Use a sentinel value of 1
+            # (not 0) so the reservation ledger's sum-based "slot
+            # taken" check still fires during warmup.
+            mem_mb = 1
+            breakdown = {"one_per_gpu": True}
+        elif args.mem_per_exp_mb is not None:
             mem_mb = args.mem_per_exp_mb
             breakdown = {"override_mb": mem_mb}
         else:
@@ -893,6 +1108,18 @@ def main() -> int:
     if scheduling_enabled:
         gpus = detect_gpus(restrict_indices=restrict)
         if not gpus:
+            # --one-per-gpu is a HARD promise of bounded concurrency.
+            # Silently falling back to "launch everything in parallel"
+            # would violate the user's intent, so we refuse instead.
+            if args.one_per_gpu and not args.dry_run:
+                print(
+                    "[ERROR] --one-per-gpu requires at least one GPU visible "
+                    "to nvidia-smi, but none were detected. Install NVIDIA "
+                    "drivers or drop --one-per-gpu. (On macOS/CPU-only hosts, "
+                    "use --dry-run to preview.)",
+                    file=sys.stderr,
+                )
+                return 2
             print(
                 "[WARN] No GPUs detected (nvidia-smi missing or returned empty). "
                 "Scheduling disabled — all experiments will launch in parallel "
@@ -908,28 +1135,92 @@ def main() -> int:
     print(f"Conda env      : {args.conda_env}")
     print(f"Experiments    : {len(experiments)}")
     if scheduling_enabled:
-        print(
-            f"GPU scheduling : ENABLED (fraction={args.gpu_memory_fraction}, "
-            f"safety={args.mem_safety_factor})"
-        )
+        if args.one_per_gpu:
+            print(
+                f"GPU scheduling : ENABLED [one-per-gpu] "
+                f"(idle_threshold={args.gpu_idle_mem_fraction})"
+            )
+        else:
+            print(
+                f"GPU scheduling : ENABLED (fraction={args.gpu_memory_fraction}, "
+                f"safety={args.mem_safety_factor})"
+            )
         print(f"Detected GPUs  : {len(gpus)}")
         for g in gpus:
-            print(f"  GPU{g.index} ({g.name}): " f"{g.free_mb}/{g.total_mb} MiB free")
+            mark = ""
+            if args.one_per_gpu and g.total_mb > 0:
+                idle = (g.free_mb / g.total_mb) >= args.gpu_idle_mem_fraction
+                mark = "  [idle]" if idle else "  [busy]"
+            print(
+                f"  GPU{g.index} ({g.name}): "
+                f"{g.free_mb}/{g.total_mb} MiB free{mark}"
+            )
     else:
         print("GPU scheduling : DISABLED")
     print()
 
-    # ── Run the scheduler (or skip it) ─────────────────────────────────
-    if scheduling_enabled:
-        assigned, queued = schedule_assignments(
-            experiments, gpus, args.gpu_memory_fraction
+    # ── Pre-flight hard-bail ───────────────────────────────────────────
+    # If ANY experiment is too big for the largest visible GPU, refuse
+    # to start — otherwise --wait-for-gpu would spin forever on an
+    # impossible job, and without it we'd silently fan out only a
+    # subset while the oversized ones hit OOM at model-load time.
+    if scheduling_enabled and experiments and not args.one_per_gpu:
+        max_budget = max(
+            int(g.total_mb * args.gpu_memory_fraction) for g in gpus
         )
+        oversized = [e for e in experiments if e.mem_mb > max_budget]
+        if oversized:
+            print(
+                f"[ERROR] {len(oversized)} experiment(s) exceed the largest "
+                f"visible GPU's effective budget ({max_budget} MiB at "
+                f"fraction={args.gpu_memory_fraction}).",
+                file=sys.stderr,
+            )
+            for e in oversized:
+                print(
+                    f"  - {e.session_name}: needs {e.mem_mb} MiB",
+                    file=sys.stderr,
+                )
+            print(
+                "        Reduce model/batch/seq, raise --gpu-memory-fraction, "
+                "lower --mem-safety-factor, or override with --mem-per-exp-mb.",
+                file=sys.stderr,
+            )
+            return 2
+
+    # ── Run the scheduler (or skip it) ─────────────────────────────────
+    # Persistent reservation ledger — survives across passes so that
+    # newly-polled ``nvidia-smi`` snapshots during the warmup window
+    # (tmux launched but process not yet allocated) don't mis-report
+    # a GPU as empty and cause double-scheduling → OOM.
+    run_reservations: list[_Reservation] = []
+    if scheduling_enabled:
+        # First pass: starting state has no prior reservations, so the
+        # apply step is a no-op but kept for symmetry with the wait loop.
+        run_reservations = _apply_reservations(
+            gpus, run_reservations, time.time(), args.warmup_seconds
+        )
+        if args.one_per_gpu:
+            assigned, queued = schedule_one_per_gpu(
+                experiments, gpus, args.gpu_idle_mem_fraction
+            )
+        else:
+            assigned, queued = schedule_assignments(
+                experiments, gpus, args.gpu_memory_fraction
+            )
     else:
         assigned, queued = experiments, []
 
+    # In --one-per-gpu mode, implicitly keep the launcher alive so the
+    # queue drains to completion — the whole point of this mode is
+    # "wait for a GPU to free up before launching the next one".
+    wait_for_gpu = args.wait_for_gpu or (
+        scheduling_enabled and args.one_per_gpu and not args.dry_run
+    )
+
     # ── Launch loop: assigned experiments ──────────────────────────────
     stats = {"launched": 0, "skipped": 0, "error": 0, "dry-run": 0}
-    for exp in assigned:
+    for i, exp in enumerate(assigned):
         inner, log_path = build_inner_command(
             exp,
             train_script=train_script,
@@ -940,12 +1231,37 @@ def main() -> int:
         )
         status = launch_one(exp, inner, log_path, args)
         stats[status] += 1
+        # Commit a reservation for every successfully launched session.
+        # We use time.time() now so warmup is counted from the moment
+        # tmux returned, which matches when the child process begins
+        # its conda/python import chain.
+        if status == "launched" and exp.gpu_index is not None:
+            run_reservations.append(
+                _Reservation(
+                    gpu_index=exp.gpu_index,
+                    mem_mb=exp.mem_mb,
+                    committed_at=time.time(),
+                )
+            )
+            # Optional stagger: smear concurrent CUDA init cost so two
+            # large jobs don't both hit ``torch.cuda`` allocation at
+            # the exact same moment on the same device (driver-level
+            # contention has been observed on 7B+ models).
+            if (
+                args.launch_stagger > 0
+                and i < len(assigned) - 1
+                and not args.dry_run
+            ):
+                time.sleep(args.launch_stagger)
 
     # ── Overflow handling: --wait-for-gpu drains the queue ─────────────
-    if queued and scheduling_enabled and args.wait_for_gpu and not args.dry_run:
+    if queued and scheduling_enabled and wait_for_gpu and not args.dry_run:
+        mode_tag = "one-per-gpu" if args.one_per_gpu else "memory-pack"
         print(
-            f"\n[wait-for-gpu] {len(queued)} experiment(s) queued — polling "
-            f"nvidia-smi every {args.poll_interval}s until each fits.\n"
+            f"\n[wait-for-gpu:{mode_tag}] {len(queued)} experiment(s) queued — "
+            f"polling nvidia-smi every {args.poll_interval}s "
+            f"(warmup={args.warmup_seconds}s, "
+            f"stagger={args.launch_stagger}s).\n"
         )
         while queued:
             time.sleep(args.poll_interval)
@@ -957,23 +1273,58 @@ def main() -> int:
                     file=sys.stderr,
                 )
                 break
-            new_assigned, queued = schedule_assignments(
-                queued, fresh, args.gpu_memory_fraction
+            # CRITICAL: replay the reservation ledger onto the freshly
+            # polled GPU list BEFORE scheduling. This subtracts memory
+            # for any session we launched within the last
+            # --warmup-seconds whose allocation may not yet be visible
+            # in nvidia-smi, and drops stale reservations whose memory
+            # IS already reflected in the live numbers.
+            now = time.time()
+            run_reservations = _apply_reservations(
+                fresh, run_reservations, now, args.warmup_seconds
             )
+            if args.one_per_gpu:
+                new_assigned, queued = schedule_one_per_gpu(
+                    queued, fresh, args.gpu_idle_mem_fraction
+                )
+            else:
+                new_assigned, queued = schedule_assignments(
+                    queued, fresh, args.gpu_memory_fraction
+                )
             if not new_assigned:
                 # Nothing placed this round — print a one-liner and keep waiting.
-                top = queued[0]
-                headroom = max(
-                    (g.available_mb(args.gpu_memory_fraction) for g in fresh),
-                    default=0,
-                )
-                print(
-                    f"[wait-for-gpu] still waiting ({len(queued)} left; "
-                    f"largest GPU free={headroom} MiB vs need={top.mem_mb} MiB)",
-                    flush=True,
-                )
+                active_res = len(run_reservations)
+                if args.one_per_gpu:
+                    n_idle = sum(
+                        1
+                        for g in fresh
+                        if g.total_mb > 0
+                        and g.reserved_mb == 0
+                        and (g.free_mb / g.total_mb) >= args.gpu_idle_mem_fraction
+                    )
+                    print(
+                        f"[wait-for-gpu:one-per-gpu] still waiting "
+                        f"({len(queued)} left; idle_gpus={n_idle}; "
+                        f"active_reservations={active_res})",
+                        flush=True,
+                    )
+                else:
+                    top = queued[0]
+                    headroom = max(
+                        (
+                            g.available_mb(args.gpu_memory_fraction)
+                            for g in fresh
+                        ),
+                        default=0,
+                    )
+                    print(
+                        f"[wait-for-gpu] still waiting ({len(queued)} left; "
+                        f"largest GPU avail={headroom} MiB vs need={top.mem_mb} "
+                        f"MiB; active_reservations={active_res})",
+                        flush=True,
+                    )
                 continue
-            for exp in new_assigned:
+            for j, exp in enumerate(new_assigned):
                 inner, log_path = build_inner_command(
                     exp,
                     train_script=train_script,
@@ -984,6 +1335,19 @@ def main() -> int:
                 )
                 status = launch_one(exp, inner, log_path, args)
                 stats[status] += 1
+                if status == "launched" and exp.gpu_index is not None:
+                    run_reservations.append(
+                        _Reservation(
+                            gpu_index=exp.gpu_index,
+                            mem_mb=exp.mem_mb,
+                            committed_at=time.time(),
+                        )
+                    )
+                    if (
+                        args.launch_stagger > 0
+                        and j < len(new_assigned) - 1
+                    ):
+                        time.sleep(args.launch_stagger)
 
     # ── Summary ────────────────────────────────────────────────────────
     if args.dry_run:
@@ -992,9 +1356,14 @@ def main() -> int:
             f"{len(queued)} would be queued."
         )
         if queued:
-            print("Queued (would not fit with current free memory):")
-            for exp in queued:
-                print(f"  - {exp.session_name} (needs {exp.mem_mb} MiB)")
+            if args.one_per_gpu:
+                print("Queued (no idle GPU currently available):")
+                for exp in queued:
+                    print(f"  - {exp.session_name}")
+            else:
+                print("Queued (would not fit with current free memory):")
+                for exp in queued:
+                    print(f"  - {exp.session_name} (needs {exp.mem_mb} MiB)")
     else:
         print(
             f"Launched: {stats['launched']} | Skipped: {stats['skipped']} | "
@@ -1002,10 +1371,20 @@ def main() -> int:
             f"Total: {len(experiments)}"
         )
         if queued:
-            print("\nUnlaunched experiments (no GPU had enough free memory):")
-            for exp in queued:
-                print(f"  - {exp.session_name} (needs {exp.mem_mb} MiB)")
-            print("  → re-run with --wait-for-gpu to drain as memory frees.")
+            if args.one_per_gpu:
+                print(
+                    "\nUnlaunched experiments (no idle GPU — wait loop "
+                    "exited early, e.g. nvidia-smi became unavailable):"
+                )
+                for exp in queued:
+                    print(f"  - {exp.session_name}")
+            else:
+                print(
+                    "\nUnlaunched experiments (no GPU had enough free memory):"
+                )
+                for exp in queued:
+                    print(f"  - {exp.session_name} (needs {exp.mem_mb} MiB)")
+                print("  → re-run with --wait-for-gpu to drain as memory frees.")
         print(f"\nLogs directory: {log_dir}")
         if stats["launched"] > 0:
             print(
