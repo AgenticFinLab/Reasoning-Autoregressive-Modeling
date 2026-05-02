@@ -101,7 +101,7 @@ model:
 # ordering_loss_type      : Ordering loss variant (margin = hinge-based).
 # -----------------------------------------------------------------------------
 training:
-  batch_size: 1
+  batch_size: 4
   num_epochs: 10
   learning_rate: 0.00005
   weight_decay: 0.01

@@ -117,6 +117,32 @@ def save_loss_prepare(module: str, data: dict) -> None:
         json.dump(data, f, indent=2, default=str)
 
 
+# ─── Device probing ─────────────────────────────────────────────────────────
+
+
+def _pick_device_fresh() -> str:
+    """Re-probe the freest GPU; call this BEFORE each config run.
+
+    A single upfront ``get_device('auto')`` would pin us to one GPU for
+    the entire batch, which is bad when:
+
+      * the previous config's ``del builder + empty_cache()`` hasn't
+        yet reflected in CUDA's free-memory counters, or
+      * another process is holding memory on what was initially the
+        freest GPU, or
+      * allocator fragmentation on one GPU pushes us to a fresher one.
+
+    We therefore synchronize + empty_cache, then let ``get_device('auto')``
+    (which internally uses ``torch.cuda.mem_get_info``) pick the GPU with
+    the most free memory right now.
+    """
+    if torch.cuda.is_available():
+        # Finish any pending ops so mem_get_info reflects real free VRAM.
+        torch.cuda.synchronize()
+        torch.cuda.empty_cache()
+    return str(get_device("auto"))
+
+
 # ─── Batch sampling ──────────────────────────────────────────────────────────
 
 
@@ -335,13 +361,16 @@ def main():
         sys.exit(1)
 
     # ---- Device + seeding (standard setup_environment path) ----
+    # Initial probe is only for setup_environment (which wants *a*
+    # device). The actual device used for each config is re-probed
+    # just before that config runs (see _pick_device_fresh() below).
     first_seed = int(loaded[0][1]["environment"]["seed"])
     setup_environment({"seed": first_seed, "device": "auto"})
-    device = str(get_device("auto"))
+    initial_device = str(get_device("auto"))
 
     logger.info(
-        "Device=%s | module=%s | dataset=%s | num_batches=%d | batch_size_groups=%s | %d config(s)",
-        device,
+        "Initial device=%s | module=%s | dataset=%s | num_batches=%d | batch_size_groups=%s | %d config(s)",
+        initial_device,
         module,
         dataset,
         num_batches,
@@ -390,7 +419,19 @@ def main():
                 n_skip += 1
                 continue
 
-            logger.info("[RUN ] %s (bs=%d, n=%d)", key, bs, len(shared_batches))
+            # Re-probe the freest GPU before every config run: previous
+            # runs may not yet have released memory, or another process
+            # may have grabbed it. This lets us hop to a fresher GPU
+            # whenever one is available.
+            current_device = _pick_device_fresh()
+
+            logger.info(
+                "[RUN ] %s (device=%s, bs=%d, n=%d)",
+                key,
+                current_device,
+                bs,
+                len(shared_batches),
+            )
 
             # Cheap per-config re-seed without re-probing the device.
             seed = int(config["environment"]["seed"])
@@ -400,9 +441,13 @@ def main():
 
             try:
                 if module == "builder":
-                    result = run_builder_n_batches(config, device, shared_batches)
+                    result = run_builder_n_batches(
+                        config, current_device, shared_batches
+                    )
                 else:
-                    result = run_predictor_n_batches(config, device, shared_batches)
+                    result = run_predictor_n_batches(
+                        config, current_device, shared_batches
+                    )
             except Exception as e:
                 logger.error("Failed on %s: %s", key, e, exc_info=True)
                 n_fail += 1
