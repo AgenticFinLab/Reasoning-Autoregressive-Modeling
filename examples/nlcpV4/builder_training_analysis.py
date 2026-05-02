@@ -1,13 +1,29 @@
 """Visualize Builder training losses and learning rate from training logs.
 
 Usage:
-    python3 examples/nlcpV4/builder_training_analysis.py -c configs/nlcpV4/GSM8K/train_builder_Qwen2.5-0.5B_6level.yml
+    # Single experiment
+    python3 examples/nlcpV4/builder_training_analysis.py \
+        -m builder -d GSM8K -e Qwen2.5-0.5B_6level
+
+    # All experiments for a module + dataset
+    python3 examples/nlcpV4/builder_training_analysis.py \
+        -m builder -d GSM8K -e all
+
+Arguments:
+    -m / --module      Module name: 'builder' or 'predictor'.
+    -d / --dataset     Dataset name (directory under configs/nlcpV4/).
+    -e / --experiment  Config stem after 'train_{module}_'
+                       (e.g. 'Qwen2.5-0.5B_6level') or 'all' to process
+                       every matching config under the dataset.
 
 Behavior:
-    - Loads training_history.json, terminal_output.jsonl, eval_history.json
-    - If eval_history exists: overlays eval curves (quick/full) on each loss subplot
-    - If eval_history is empty: loads best checkpoint, runs full evaluation on
-      test set, and plots the result as single-point markers on each subplot
+    For each selected config:
+    1. If log directory / training_history.json is missing -> skip with
+       [SKIP NO-DATA].
+    2. If all analysis outputs already exist -> skip with [SKIP EXISTS].
+    3. Otherwise run the analysis: overlay eval curves (quick/full), or
+       fall back to checkpoint eval when eval_history.json is empty.
+    A compact status table is printed at the end.
 """
 
 import argparse
@@ -31,13 +47,69 @@ from ram.utils import load_config
 
 logger = logging.getLogger(__name__)
 
+# --- Batch-mode constants ------------------------------------------
+CONFIGS_ROOT = PROJECT_ROOT / "configs" / "nlcpV4"
+VALID_MODULES = {"builder", "predictor"}
+ALL_KEYWORD = "all"
+# The three PNGs produced by a successful analysis run. Presence of ALL
+# three is treated as "already analyzed".
+ANALYSIS_OUTPUTS = (
+    "training_losses.png",
+    "training_losses_overlay.png",
+    "eval_losses_overlay.png",
+)
+
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Analyze Builder training logs")
+    parser = argparse.ArgumentParser(
+        description="Analyze Builder training logs (batch mode)",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     parser.add_argument(
-        "-c", "--config", type=str, required=True, help="Path to YAML config file"
+        "-m",
+        "--module",
+        required=True,
+        choices=sorted(VALID_MODULES),
+        help="Module name: 'builder' or 'predictor'.",
+    )
+    parser.add_argument(
+        "-d",
+        "--dataset",
+        required=True,
+        help="Dataset name (directory under configs/nlcpV4/).",
+    )
+    parser.add_argument(
+        "-e",
+        "--experiment",
+        required=True,
+        help=(
+            "Config stem after 'train_{module}_' (e.g. 'Qwen2.5-0.5B_6level'), "
+            "or 'all' to process every matching config under the dataset."
+        ),
     )
     return parser.parse_args()
+
+
+def discover_configs(module: str, dataset: str, experiment: str) -> list[Path]:
+    """Resolve (-m, -d, -e) into a list of config paths.
+
+    Config file path convention:
+        configs/nlcpV4/{dataset}/train_{module}_{experiment}.yml
+    """
+    dataset_dir = CONFIGS_ROOT / dataset
+    if not dataset_dir.is_dir():
+        print(f"[ERROR] Dataset dir not found: {dataset_dir}")
+        return []
+
+    prefix = f"train_{module}_"
+    if experiment == ALL_KEYWORD:
+        return sorted(dataset_dir.glob(f"{prefix}*.yml"))
+
+    p = dataset_dir / f"{prefix}{experiment}.yml"
+    if not p.is_file():
+        print(f"[ERROR] Config file not found: {p}")
+        return []
+    return [p]
 
 
 def smooth(values, window):
@@ -289,12 +361,12 @@ def _plot_eval_total_on_ax(
         )
 
 
-def main():
-    args = parse_args()
+def _run_builder_analysis(config_path: Path) -> None:
+    """Run the full analysis for a single config and write 3 PNGs to log_dir.
 
-    config_path = Path(args.config)
-    if not config_path.is_absolute():
-        config_path = PROJECT_ROOT / config_path
+    Precondition: caller has already verified that training_history.json
+    exists under config.log.log_path.
+    """
     config = load_config(str(config_path))
 
     log_dir = Path(config["log"]["log_path"])
@@ -588,6 +660,116 @@ def main():
     fig3.savefig(log_dir / "eval_losses_overlay.png", dpi=150, bbox_inches="tight")
     print("Saved to %s" % log_dir)
 
+    # Release matplotlib resources between analyses in batch mode.
+    plt.close(fig)
+    plt.close(fig2)
+    plt.close(fig3)
+
+
+def analyze_one(config_path: Path) -> tuple[str, str]:
+    """Analyze a single config. Returns (status, detail) tuple.
+
+    status is one of:
+      - 'analyzed'        : analysis ran and 3 PNGs were written.
+      - 'skip_no_data'    : training_history.json missing (training not started
+                            or log_dir absent); skipped.
+      - 'skip_exists'     : all 3 output PNGs already exist; skipped.
+      - 'error'           : unexpected error (detail contains the message).
+    """
+    try:
+        config = load_config(str(config_path))
+    except Exception as exc:  # noqa: BLE001
+        return "error", f"load_config failed: {exc}"
+
+    log_dir = Path(config["log"]["log_path"])
+    if not log_dir.is_absolute():
+        log_dir = PROJECT_ROOT / log_dir
+
+    training_history = log_dir / "training_history.json"
+    if not training_history.is_file():
+        return "skip_no_data", f"training_history.json missing at {log_dir}"
+
+    if all((log_dir / name).is_file() for name in ANALYSIS_OUTPUTS):
+        return "skip_exists", f"all outputs already exist at {log_dir}"
+
+    try:
+        _run_builder_analysis(config_path)
+    except Exception as exc:  # noqa: BLE001
+        # Close any half-drawn figures to avoid leaks in batch mode.
+        plt.close("all")
+        return "error", f"{type(exc).__name__}: {exc}"
+
+    return "analyzed", f"wrote 3 PNGs to {log_dir}"
+
+
+def _print_summary(rows: list[tuple[str, str, str]]) -> None:
+    """Print a compact status table. rows = [(status, config_stem, detail), ...]."""
+    if not rows:
+        print("[SUMMARY] No configs processed.")
+        return
+
+    status_w = max(len("Status"), *(len(r[0]) for r in rows))
+    name_w = max(len("Config"), *(len(r[1]) for r in rows))
+
+    sep = "-" * (status_w + name_w + 5)
+    print("=" * (status_w + name_w + 5))
+    print("Summary")
+    print("=" * (status_w + name_w + 5))
+    print(f"{'Status':<{status_w}} | {'Config':<{name_w}}")
+    print(sep)
+    for status, name, _detail in rows:
+        print(f"{status:<{status_w}} | {name:<{name_w}}")
+    print(sep)
+
+    counts: dict[str, int] = {}
+    for status, _name, _detail in rows:
+        counts[status] = counts.get(status, 0) + 1
+    parts = [f"{k}={v}" for k, v in sorted(counts.items())]
+    print("Totals: " + "  ".join(parts))
+
+
+def main():
+    args = parse_args()
+    module: str = args.module
+    dataset: str = args.dataset
+    experiment: str = args.experiment
+
+    configs = discover_configs(module, dataset, experiment)
+    if not configs:
+        return 1
+
+    print(
+        f"[ANALYZE] module={module} dataset={dataset} "
+        f"experiment={experiment}  ({len(configs)} config file(s))"
+    )
+    for p in configs:
+        print(
+            f"  - {p.relative_to(PROJECT_ROOT) if p.is_relative_to(PROJECT_ROOT) else p}"
+        )
+    print()
+
+    rows: list[tuple[str, str, str]] = []
+    for cfg_path in configs:
+        print("=" * 70)
+        print(f"[CONFIG] {cfg_path.name}")
+        print("=" * 70)
+        status, detail = analyze_one(cfg_path)
+        if status == "analyzed":
+            print(f"[OK]   {detail}")
+        elif status == "skip_no_data":
+            print(f"[SKIP NO-DATA] {detail}")
+        elif status == "skip_exists":
+            print(f"[SKIP EXISTS]  {detail}")
+        else:
+            print(f"[ERROR] {detail}")
+        rows.append((status, cfg_path.stem, detail))
+        print()
+
+    _print_summary(rows)
+    # Non-zero exit if any config errored out, so CI can catch it.
+    any_error = any(r[0] == "error" for r in rows)
+    return 1 if any_error else 0
+
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
