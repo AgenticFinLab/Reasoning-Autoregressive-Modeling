@@ -25,9 +25,11 @@ resumes from a checkpoint. Three concerns are covered:
    history rather than clobbering it when the first epoch-end rewrite
    fires.
 
-The module is intentionally free of any swanlab or torch imports so it
-can be unit-tested and imported by the launcher without pulling heavy
-dependencies.
+The module is intentionally free of any swanlab or top-level torch
+imports so it can be unit-tested and imported by the launcher without
+pulling heavy dependencies. The schema-validation peek inside
+``find_latest_checkpoint`` lazy-imports torch ONLY when an actual
+resume is performed (never during launcher import).
 """
 
 from __future__ import annotations
@@ -35,6 +37,7 @@ from __future__ import annotations
 import datetime
 import json
 import re
+import sys
 from pathlib import Path
 from typing import Optional
 
@@ -45,6 +48,67 @@ SWANLAB_META_FILENAME = "swanlab.json"
 # ``train_builder.py``. Auto-discovery keys off this suffix so a new
 # checkpoint naming variant only needs to keep the trailing tag.
 _CKPT_PATTERN = re.compile(r"^checkpoint.*-epoch(\d+)-step(\d+)\.pt$")
+
+# Keys every nlcpV4 trainer-written checkpoint MUST carry for
+# ``load_checkpoint`` to be able to fully restore (model + optimizer +
+# scheduler + position). ``loss`` is intentionally NOT in this list:
+# legacy ``checkpoint_best_eval-*.pt`` files (commit 1a510ef) wrote
+# only ``eval_loss``, and ``load_checkpoint`` already accepts either
+# key with an ``inf`` fallback. The schema-validation peek only
+# rejects checkpoints that cannot be RESTORED at all.
+_REQUIRED_CKPT_KEYS: tuple[str, ...] = (
+    "model_state_dict",
+    "optimizer_state_dict",
+    "scheduler_state_dict",
+    "epoch",
+    "step",
+)
+
+
+def _is_schema_valid_checkpoint(
+    path: Path,
+    required_keys: tuple[str, ...] = _REQUIRED_CKPT_KEYS,
+) -> bool:
+    """Peek a torch checkpoint and return True iff all required keys exist.
+
+    Lazy-imports torch so the launcher (which only needs
+    ``CheckpointNotFoundError``) does not pay the torch import cost.
+    A fully unloadable / malformed pickle is treated as invalid (False)
+    and a one-line warning is emitted on stderr; the caller is expected
+    to skip and try the next-best candidate.
+
+    Note: torch.load has no incremental peek API, so this fully
+    materialises the dict (mapped to CPU). For the eventually-chosen
+    file this means a ~2x load cost on resume, which is acceptable for
+    a one-time event; rejected files cost only their single peek.
+    """
+    import torch  # local: keep module import cheap for the launcher
+
+    try:
+        ckpt = torch.load(path, map_location="cpu")
+    except Exception as exc:  # noqa: BLE001 — any load failure = invalid
+        print(
+            f"[resume] WARN: failed to peek {path.name}: {exc!r} "
+            f"— treating as schema-incompatible.",
+            file=sys.stderr,
+        )
+        return False
+    if not isinstance(ckpt, dict):
+        print(
+            f"[resume] WARN: {path.name} is not a dict checkpoint "
+            f"(got {type(ckpt).__name__}) — skipping.",
+            file=sys.stderr,
+        )
+        return False
+    missing = [k for k in required_keys if k not in ckpt]
+    if missing:
+        print(
+            f"[resume] WARN: {path.name} missing required keys "
+            f"{missing} — skipping (likely legacy / non-trainer file).",
+            file=sys.stderr,
+        )
+        return False
+    return True
 
 
 class CheckpointNotFoundError(FileNotFoundError):
@@ -72,11 +136,21 @@ def find_latest_checkpoint(checkpoint_dir: Path) -> Path:
     happens to carry — a crash right after a best_eval save is a
     perfectly valid anchor for the next run.
 
-    Raises ``CheckpointNotFoundError`` if the directory is missing or
-    contains zero matching files. The caller (``train_builder``) is
-    expected to let this propagate — a fail-loud error is strictly
-    better than a silent fresh-start that clobbers the operator's
-    expectation of continuity.
+    Schema-validated walk: candidates are visited newest → oldest and
+    each one is peeked via ``_is_schema_valid_checkpoint``. Files that
+    cannot be loaded as a dict, or that are missing required keys
+    (``model_state_dict`` / ``optimizer_state_dict`` /
+    ``scheduler_state_dict`` / ``epoch`` / ``step``), are skipped
+    with a stderr WARN and the next-best candidate is tried. This
+    keeps resume robust to historical schema drift — e.g. legacy
+    ``checkpoint_best_eval-*.pt`` written by ``commit 1a510ef`` had a
+    different (eval-only) shape and would otherwise crash the loader.
+
+    Raises ``CheckpointNotFoundError`` if the directory is missing,
+    contains zero matching files, OR every matching file fails the
+    schema check. Fail-loud is strictly better than a silent
+    fresh-start that clobbers the operator's expectation of
+    continuity.
     """
     if not checkpoint_dir.exists():
         raise CheckpointNotFoundError(
@@ -97,12 +171,34 @@ def find_latest_checkpoint(checkpoint_dir: Path) -> Path:
             f"run has not produced any checkpoints yet, or the directory "
             f"is misconfigured in YAML (log.checkpoint_path)."
         )
-    # candidates elements are (step, epoch, path); max() picks the
-    # highest step, tiebreak on epoch. We do not break ties on the
-    # filename itself because lexicographic order of tags has no
-    # meaningful ranking (best vs clean vs epoch-end).
+    # candidates elements are (step, epoch, path); sort ascending by
+    # (step, epoch). We do not break ties on the filename itself
+    # because lexicographic order of tags has no meaningful ranking
+    # (best vs clean vs epoch-end).
     candidates.sort()
-    return candidates[-1][2]
+    # Walk newest → oldest; first SCHEMA-VALID candidate wins. This
+    # shields resume from heterogeneous schema drift: e.g. a legacy
+    # ``checkpoint_best_eval-*.pt`` written by an older code revision
+    # (lacking model/optimizer/scheduler state in the unified shape)
+    # is silently passed over in favour of the next-best file.
+    skipped: list[Path] = []
+    for _step, _epoch, path in reversed(candidates):
+        if _is_schema_valid_checkpoint(path):
+            if skipped:
+                print(
+                    f"[resume] picked {path.name} after skipping "
+                    f"{len(skipped)} schema-incompatible candidate(s): "
+                    f"{[p.name for p in skipped]}",
+                    file=sys.stderr,
+                )
+            return path
+        skipped.append(path)
+    raise CheckpointNotFoundError(
+        f"--resume requested but no SCHEMA-VALID checkpoint was found in "
+        f"{checkpoint_dir}. {len(skipped)} candidate(s) matched the name "
+        f"pattern but all lacked required keys {_REQUIRED_CKPT_KEYS}: "
+        f"{[p.name for p in skipped]}."
+    )
 
 
 # ── Part-suffix rotation ──────────────────────────────────────────────

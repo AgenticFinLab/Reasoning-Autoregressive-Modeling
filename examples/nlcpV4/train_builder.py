@@ -360,18 +360,32 @@ def load_checkpoint(
 ) -> tuple[int, int, float, float]:
     """Load a checkpoint and return ``(epoch, step, loss, best_eval_loss)``.
 
-    ``best_eval_loss`` is a post-hoc addition; checkpoints produced
-    before the field existed load without error and surface
-    ``float('inf')`` for it.
+    Schema tolerance:
+      * ``best_eval_loss`` is a post-hoc addition; checkpoints produced
+        before the field existed load without error and surface
+        ``float('inf')`` for it.
+      * ``loss`` is the running train-loss anchor used solely to seed
+        ``best_loss`` after resume. Legacy best-eval checkpoints
+        (commit ``1a510ef``) wrote only ``eval_loss`` and no ``loss``;
+        we accept either key, and ultimately fall back to ``inf`` so
+        the next batch trivially becomes the new best-train baseline.
+        This keeps resume robust to historical schema drift without
+        masking real corruption (state-dict keys are still strict).
     """
     checkpoint = torch.load(checkpoint_path, map_location="cpu")
     builder.load_state_dict(checkpoint["model_state_dict"])
     optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
     scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+    # Defensive .get for ``loss``: legacy ``checkpoint_best_eval-*.pt``
+    # files wrote ``eval_loss`` instead. Either is acceptable as a
+    # best_loss seed; absent both, ``inf`` is the correct neutral.
+    loss_value = checkpoint.get(
+        "loss", checkpoint.get("eval_loss", float("inf"))
+    )
     return (
         int(checkpoint["epoch"]),
         int(checkpoint["step"]),
-        float(checkpoint["loss"]),
+        float(loss_value),
         float(checkpoint.get("best_eval_loss", float("inf"))),
     )
 
