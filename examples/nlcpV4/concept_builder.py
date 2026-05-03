@@ -89,17 +89,10 @@ from typing import List, Optional, Union
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from peft import LoraConfig, get_peft_model
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from nlcpV4.data_loader import BuilderInput
-
-try:
-    from peft import LoraConfig, get_peft_model
-
-    _PEFT_AVAILABLE = True
-except ImportError:
-    _PEFT_AVAILABLE = False
-
 
 # =========================================================================
 # Output Dataclasses — structured outputs for each Builder stage
@@ -568,11 +561,6 @@ class ConceptPyramidBuilder(nn.Module):
         #   base model weights to remain frozen while still adapting.
         lora_cfg = train_rm_cfg["lora"]
         if lora_cfg is not None:
-            if not _PEFT_AVAILABLE:
-                raise ImportError(
-                    "PEFT library is required for LoRA fine-tuning. "
-                    "Install with: pip install peft"
-                )
             lora_config = LoraConfig(
                 r=lora_cfg["r"],
                 lora_alpha=lora_cfg["lora_alpha"],

@@ -143,6 +143,7 @@ Conda environment:
 """
 
 import argparse
+import json
 import re
 import shlex
 import shutil
@@ -151,6 +152,8 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
+
+import yaml
 
 # ── Project paths ────────────────────────────────────────────────────
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -164,6 +167,7 @@ VALID_MODULES = ("builder", "predictor")
 
 
 def parse_args() -> argparse.Namespace:
+    """Parse CLI arguments for the experiment launcher."""
     parser = argparse.ArgumentParser(
         description=(
             "Launch multiple train_{module}.py experiments in parallel tmux "
@@ -401,15 +405,13 @@ def _conda_base() -> Path:
 
 def _conda_env_exists(env_name: str) -> bool:
     """True iff ``conda env list`` contains an env named exactly ``env_name``."""
-    import json as _json
-
     result = subprocess.run(
         ["conda", "env", "list", "--json"],
         capture_output=True,
         text=True,
         check=True,
     )
-    data = _json.loads(result.stdout)
+    data = json.loads(result.stdout)
     for env_path in data.get("envs", []):
         if Path(env_path).name == env_name:
             return True
@@ -552,7 +554,10 @@ class _Reservation:
 
     gpu_index: int
     mem_mb: int
-    committed_at: float  # time.time() when the reservation was made
+    # Wall-clock ``time.time()`` at the moment the reservation was made;
+    # used together with ``warmup_seconds`` to decide when the reservation
+    # has "settled" and can be dropped in favour of live nvidia-smi data.
+    committed_at: float
 
 
 def _apply_reservations(
@@ -651,8 +656,6 @@ def estimate_experiment_memory_mb(
 
     Returns (total_mb_int, breakdown_dict) so callers can print details.
     """
-    import yaml
-
     with open(config_path, "r", encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
 
@@ -664,13 +667,13 @@ def estimate_experiment_memory_mb(
     params_b = parse_model_params_b(reason_cfg["reason_model_name"])
     params = params_b * 1e9
 
-    dtype = reason_cfg.get("torch_dtype", "float32")
+    dtype = reason_cfg["torch_dtype"]
     bytes_per_elem = 2 if dtype in ("bfloat16", "float16") else 4
 
     # LoRA / frozen backbone means no full-model grads / Adam state.
-    train_rm = training_cfg.get("reason_model", {}) or {}
-    lora_cfg = train_rm.get("lora")
-    freeze = bool(train_rm.get("freeze", False))
+    train_rm = training_cfg["reason_model"]
+    lora_cfg = train_rm["lora"]
+    freeze = bool(train_rm["freeze"])
     lora_or_frozen = (lora_cfg is not None) or freeze
 
     weights_mb = params * bytes_per_elem / 1e6
@@ -678,9 +681,9 @@ def estimate_experiment_memory_mb(
 
     # Activation pressure from the autoregressive reasoning forward:
     # [Q | concepts | S] sequence through the full reason_model.
-    batch_size = int(training_cfg.get("batch_size", 8))
-    max_seq_len = int(pyramid_cfg.get("max_seq_len", 1024))
-    hidden_dim = int(pyramid_cfg.get("hidden_dim", 1024))
+    batch_size = int(training_cfg["batch_size"])
+    max_seq_len = int(pyramid_cfg["max_seq_len"])
+    hidden_dim = int(pyramid_cfg["hidden_dim"])
     activation_mb = batch_size * max_seq_len * hidden_dim * bytes_per_elem * 30 / 1e6
 
     base_mb = weights_mb + optimizer_mb + activation_mb
@@ -804,11 +807,13 @@ def schedule_one_per_gpu(
         chosen: GPUInfo | None = None
         for g in gpus:
             if g.reserved_mb > 0:
-                continue  # our own active reservation — slot taken
+                # Our own active reservation — slot taken.
+                continue
             if g.total_mb <= 0:
                 continue
             if (g.free_mb / g.total_mb) < idle_mem_fraction:
-                continue  # external process is using this GPU
+                # External process is using this GPU.
+                continue
             chosen = g
             break
         if chosen is None:
@@ -817,7 +822,9 @@ def schedule_one_per_gpu(
             for rest in it:
                 queued.append(rest)
             break
-        chosen.reserved_mb += 1  # mark slot taken for this pass
+        # Mark the slot taken for this pass so a second experiment in
+        # the same scheduling round cannot claim the same GPU.
+        chosen.reserved_mb += 1
         exp.gpu_index = chosen.index
         assigned.append(exp)
 
@@ -862,6 +869,7 @@ def sanitize_session_name(name: str) -> str:
 
 
 def tmux_session_exists(session_name: str) -> bool:
+    """True iff a tmux session with this exact name is currently running."""
     result = subprocess.run(
         ["tmux", "has-session", "-t", f"={session_name}"],
         stdout=subprocess.DEVNULL,
@@ -871,6 +879,7 @@ def tmux_session_exists(session_name: str) -> bool:
 
 
 def kill_tmux_session(session_name: str) -> None:
+    """Terminate the named tmux session; no-op if it does not exist."""
     subprocess.run(
         ["tmux", "kill-session", "-t", session_name],
         stdout=subprocess.DEVNULL,
@@ -998,6 +1007,7 @@ def launch_one(
 
 
 def main() -> int:
+    """CLI entry point: parse args, schedule experiments, launch tmux sessions."""
     args = parse_args()
 
     # ── Validate tmux availability ─────────────────────────────────────
@@ -1165,9 +1175,7 @@ def main() -> int:
     # impossible job, and without it we'd silently fan out only a
     # subset while the oversized ones hit OOM at model-load time.
     if scheduling_enabled and experiments and not args.one_per_gpu:
-        max_budget = max(
-            int(g.total_mb * args.gpu_memory_fraction) for g in gpus
-        )
+        max_budget = max(int(g.total_mb * args.gpu_memory_fraction) for g in gpus)
         oversized = [e for e in experiments if e.mem_mb > max_budget]
         if oversized:
             print(
@@ -1247,11 +1255,7 @@ def main() -> int:
             # large jobs don't both hit ``torch.cuda`` allocation at
             # the exact same moment on the same device (driver-level
             # contention has been observed on 7B+ models).
-            if (
-                args.launch_stagger > 0
-                and i < len(assigned) - 1
-                and not args.dry_run
-            ):
+            if args.launch_stagger > 0 and i < len(assigned) - 1 and not args.dry_run:
                 time.sleep(args.launch_stagger)
 
     # ── Overflow handling: --wait-for-gpu drains the queue ─────────────
@@ -1311,10 +1315,7 @@ def main() -> int:
                 else:
                     top = queued[0]
                     headroom = max(
-                        (
-                            g.available_mb(args.gpu_memory_fraction)
-                            for g in fresh
-                        ),
+                        (g.available_mb(args.gpu_memory_fraction) for g in fresh),
                         default=0,
                     )
                     print(
@@ -1343,10 +1344,7 @@ def main() -> int:
                             committed_at=time.time(),
                         )
                     )
-                    if (
-                        args.launch_stagger > 0
-                        and j < len(new_assigned) - 1
-                    ):
+                    if args.launch_stagger > 0 and j < len(new_assigned) - 1:
                         time.sleep(args.launch_stagger)
 
     # ── Summary ────────────────────────────────────────────────────────
@@ -1379,9 +1377,7 @@ def main() -> int:
                 for exp in queued:
                     print(f"  - {exp.session_name}")
             else:
-                print(
-                    "\nUnlaunched experiments (no GPU had enough free memory):"
-                )
+                print("\nUnlaunched experiments (no GPU had enough free memory):")
                 for exp in queued:
                     print(f"  - {exp.session_name} (needs {exp.mem_mb} MiB)")
                 print("  → re-run with --wait-for-gpu to drain as memory frees.")

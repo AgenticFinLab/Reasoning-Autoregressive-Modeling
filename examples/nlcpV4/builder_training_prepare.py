@@ -109,6 +109,11 @@ def _apply_rcparams() -> None:
 # Data loading
 # -----------------------------------------------------------------------------
 def parse_key(key: str) -> dict | None:
+    """Split a ``<dataset>/train_<module>_<model>_<level>level`` key into parts.
+
+    Returns a dict with ``dataset``, ``module``, ``model``, ``level`` (int),
+    or ``None`` if the key does not match the expected pattern.
+    """
     m = KEY_PATTERN.match(key)
     if m is None:
         return None
@@ -406,6 +411,7 @@ def plot_heatmap_grid(
 # CSV + summary text
 # -----------------------------------------------------------------------------
 def write_csv(entries: list[dict], output_path: Path) -> None:
+    """Dump recommended per-config weights to a CSV side-car file."""
     header = [
         "key",
         "dataset",
@@ -447,6 +453,7 @@ def write_summary(
     target: float,
     output_path: Path,
 ) -> None:
+    """Write a human-readable text summary of the weight recommendation."""
     lines: list[str] = []
     lines.append("Builder Loss-Weight Recommendation Summary")
     lines.append("=" * 72)
@@ -512,6 +519,7 @@ def write_summary(
 # CLI
 # -----------------------------------------------------------------------------
 def parse_args():
+    """Parse CLI arguments for the weight-recommendation script."""
     parser = argparse.ArgumentParser(
         description=(
             "Analyze Loss_prepare.json: compare losses across models/levels "
@@ -554,6 +562,7 @@ def parse_args():
 
 
 def main():
+    """CLI entry point: analyse Loss_prepare.json and emit plots + CSV."""
     args = parse_args()
     input_path = Path(args.input)
     output_dir = Path(args.output_dir)

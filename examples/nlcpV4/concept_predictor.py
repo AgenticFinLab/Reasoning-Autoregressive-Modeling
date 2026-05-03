@@ -77,15 +77,8 @@ from typing import Dict, List, Optional, Tuple
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from peft import LoraConfig, get_peft_model
 from transformers import AutoModelForCausalLM, AutoTokenizer
-
-try:
-    from peft import LoraConfig, get_peft_model
-
-    _PEFT_AVAILABLE = True
-except ImportError:
-    _PEFT_AVAILABLE = False
-
 
 # =========================================================================
 # Output Dataclass
@@ -374,10 +367,6 @@ class ConceptPredictor(nn.Module):
         # Optional LoRA
         lora_cfg = train_cfg["lora"]
         if lora_cfg is not None:
-            if not _PEFT_AVAILABLE:
-                raise ImportError(
-                    "PEFT library is required for LoRA. Install with: pip install peft"
-                )
             lora_config = LoraConfig(
                 r=lora_cfg["r"],
                 lora_alpha=lora_cfg["lora_alpha"],

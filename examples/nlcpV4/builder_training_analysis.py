@@ -45,15 +45,16 @@ from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
+import torch
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(PROJECT_ROOT / "examples"))
 
-# Lightweight imports only. Heavy imports (torch, ConceptPyramidBuilder,
-# NLCPV4DataLoader, evaluate_builder) are deferred into `run_checkpoint_eval`
-# so that analysis with an existing eval_history.json does not require
-# torch / transformers / swanlab / nlcpV4 package dependencies.
+from lmbase.utils.env_tools import get_device
+from nlcpV4.concept_builder import ConceptPyramidBuilder
+from nlcpV4.data_loader import NLCPV4DataLoader
+from nlcpV4.eval_builder import evaluate_builder
 from ram.utils import load_config
 
 logger = logging.getLogger(__name__)
@@ -77,6 +78,7 @@ ANALYSIS_OUTPUTS = (
 
 
 def parse_args():
+    """Parse CLI arguments for the training-analysis script."""
     parser = argparse.ArgumentParser(
         description="Analyze Builder training logs (batch mode)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -250,14 +252,6 @@ def run_checkpoint_eval(config: dict, project_root: Path) -> dict | None:
     Returns averaged loss dict (keys: total, recon, ordering, residual,
     optionally reasoning), or None if no checkpoint is found.
     """
-    # Lazy imports: only load heavy deps when actually running inference.
-    import torch
-
-    from lmbase.utils.env_tools import get_device
-    from nlcpV4.concept_builder import ConceptPyramidBuilder
-    from nlcpV4.data_loader import NLCPV4DataLoader
-    from nlcpV4.eval_builder import evaluate_builder
-
     # Locate best checkpoint
     checkpoint_dir = Path(config["log"]["checkpoint_path"])
     if not checkpoint_dir.is_absolute():
@@ -432,7 +426,10 @@ def _plot_eval_total_on_ax(
     is applied to ``ckpt_eval`` (which shares the record schema).
     """
     if total_getter is None:
-        total_getter = lambda r: r["total"]  # noqa: E731
+
+        def total_getter(r):
+            return r["total"]
+
     has_history = bool(eval_quick) or bool(eval_full)
 
     if eval_quick:
@@ -989,6 +986,7 @@ def _print_summary(rows: list[tuple[str, str, str]]) -> None:
 
 
 def main():
+    """CLI entry point: iterate matching configs and emit analysis plots."""
     args = parse_args()
     module: str = args.module
     dataset: str = args.dataset

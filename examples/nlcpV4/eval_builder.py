@@ -18,9 +18,8 @@ import json
 import logging
 from pathlib import Path
 
-import torch
-
 import swanlab
+import torch
 
 from nlcpV4.concept_builder import ConceptPyramidBuilder
 from nlcpV4.data_loader import NLCPV4DataLoader
@@ -232,9 +231,11 @@ def evaluate_builder(
             [],
         )
 
-    # Average across all batches
+    # Average across all batches. Keys are consistent across batches
+    # within a single eval run (reasoning is present iff solutions are),
+    # so direct ``d[k]`` access is safe here.
     avg = {}
     keys = all_losses[0].keys()
     for k in keys:
-        avg[k] = sum(d.get(k, 0.0) for d in all_losses) / len(all_losses)
+        avg[k] = sum(d[k] for d in all_losses) / len(all_losses)
     return avg, all_reasoning_texts, all_samples

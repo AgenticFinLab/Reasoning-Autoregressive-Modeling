@@ -64,6 +64,7 @@ _KEY_TAIL = re.compile(r"^(?P<model>.+)_(?P<level>\d+)level$")
 
 
 def parse_args() -> argparse.Namespace:
+    """Parse CLI arguments for the loss-weight computation script."""
     p = argparse.ArgumentParser(
         description=(
             "Compute per-config Builder loss weights from a "
@@ -157,6 +158,7 @@ def compute_row(key: str, entry: dict) -> dict | None:
 
 
 def print_header(file_path: Path, n_entries: int) -> None:
+    """Print a short banner describing the source JSON and entry count."""
     print(f"Source : {file_path}")
     print(f"Entries: {n_entries}")
     print(
@@ -309,6 +311,7 @@ def print_weight_blocks(rows: list[dict]) -> None:
 
 
 def main() -> int:
+    """CLI entry point: recompute loss weights from Loss_prepare.json."""
     args = parse_args()
     if not args.file.is_file():
         print(f"[ERROR] File not found: {args.file}", file=sys.stderr)

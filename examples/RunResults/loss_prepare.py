@@ -51,12 +51,17 @@ from pathlib import Path
 import torch
 from dotenv import load_dotenv
 
-# Ensure project paths
+# Project-root path injection must precede local imports so that the
+# ``nlcpV4``, ``lmbase``, and ``ram`` packages resolve when this script
+# is executed directly (``python3 examples/RunResults/loss_prepare.py``).
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(PROJECT_ROOT / "examples"))
 
 from lmbase.utils.env_tools import get_device
+from nlcpV4.concept_builder import ConceptPyramidBuilder
+from nlcpV4.data_loader import NLCPV4DataLoader
+from nlcpV4.losses import compute_builder_loss
 from ram.utils import load_config, setup_environment
 
 logging.basicConfig(
@@ -70,6 +75,7 @@ VALID_MODULES = ("builder", "predictor")
 
 
 def parse_args():
+    """Parse CLI arguments for the loss_prepare runner."""
     parser = argparse.ArgumentParser(
         description="Prepare loss inspection across a dataset's configs"
     )
@@ -110,10 +116,12 @@ def parse_args():
 
 
 def loss_prepare_path(module: str) -> Path:
+    """Return the absolute path of ``Loss_prepare.json`` for a given module."""
     return PROJECT_ROOT / "EXPERIMENT" / "nlcpV4" / module / OUT_FILENAME
 
 
 def load_loss_prepare(module: str) -> dict:
+    """Load the persisted Loss_prepare.json store for ``module`` (empty if absent)."""
     path = loss_prepare_path(module)
     if path.exists():
         with open(path, "r", encoding="utf-8") as f:
@@ -122,6 +130,7 @@ def load_loss_prepare(module: str) -> dict:
 
 
 def save_loss_prepare(module: str, data: dict) -> None:
+    """Persist the Loss_prepare.json store for ``module`` (creates parents)."""
     path = loss_prepare_path(module)
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
@@ -165,12 +174,15 @@ def _pick_device_fresh(exclude: set[int] | None = None) -> str:
     exclude = exclude or set()
 
     # Flush allocator cache so mem_get_info reflects actually-free VRAM.
+    # The flush itself is best-effort: if the CUDA runtime is in a bad
+    # state the run should still continue, so we swallow any exception
+    # here and log a warning instead of propagating.
     try:
         if any(
             torch.cuda.memory_allocated(i) > 0 for i in range(torch.cuda.device_count())
         ):
             torch.cuda.empty_cache()
-    except Exception as e:  # defensive: never let flush kill the run
+    except Exception as e:
         logger.warning("empty_cache() failed (non-fatal): %s", e)
 
     # Inline GPU probing with exclude-support (can't use get_device()
@@ -218,9 +230,6 @@ def _pick_device_fresh(exclude: set[int] | None = None) -> str:
 
 def collect_batches(data_cfg: dict, batch_size: int, num_batches: int) -> list:
     """Load ``num_batches`` batches from ``data_cfg`` (called once per group)."""
-    # Lazy import of heavy deps.
-    from nlcpV4.data_loader import NLCPV4DataLoader
-
     dataloader = NLCPV4DataLoader(
         data_cfg=data_cfg,
         batch_size=batch_size,
@@ -251,7 +260,10 @@ def _stats(values: list) -> dict:
         return {"mean": round(v, 6), "std": 0.0, "min": round(v, 6), "max": round(v, 6)}
     return {
         "mean": round(float(statistics.mean(values)), 6),
-        "std": round(float(statistics.stdev(values)), 6),  # sample std
+        # ``statistics.stdev`` returns the sample standard deviation
+        # (Bessel-corrected); this is the convention for per-batch
+        # aggregates where the n batches are a sample of the full run.
+        "std": round(float(statistics.stdev(values)), 6),
         "min": round(float(min(values)), 6),
         "max": round(float(max(values)), 6),
     }
@@ -299,10 +311,6 @@ def run_builder_n_batches(config: dict, device: str, batches: list) -> dict:
     * ``torch.cuda.empty_cache()`` per batch — forces fragmented
       allocations back into the global pool between forward passes.
     """
-    # Lazy import of heavy deps.
-    from nlcpV4.concept_builder import ConceptPyramidBuilder
-    from nlcpV4.losses import compute_builder_loss
-
     train_cfg = config["training"]
     loss_weights = train_cfg["loss_weights"]
     ordering_loss_type = train_cfg["ordering_loss_type"]
@@ -382,6 +390,7 @@ def run_predictor_n_batches(config: dict, device: str, batches: list) -> dict:
 
 
 def main():
+    """CLI entry point: iterate all matching configs and prepare loss stats."""
     args = parse_args()
     module: str = args.module
     dataset: str = args.dataset
@@ -405,7 +414,8 @@ def main():
     load_dotenv(PROJECT_ROOT / ".env")
 
     # ---- Pre-load all configs and group by batch_size ----
-    loaded: list = []  # list[(path, config)]
+    # ``loaded`` collects successful (path, config) pairs for later grouping.
+    loaded: list = []
     for p in yml_files:
         try:
             loaded.append((p, load_config(str(p))))
@@ -415,7 +425,8 @@ def main():
         logger.error("No configs successfully loaded.")
         sys.exit(1)
 
-    groups: dict = {}  # batch_size -> list[(path, config)]
+    # Map from batch_size to the list of (path, config) sharing that size.
+    groups: dict = {}
     for p, cfg in loaded:
         bs = int(cfg["training"]["batch_size"])
         groups.setdefault(bs, []).append((p, cfg))
@@ -538,7 +549,8 @@ def main():
                             config, current_device, shared_batches
                         )
                     last_exc = None
-                    break  # success
+                    # Successful run — stop retrying on other GPUs.
+                    break
                 except (torch.cuda.OutOfMemoryError, RuntimeError) as e:
                     msg = str(e).lower()
                     is_oom = "out of memory" in msg or isinstance(

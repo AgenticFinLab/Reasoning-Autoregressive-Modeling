@@ -25,18 +25,20 @@ import sys
 from pathlib import Path
 
 import numpy as np
+import swanlab
 import torch
 from dotenv import load_dotenv
 from torch.optim import AdamW
 from tqdm import tqdm
 
-import swanlab
-
-# Ensure project paths
+# Project-root path injection must precede local imports so that the
+# ``nlcpV4``, ``lmbase``, and ``ram`` packages resolve when this script
+# is executed directly (``python3 examples/nlcpV4/train_builder.py``).
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(PROJECT_ROOT / "examples"))
 
+from lmbase.utils.env_tools import get_device
 from nlcpV4.concept_builder import ConceptPyramidBuilder
 from nlcpV4.data_loader import NLCPV4DataLoader
 from nlcpV4.eval_builder import (
@@ -45,11 +47,7 @@ from nlcpV4.eval_builder import (
     log_terminal_entry,
 )
 from nlcpV4.losses import compute_builder_loss
-from lmbase.utils.env_tools import get_device
-from ram.utils import (
-    load_config,
-    setup_environment,
-)  # noqa: F401  (kept for back-compat)
+from ram.utils import load_config
 
 
 def _seed_single_device(seed: int, device: str) -> None:
@@ -170,6 +168,12 @@ def _log_model_summary(builder: ConceptPyramidBuilder, config: dict, logger):
 
 
 def parse_args():
+    """Parse command-line arguments for the trainer.
+
+    Returns:
+        argparse.Namespace with ``config`` (YAML path) and ``resume``
+        (optional checkpoint path) fields.
+    """
     parser = argparse.ArgumentParser(description="Train ConceptPyramidBuilder")
     parser.add_argument(
         "-c", "--config", type=str, required=True, help="Path to YAML config file"
@@ -190,7 +194,7 @@ def save_checkpoint(
     checkpoint_dir: Path,
     filename: str,
 ) -> Path:
-    """Save full training state to ``checkpoint_dir / filename``."""
+    """Save model/optimizer/scheduler state to ``checkpoint_dir / filename``."""
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
     checkpoint = {
         "epoch": epoch,
@@ -230,11 +234,16 @@ def load_checkpoint(
     optimizer: torch.optim.Optimizer,
     scheduler: torch.optim.lr_scheduler._LRScheduler,
 ) -> tuple[int, int, float]:
+    """Load a checkpoint and return ``(epoch, step, loss)``."""
     checkpoint = torch.load(checkpoint_path, map_location="cpu")
     builder.load_state_dict(checkpoint["model_state_dict"])
     optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
     scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
-    return checkpoint["epoch"], checkpoint["step"], checkpoint["loss"]
+    return (
+        int(checkpoint["epoch"]),
+        int(checkpoint["step"]),
+        float(checkpoint["loss"]),
+    )
 
 
 def train_builder(config: dict, config_path: Path):
@@ -254,7 +263,7 @@ def train_builder(config: dict, config_path: Path):
     gradient_clip = train_cfg["gradient_clip"]
     log_interval = log_cfg["log_step_interval"]
     checkpoint_interval = log_cfg["checkpoint_step_interval"]
-    checkpoint_clean = log_cfg.get("checkpoint_clean", False)
+    checkpoint_clean = log_cfg["checkpoint_clean"]
     resume = train_cfg["resume"]
     ordering_loss_type = train_cfg["ordering_loss_type"]
 
@@ -264,7 +273,7 @@ def train_builder(config: dict, config_path: Path):
     log_dir.mkdir(parents=True, exist_ok=True)
 
     logging.basicConfig(
-        level=getattr(logging, log_cfg["log_level"].upper(), logging.INFO),
+        level=getattr(logging, log_cfg["log_level"].upper()),
         format="%(asctime)s [%(levelname)s] %(message)s",
         handlers=[
             logging.FileHandler(log_dir / "training.log"),
@@ -283,8 +292,9 @@ def train_builder(config: dict, config_path: Path):
     _seed_single_device(seed, device)
     logger.info("Device: %s | seed: %d", device, seed)
 
-    # ── Load .env and initialize SwanLab ─────────────────────────────
-    dotenv_path = env_cfg.get("dotenv_path", ".env")
+    # Load .env so downstream libraries (e.g. SwanLab, HuggingFace)
+    # can read their auth tokens from environment variables.
+    dotenv_path = env_cfg["dotenv_path"]
     load_dotenv(dotenv_path)
 
     # Derive experiment name from the config file's location under
@@ -305,11 +315,7 @@ def train_builder(config: dict, config_path: Path):
         rel_parts = (config_path.parent.name,)
     experiment_name = "-".join([*rel_parts, config_path.stem])
 
-    swanlab.init(
-        project="ReasoningAR",
-        experiment_name=experiment_name,
-        config=config,
-    )
+    swanlab.init(project="ReasoningAR", experiment_name=experiment_name, config=config)
     logger.info("SwanLab initialized")
 
     builder = ConceptPyramidBuilder(config)
@@ -409,7 +415,7 @@ def train_builder(config: dict, config_path: Path):
     global_step = 0
     best_loss = float("inf")
     best_eval_loss = float("inf")
-    history = []
+    history: list = []
 
     if resume:
         resume_path = Path(resume)
@@ -417,7 +423,12 @@ def train_builder(config: dict, config_path: Path):
             start_epoch, global_step, best_loss = load_checkpoint(
                 resume_path, builder, optimizer, scheduler
             )
-            logger.info("Resumed from epoch %d, step %d", start_epoch, global_step)
+            logger.info(
+                "Resumed from epoch %d, step %d, loss=%.4f",
+                start_epoch,
+                global_step,
+                best_loss,
+            )
         else:
             logger.warning("Resume path not found: %s", resume_path)
 
@@ -440,9 +451,6 @@ def train_builder(config: dict, config_path: Path):
         pbar = tqdm(
             dataloader, desc=f"Epoch {epoch+1}/{num_epochs}", miniters=log_interval
         )
-        epoch_num_batches = len(dataloader)
-        epoch_mid_batch = epoch_num_batches // 2 if epoch_num_batches > 1 else -1
-
         for batch_idx, batch in enumerate(pbar):
             # V4 API: single forward pass handles encode + pyramid +
             # reasoning preparation. ``compute_builder_loss`` then
@@ -569,30 +577,34 @@ def train_builder(config: dict, config_path: Path):
                     )
 
             # ── Checkpoint scheduling ──────────────────────────
-            #   checkpoint_clean=True  : save only at epoch-start (batch_idx==0)
-            #                            and epoch-mid (batch_idx==epoch_mid_batch).
-            #                            checkpoint_step_interval is ignored.
+            #   checkpoint_clean=True  : save ONLY at epoch-start
+            #                            (batch_idx==0). The final
+            #                            epoch-end checkpoint is saved
+            #                            once, after the last epoch
+            #                            finishes (see the epoch-end
+            #                            block below).
+            #                            checkpoint_step_interval is
+            #                            ignored.
             #   checkpoint_clean=False : save per checkpoint_step_interval (legacy).
-            # Best checkpoint is always tracked (overwrite-by-purge).
+            # Best checkpoints are always tracked (overwrite-by-purge).
             save_regular = False
             save_tag = ""
             if checkpoint_clean:
                 if batch_idx == 0:
                     save_regular = True
                     save_tag = "epoch-start"
-                elif batch_idx == epoch_mid_batch:
-                    save_regular = True
-                    save_tag = "epoch-mid"
             else:
                 if global_step % checkpoint_interval == 0:
                     save_regular = True
 
             if save_regular:
-                avg_loss = (
-                    sum(epoch_losses[-100:]) / len(epoch_losses[-100:])
-                    if epoch_losses
-                    else float("inf")
-                )
+                # ``epoch_losses`` is always non-empty here because
+                # ``epoch_losses.append(...)`` runs above on every
+                # iteration before this branch. Average over the last
+                # 100 steps to smooth noisy per-step loss for best-
+                # checkpoint tracking.
+                window = epoch_losses[-100:]
+                avg_loss = sum(window) / len(window)
                 # Track best: overwrite any previous best file.
                 if avg_loss < best_loss:
                     best_loss = avg_loss
@@ -649,21 +661,21 @@ def train_builder(config: dict, config_path: Path):
                 if eval_losses["total"] < best_eval_loss:
                     best_eval_loss = eval_losses["total"]
                     purge_best_checkpoints(checkpoint_dir, "checkpoint_best_eval")
-                    best_eval_name = (
-                        f"checkpoint_best_eval-epoch{epoch}-step{global_step}.pt"
+                    best_eval_path = save_checkpoint(
+                        builder,
+                        optimizer,
+                        scheduler,
+                        epoch,
+                        global_step,
+                        eval_losses["total"],
+                        checkpoint_dir,
+                        filename=(
+                            f"checkpoint_best_eval-epoch{epoch}-step{global_step}.pt"
+                        ),
                     )
-                    ckpt = {
-                        "epoch": epoch,
-                        "step": global_step,
-                        "eval_loss": eval_losses["total"],
-                        "model_state_dict": builder.state_dict(),
-                        "optimizer_state_dict": optimizer.state_dict(),
-                        "scheduler_state_dict": scheduler.state_dict(),
-                    }
-                    torch.save(ckpt, checkpoint_dir / best_eval_name)
                     logger.info(
                         "Best eval checkpoint: %s (eval_loss=%.4f)",
-                        best_eval_name,
+                        best_eval_path.name,
                         eval_losses["total"],
                     )
 
@@ -687,9 +699,15 @@ def train_builder(config: dict, config_path: Path):
             step=global_step,
         )
 
-        # Epoch-end checkpoint is saved only in the legacy (non-clean) mode;
-        # in clean mode the epoch-start of the next epoch already covers it.
-        if not checkpoint_clean:
+        # Epoch-end checkpoint policy:
+        #   legacy mode (checkpoint_clean=False): save at every epoch boundary.
+        #   clean mode  (checkpoint_clean=True):  save ONLY after the last
+        #       epoch. Earlier epoch boundaries are covered by the next
+        #       epoch's ``epoch-start`` save, so saving them here would
+        #       just duplicate files.
+        is_last_epoch = epoch + 1 == num_epochs
+        if (not checkpoint_clean) or is_last_epoch:
+            tag_part = "-epoch-end" if checkpoint_clean else ""
             path = save_checkpoint(
                 builder,
                 optimizer,
@@ -698,7 +716,7 @@ def train_builder(config: dict, config_path: Path):
                 global_step,
                 avg_epoch_loss,
                 checkpoint_dir,
-                filename=f"checkpoint-epoch{epoch+1}-step{global_step}.pt",
+                filename=f"checkpoint{tag_part}-epoch{epoch+1}-step{global_step}.pt",
             )
             logger.info("Epoch checkpoint: %s", path.name)
 
@@ -728,6 +746,7 @@ def train_builder(config: dict, config_path: Path):
 
 
 def main():
+    """Entry point: parse CLI args, load YAML config, launch training."""
     args = parse_args()
 
     config_path = Path(args.config)

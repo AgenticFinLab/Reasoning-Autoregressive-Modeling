@@ -159,7 +159,15 @@ log:
   log_level: INFO
   # Step intervals (all values are training steps)
   log_step_interval: 10
-  checkpoint_step_interval: 500
+  checkpoint_step_interval: 1000
+  # checkpoint_clean:
+  #   true  -> save only the epoch-start checkpoint of every epoch,
+  #            plus one final epoch-end checkpoint after the LAST epoch.
+  #            Ignores checkpoint_step_interval. Useful to save disk space.
+  #   false -> save per checkpoint_step_interval (legacy behaviour).
+  # checkpoint_best-*.pt and checkpoint_best_eval-*.pt are always tracked
+  # (previous best files are removed when a new best is found).
+  checkpoint_clean: true
 
 # Evaluation configuration
 # -----------------------------------------------------------------------------

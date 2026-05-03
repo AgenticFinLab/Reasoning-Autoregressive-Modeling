@@ -10,7 +10,10 @@ Arguments:
     -m / --module      Module name: "builder" or "predictor"
     -e / --experiment  Experiment name (directory under EXPERIMENT/nlcpV4/<module>/)
                        Pass "all" to iterate over every experiment discovered
-                       from configs/nlcpV4/*/train_<module>_*.yml.
+                       recursively from configs/nlcpV4/**/train_<module>_*.yml
+                       (experiment names are read from each config's
+                       log.save_folder, so nested layouts like
+                       configs/nlcpV4/GSM8K/AutoWeighted/ are supported).
     -i / --ignore      Glob pattern (relative to the experiment dir) of
                        artifacts to skip entirely. May be given multiple
                        times. Examples:
@@ -41,6 +44,8 @@ import fnmatch
 import subprocess
 import sys
 from pathlib import Path
+
+import yaml
 
 # --- Default remote / local base paths ---------------------------------
 REMOTE_HOST = "sjia@10.123.4.30"
@@ -113,26 +118,35 @@ def _matches_ignore(rel_path: str, patterns: list[str]) -> str | None:
 
 
 def discover_experiments(module: str) -> list[str]:
-    """Scan configs/nlcpV4/<dataset>/train_<module>_<rest>.yml -> experiment names.
+    """Scan configs/nlcpV4/**/train_<module>_*.yml -> experiment names.
 
-    Experiment naming convention (must match log.save_folder in configs):
-        {dataset}_{rest}
-    e.g. configs/nlcpV4/GSM8K/train_builder_Qwen2.5-0.5B_2level.yml
-         -> experiment 'GSM8K_Qwen2.5-0.5B_2level'
+    The experiment name is taken from each config's ``log.save_folder``
+    basename, which is the exact directory the trainer creates on disk.
+    Reading the source of truth (instead of deriving from file paths)
+    makes discovery robust to nested config layouts such as
+    ``configs/nlcpV4/GSM8K/AutoWeighted/train_builder_*.yml``, which
+    map to experiments named ``GSM8K_<model>_<level>level_AutoWeighted``.
+
+    Duplicate ``save_folder`` values across configs are collapsed so each
+    experiment is processed at most once.
     """
     if not CONFIGS_ROOT.is_dir():
         print(f"[WARN] Configs root not found: {CONFIGS_ROOT}")
         return []
 
     prefix = f"train_{module}_"
+    seen: set[str] = set()
     experiments: list[str] = []
-    for dataset_dir in sorted(CONFIGS_ROOT.iterdir()):
-        if not dataset_dir.is_dir():
+    for yml in sorted(CONFIGS_ROOT.rglob(f"{prefix}*.yml")):
+        with yml.open("r", encoding="utf-8") as f:
+            cfg = yaml.safe_load(f)
+        save_folder = cfg["log"]["save_folder"]
+        name = Path(save_folder).name
+        if name in seen:
+            print(f"[WARN] Duplicate experiment '{name}' from {yml}; skipping.")
             continue
-        dataset = dataset_dir.name
-        for yml in sorted(dataset_dir.glob(f"{prefix}*.yml")):
-            rest = yml.stem[len(prefix) :]
-            experiments.append(f"{dataset}_{rest}")
+        seen.add(name)
+        experiments.append(name)
     return experiments
 
 
@@ -251,6 +265,12 @@ def process_experiment(
 
 
 def main() -> int:
+    """CLI entry point: parse args and dispatch to process_experiment.
+
+    Returns a shell exit code: 0 on full success (all artifacts fetched
+    or already present), 1 when at least one artifact failed to transfer
+    in at least one experiment.
+    """
     parser = argparse.ArgumentParser(
         description="SCP experiment results from remote server to local machine.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -268,8 +288,9 @@ def main() -> int:
         required=True,
         help=(
             "Experiment directory name under EXPERIMENT/nlcpV4/<module>/. "
-            "Use 'all' to discover experiments from "
-            "configs/nlcpV4/*/train_<module>_*.yml."
+            "Use 'all' to discover experiments recursively from "
+            "configs/nlcpV4/**/train_<module>_*.yml (experiment names are "
+            "read from each config's log.save_folder)."
         ),
     )
     parser.add_argument(
