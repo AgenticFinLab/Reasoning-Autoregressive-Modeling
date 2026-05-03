@@ -261,9 +261,13 @@ def parse_args() -> argparse.Namespace:
         "--kill-existing",
         action="store_true",
         help=(
-            "If a tmux session with the target name already exists, kill it "
-            "first and relaunch. Without this flag, the experiment is "
-            "skipped with a warning."
+            "If any target tmux session name already exists, kill it and "
+            "relaunch. WITHOUT this flag the launcher REFUSES to start the "
+            "whole run as soon as even one colliding session is detected "
+            "(fail-fast): a stale session from a previous crashed run "
+            "still holds its GPU and would cause the new launch to "
+            "double-schedule onto the same device. Pass this flag only "
+            "when you are sure every colliding session should be replaced."
         ),
     )
     parser.add_argument(
@@ -923,6 +927,30 @@ def tmux_session_exists(session_name: str) -> bool:
     return result.returncode == 0
 
 
+def list_tmux_sessions() -> set[str]:
+    """Return the set of ALL currently-live tmux session names.
+
+    Uses a single ``tmux list-sessions`` call so the pre-flight
+    collision check can run in O(1) subprocess calls regardless of
+    how many experiments we plan to launch. Returns an empty set if
+    the tmux server has no sessions (``tmux ls`` exits non-zero in
+    that case) or if tmux is unavailable.
+    """
+    if shutil.which("tmux") is None:
+        return set()
+    result = subprocess.run(
+        ["tmux", "list-sessions", "-F", "#{session_name}"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        # tmux returns non-zero when no sessions exist ("no server running"
+        # or "no sessions"). Both cases mean "nothing to collide with".
+        return set()
+    return {line.strip() for line in result.stdout.splitlines() if line.strip()}
+
+
 def kill_tmux_session(session_name: str) -> None:
     """Terminate the named tmux session; no-op if it does not exist."""
     subprocess.run(
@@ -1170,6 +1198,49 @@ def main() -> int:
                 breakdown=breakdown,
             )
         )
+
+    # ── Pre-flight: refuse to run if any target tmux session is alive ──
+    # Snapshot ALL currently-live tmux sessions in ONE ``tmux ls`` call,
+    # then intersect with the planned session-name set. This is both
+    # cheaper than a per-experiment ``tmux has-session`` probe and more
+    # atomic (no race between N separate subprocess calls).
+    #
+    # A leftover session from an earlier (possibly crashed) launch holds
+    # its GPU and makes this new run silently double-schedule onto the
+    # same physical device. The old behaviour of skipping each colliding
+    # experiment with a warning produced mysterious "OOM on an idle GPU"
+    # bugs that were very hard to diagnose. Bail LOUDLY instead so the
+    # operator deals with the leftovers first.
+    # Opt-out: ``--kill-existing`` explicitly replaces colliding sessions.
+    if not args.dry_run and not args.kill_existing:
+        live_sessions = list_tmux_sessions()
+        planned_names = {e.session_name for e in experiments}
+        colliding = sorted(planned_names & live_sessions)
+        if colliding:
+            print(
+                "\n[ERROR] Refusing to launch: the following tmux session(s) "
+                "from an earlier run are still alive. A leftover session "
+                "holds GPU memory and would cause this launch to "
+                "double-schedule onto the same device.",
+                file=sys.stderr,
+            )
+            for name in colliding:
+                print(f"  - {name}", file=sys.stderr)
+            kill_all = " ; ".join(
+                f"tmux kill-session -t {shlex.quote(n)}" for n in colliding
+            )
+            print(
+                "\n  Fix options:\n"
+                "    1. Inspect each:   tmux attach -t <name>   "
+                "(Ctrl-b then d to detach)\n"
+                "    2. Kill one:       tmux kill-session -t <name>\n"
+                "    3. Kill all listed above in one go:\n"
+                f"         {kill_all}\n"
+                "    4. Or re-run this exact command with --kill-existing "
+                "to auto-replace every colliding session.",
+                file=sys.stderr,
+            )
+            return 2
 
     # ── GPU scheduling ─────────────────────────────────────────────────
     restrict = parse_gpu_restriction(args.gpus)
