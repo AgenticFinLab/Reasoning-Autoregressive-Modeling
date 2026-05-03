@@ -19,13 +19,22 @@ Usage:
     # was launched with — otherwise this script looks at the wrong
     # checkpoints / log_path directories and reports [SKIP NO-DATA].
     python3 examples/nlcpV4/builder_training_analysis.py \\
-        -m builder -d GSM8K -e all -s /Data/RAM
+        -m builder -d GSM8K -e all -s /Data/<proj>
 
     # Skip already-analyzed configs (by default existing PNGs are overwritten).
     python3 examples/nlcpV4/builder_training_analysis.py \\
         -m builder -d GSM8K -e all --no-overlap
 
 Arguments:
+    -s / --storage-root   Prefix prepended to RELATIVE log paths in the
+                          YAML (save_folder/checkpoint_path/log_path).
+                          Listed FIRST because it controls every output
+                          path this script reads. MUST match the value
+                          used at training time so this script reads the
+                          artifacts actually on disk. Default is ``./``
+                          (current working directory) — never an implicit
+                          project root. The resolved paths are printed
+                          as a ``[STORAGE]`` block per config at startup.
     -m / --module         Module name: 'builder' or 'predictor'.
     -d / --dataset        Dataset name (directory under configs/nlcpV4/).
                           May be a nested path like 'GSM8K/AutoWeighted'.
@@ -35,14 +44,6 @@ Arguments:
     -o / --overlap        If true (default), overwrite existing analysis
                           outputs. Use ``--no-overlap`` to skip configs whose
                           outputs already exist.
-    -s / --storage-root   Prefix prepended to RELATIVE log paths in the
-                          YAML (save_folder/checkpoint_path/log_path).
-                          MUST match the value used at training time so
-                          this script reads the artifacts actually on
-                          disk. Default is ``./`` (current working
-                          directory) — never an implicit project root.
-                          The resolved paths are printed as a
-                          ``[STORAGE]`` block per config at startup.
 
 Behavior:
     For each selected config:
@@ -109,6 +110,23 @@ def parse_args():
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
+        "-s",
+        "--storage-root",
+        type=str,
+        default="./",
+        help=(
+            "Prefix to prepend to every relative output path in "
+            "config.log (save_folder / checkpoint_path / log_path). "
+            "MUST match the value used when training produced the "
+            "artifacts this script reads, otherwise this tool will "
+            "look at the wrong log directory and report "
+            "``[SKIP NO-DATA]``. Absolute paths in YAML are preserved. "
+            "Default is './' (current working directory) — no silent "
+            "project-root fallback. The resolved paths are printed "
+            "per-config as a ``[STORAGE]`` block so you can verify."
+        ),
+    )
+    parser.add_argument(
         "-m",
         "--module",
         required=True,
@@ -138,23 +156,6 @@ def parse_args():
         help=(
             "If true (default), overwrite existing analysis outputs. "
             "Pass --no-overlap to skip configs whose outputs already exist."
-        ),
-    )
-    parser.add_argument(
-        "-s",
-        "--storage-root",
-        type=str,
-        default="./",
-        help=(
-            "Prefix to prepend to every relative output path in "
-            "config.log (save_folder / checkpoint_path / log_path). "
-            "MUST match the value used when training produced the "
-            "artifacts this script reads, otherwise this tool will "
-            "look at the wrong log directory and report "
-            "``[SKIP NO-DATA]``. Absolute paths in YAML are preserved. "
-            "Default is './' (current working directory) — no silent "
-            "project-root fallback. The resolved paths are printed "
-            "per-config as a ``[STORAGE]`` block so you can verify."
         ),
     )
     return parser.parse_args()
@@ -813,7 +814,7 @@ def _build_figures(
     plt.close(fig3)
 
 
-def _run_builder_analysis(config_path: Path, storage_root: str = "") -> None:
+def _run_builder_analysis(config_path: Path, storage_root: str) -> None:
     """Run the full analysis for a single config and write 6 PNGs to
     ``<experiment>/train_analysis/`` (sibling of ``logs/``).
 
@@ -969,8 +970,9 @@ def _run_builder_analysis(config_path: Path, storage_root: str = "") -> None:
 
 def analyze_one(
     config_path: Path,
-    overlap: bool = True,
-    storage_root: str = "",
+    *,
+    overlap: bool,
+    storage_root: str,
 ) -> tuple[str, str]:
     """Analyze a single config. Returns (status, detail) tuple.
 

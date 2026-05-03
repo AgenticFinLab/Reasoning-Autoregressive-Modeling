@@ -23,14 +23,23 @@ Usage:
     # The REMOTE base becomes <storage_root>/EXPERIMENT/nlcpV4; the
     # LOCAL base is unchanged (still ./EXPERIMENT/nlcpV4).
     python3 examples/GetResults/run_scp.py -m builder -e all \\
-        -s /Data/RAM
+        -s /Data/<proj>
 
     # Redirect the LOCAL sink as well (e.g. downloading to an external disk).
     python3 examples/GetResults/run_scp.py -m builder -e all \\
-        -s /Data/RAM \\
+        -s /Data/<proj> \\
         --local-base /Volumes/Backup/ReasoningAR/EXPERIMENT/nlcpV4
 
 Arguments:
+    -s / --storage-root   REMOTE storage root (on the SSH target). Listed
+                          FIRST because it controls the remote base this
+                          script reads from. The remote base becomes
+                          ``<storage_root>/EXPERIMENT/nlcpV4``. Default
+                          is ``./`` — resolved against the remote
+                          user's $HOME. NEVER a hardcoded user-path
+                          fallback. Must match the ``-s`` that training
+                          on the remote was launched with. Accepts
+                          absolute or relative paths.
     -m / --module         Module name: "builder" or "predictor".
     -e / --experiment     Experiment name (directory under
                           EXPERIMENT/nlcpV4/<module>/).
@@ -46,14 +55,6 @@ Arguments:
                             -i checkpoints               -> skip whole dir
                             -i checkpoints/*best.pt      -> skip by glob
                             -i logs                      -> skip the logs dir
-    -s / --storage-root   REMOTE storage root (on the SSH target).
-                          The remote base becomes
-                          ``<storage_root>/EXPERIMENT/nlcpV4``. Default
-                          is ``./`` — resolved against the remote
-                          user's $HOME. NEVER a hardcoded user-path
-                          fallback. Must match the ``-s`` that
-                          training on the remote was launched with.
-                          Accepts absolute or relative paths.
     --local-base          Override the LOCAL destination base dir.
                           Default is ``./EXPERIMENT/nlcpV4`` (resolved
                           against current working directory).
@@ -190,7 +191,7 @@ def discover_experiments(module: str) -> list[str]:
 def process_experiment(
     module: str,
     experiment: str,
-    ignore_patterns: list[str] | None = None,
+    ignore_patterns: list[str],
     *,
     remote_base: str,
     local_base: Path,
@@ -202,7 +203,6 @@ def process_experiment(
     caller must resolve them from ``-s`` / ``--local-base`` and print
     the ``[STORAGE]`` block so the user always sees which directories
     are being read from / written to."""
-    ignore_patterns = ignore_patterns or []
     remote_path = f"{remote_base}/{module}/{experiment}"
     local_path = local_base / module / experiment
 
@@ -323,6 +323,22 @@ def main() -> int:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
+        "-s",
+        "--storage-root",
+        type=str,
+        default="./",
+        help=(
+            "REMOTE storage root (on the SSH target). The remote base "
+            f"becomes ``<storage_root>/{EXPERIMENT_SUBPATH}``. Default "
+            "is ``./`` — i.e. the remote user's $HOME on the SSH host "
+            "(NO hardcoded user-path fallback). Pass ``-s /Data/<proj>`` "
+            "when training on the remote was launched with a matching "
+            "``-s``. The resolved remote + local bases are printed as "
+            "a ``[STORAGE]`` block at startup so mismatches are caught "
+            "before any SSH traffic."
+        ),
+    )
+    parser.add_argument(
         "-m",
         "--module",
         required=True,
@@ -356,22 +372,6 @@ def main() -> int:
         ),
     )
     parser.add_argument(
-        "-s",
-        "--storage-root",
-        type=str,
-        default="./",
-        help=(
-            "REMOTE storage root (on the SSH target). The remote base "
-            f"becomes ``<storage_root>/{EXPERIMENT_SUBPATH}``. Default "
-            "is ``./`` — i.e. the remote user's $HOME on the SSH host "
-            "(NO hardcoded user-path fallback). Pass ``-s /Data/<proj>`` "
-            "when training on the remote was launched with a matching "
-            "``-s``. The resolved remote + local bases are printed as "
-            "a ``[STORAGE]`` block at startup so mismatches are caught "
-            "before any SSH traffic."
-        ),
-    )
-    parser.add_argument(
         "--local-base",
         type=str,
         default="",
@@ -387,14 +387,14 @@ def main() -> int:
 
     module: str = args.module
     experiment: str = args.experiment
-    ignore_patterns: list[str] = list(args.ignore or [])
+    ignore_patterns: list[str] = list(args.ignore)
 
     # Resolve storage bases — both sides are ALWAYS derived from CLI
     # flags (no hardcoded fallback). The remote storage root may be
     # any directory string understood by the remote shell (absolute or
     # relative to remote $HOME). The local side defaults to
     # ``./EXPERIMENT/nlcpV4`` (resolved against current working dir).
-    storage_root = args.storage_root or "./"
+    storage_root: str = args.storage_root
     remote_base = f"{storage_root.rstrip('/')}/{EXPERIMENT_SUBPATH}"
     local_base = (
         Path(args.local_base) if args.local_base else Path("./") / EXPERIMENT_SUBPATH

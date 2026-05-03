@@ -14,16 +14,14 @@ Usage:
     # project-local EXPERIMENT/ tree is not writable.
     python3 examples/nlcpV4/train_builder.py \\
         -c configs/nlcpV4/GSM8K/train_builder_Qwen2.5-0.5B_6level.yml \\
-        -s /Data/RAM
+        -s /Data/<proj>
 
     # Resume from a specific checkpoint (CLI --resume overrides config).
     python3 examples/nlcpV4/train_builder.py \\
         -c configs/nlcpV4/GSM8K/train_builder_Qwen2.5-0.5B_6level.yml \\
-        --resume /Data/RAM/EXPERIMENT/nlcpV4/builder/.../checkpoints/checkpoint_best.pt
+        --resume /Data/<proj>/EXPERIMENT/nlcpV4/builder/.../checkpoints/checkpoint_best.pt
 
 Arguments:
-    -c / --config         Path to a YAML training config.
-    --resume              Optional checkpoint path to resume training from.
     -s / --storage-root   Prefix prepended to RELATIVE log paths in the
                           YAML (save_folder/checkpoint_path/log_path).
                           Absolute YAML paths are preserved. Default is
@@ -32,6 +30,10 @@ Arguments:
                           paths are printed as a ``[STORAGE]`` block at
                           startup so there is zero ambiguity about
                           where checkpoints / logs will be written.
+                          Listed FIRST because it controls every output
+                          path this script writes.
+    -c / --config         Path to a YAML training config.
+    --resume              Optional checkpoint path to resume training from.
 
 V4 contract (vs V3):
   - ``ConceptPyramidBuilder.forward(batch: BuilderInput) -> PyramidOutput``
@@ -206,12 +208,6 @@ def parse_args():
     """
     parser = argparse.ArgumentParser(description="Train ConceptPyramidBuilder")
     parser.add_argument(
-        "-c", "--config", type=str, required=True, help="Path to YAML config file"
-    )
-    parser.add_argument(
-        "--resume", type=str, default="", help="Path to checkpoint to resume from"
-    )
-    parser.add_argument(
         "-s",
         "--storage-root",
         type=str,
@@ -227,6 +223,12 @@ def parse_args():
             "paths are always printed at startup so you can verify "
             "where data is written."
         ),
+    )
+    parser.add_argument(
+        "-c", "--config", type=str, required=True, help="Path to YAML config file"
+    )
+    parser.add_argument(
+        "--resume", type=str, default="", help="Path to checkpoint to resume from"
     )
     return parser.parse_args()
 

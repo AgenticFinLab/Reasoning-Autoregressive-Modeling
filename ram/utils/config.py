@@ -105,15 +105,14 @@ def load_config(config_path: str) -> dict:
 _STORAGE_ROOT_KEYS = ("save_folder", "checkpoint_path", "log_path")
 
 
-def apply_storage_root(config: dict, storage_root: str | os.PathLike | None) -> dict:
+def apply_storage_root(config: dict, storage_root: str | os.PathLike) -> dict:
     """Redirect relative output paths under ``config['log']`` to ``storage_root``.
 
     Rewrites the three well-known output keys in ``config['log']``
     (``save_folder``, ``checkpoint_path``, ``log_path``) so that any
     *relative* value is prepended with ``storage_root``. Absolute paths
     are kept verbatim so the user can always force a specific location
-    from YAML. When ``storage_root`` is ``None`` or empty, the config is
-    returned unchanged.
+    from YAML.
 
     This enables a single ``-s/--storage-root`` CLI flag (the default
     across every CLI entry point is ``"./"`` so behaviour is always
@@ -122,41 +121,33 @@ def apply_storage_root(config: dict, storage_root: str | os.PathLike | None) -> 
     servers to redirect all relative paths under a specific root
     without editing every YAML.
 
+    ``storage_root`` is REQUIRED (no sentinel/None/empty no-op). Every
+    CLI entry point sets the argparse default to ``"./"`` and forwards
+    the concrete string here, so callers must always pass an explicit
+    value — this keeps the storage contract visible at every call site.
+
     Example:
         >>> cfg = {"log": {
         ...     "save_folder": "EXPERIMENT/nlcpV4/builder/exp1",
         ...     "checkpoint_path": "EXPERIMENT/nlcpV4/builder/exp1/checkpoints",
         ...     "log_path": "/tmp/force_absolute/logs",
         ... }}
-        >>> apply_storage_root(cfg, "/Data/RAM")  # doctest: +NORMALIZE_WHITESPACE
-        {'log': {'save_folder': '/Data/RAM/EXPERIMENT/nlcpV4/builder/exp1',
-                 'checkpoint_path': '/Data/RAM/EXPERIMENT/nlcpV4/builder/exp1/checkpoints',
+        >>> apply_storage_root(cfg, "/Data/<proj>")  # doctest: +NORMALIZE_WHITESPACE
+        {'log': {'save_folder': '/Data/<proj>/EXPERIMENT/nlcpV4/builder/exp1',
+                 'checkpoint_path': '/Data/<proj>/EXPERIMENT/nlcpV4/builder/exp1/checkpoints',
                  'log_path': '/tmp/force_absolute/logs'}}
-
-        # ``./`` (the CLI default) is a valid explicit prefix — the
-        # resulting path is still relative to the current working dir,
-        # but the intent is now visible in every ``[STORAGE]`` print.
-        >>> apply_storage_root(cfg, "./") ["log"]["save_folder"]
-        'EXPERIMENT/nlcpV4/builder/exp1'
-
-        # Empty / None is a no-op (kept for programmatic callers
-        # that construct a config dict without going through argparse).
-        >>> apply_storage_root(cfg, "") is cfg
-        True
 
     Args:
         config: Configuration dict produced by ``load_config``. Must
             contain a ``log`` sub-dict with the three keys listed
             above (fail-fast KeyError otherwise).
-        storage_root: Directory to prepend to relative output paths,
-            or ``None`` / ``""`` to disable the rewrite.
+        storage_root: Directory to prepend to relative output paths.
+            Required. Pass ``"./"`` for the CLI default.
 
     Returns:
         The same ``config`` dict, mutated in place (also returned for
         convenient chaining).
     """
-    if storage_root is None or str(storage_root) == "":
-        return config
     root = Path(storage_root)
     log_cfg = config["log"]
     for key in _STORAGE_ROOT_KEYS:
@@ -170,9 +161,7 @@ def apply_storage_root(config: dict, storage_root: str | os.PathLike | None) -> 
 
 def print_storage_paths(
     config: dict,
-    storage_root: str | os.PathLike | None,
-    *,
-    header: str = "STORAGE",
+    storage_root: str | os.PathLike,
 ) -> None:
     """Print a deterministic summary of the resolved log output paths.
 
@@ -198,26 +187,19 @@ def print_storage_paths(
             three ``_STORAGE_ROOT_KEYS``. Typically called AFTER
             ``apply_storage_root`` so the values shown are the ones
             actually used at runtime.
-        storage_root: The ``-s`` value (or ``None``/``""``). Displayed
-            verbatim so the user can verify the flag they passed.
-        header: Bracketed tag shown at the start of each line. Keep
-            the default ``STORAGE`` so ``grep '[STORAGE]' run.log``
-            extracts every tool's storage summary uniformly.
+        storage_root: The ``-s`` value. Required. Displayed verbatim
+            so the user can verify the flag they passed.
     """
-    shown = str(storage_root) if storage_root not in (None, "") else "./"
+    shown = str(storage_root)
     cwd = Path.cwd().resolve()
-    print(f"[{header}] storage_root = {shown!r} (cwd={cwd})")
+    print(f"[STORAGE] storage_root = {shown!r} (cwd={cwd})")
     log_cfg = config["log"]
     # Align column width for scanability.
     width = max(len(k) for k in _STORAGE_ROOT_KEYS)
     for key in _STORAGE_ROOT_KEYS:
         val = log_cfg[key]
-        try:
-            abs_path = Path(val).expanduser()
-            if not abs_path.is_absolute():
-                abs_path = (cwd / abs_path).resolve()
-            abs_str = str(abs_path)
-        except Exception:
-            abs_str = val
-        print(f"[{header}]   {key:<{width}s} = {val}")
-        print(f"[{header}]   {' ' * width}   (absolute: {abs_str})")
+        abs_path = Path(val).expanduser()
+        if not abs_path.is_absolute():
+            abs_path = (cwd / abs_path).resolve()
+        print(f"[STORAGE]   {key:<{width}s} = {val}")
+        print(f"[STORAGE]   {' ' * width}   (absolute: {abs_path})")

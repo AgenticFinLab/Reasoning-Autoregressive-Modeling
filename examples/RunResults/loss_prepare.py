@@ -51,15 +51,27 @@ Usage:
     # scripts read the same file). Target path becomes:
     #   <storage_root>/EXPERIMENT/nlcpV4/<module>/Loss_prepare.json
     python3 examples/RunResults/loss_prepare.py -m builder -d GSM8K -n 5 \\
-        -s /Data/RAM
+        -s /Data/<proj>
 
     # Dataset with MIXED batch sizes AND non-default storage root.
     # ``-f`` groups configs by batch_size so each group samples batches
     # once and reuses them, while ``-s`` redirects the persisted JSON.
     python3 examples/RunResults/loss_prepare.py -m builder -d GSM8K \\
-        -n 5 -f -s /Data/RAM
+        -n 5 -f -s /Data/<proj>
 
 Arguments:
+    -s / --storage-root   Prefix used to compute the Loss_prepare.json
+                          path: ``<storage_root>/EXPERIMENT/nlcpV4/
+                          <module>/Loss_prepare.json``. Listed FIRST
+                          because it controls every output path this
+                          script writes. Default is ``./`` (current
+                          working directory) — NEVER a silent
+                          project-root fallback. The resolved absolute
+                          path is printed as a ``[STORAGE]`` block at
+                          startup. MUST match the ``-s`` that training
+                          was launched with so downstream tools
+                          (``builder_training_prepare.py``) read the
+                          exact JSON written here.
     -m / --module         Module name: 'builder' or 'predictor'. Only
                           YAML configs whose filename starts with
                           ``train_{module}_`` are selected for inspection.
@@ -75,16 +87,6 @@ Arguments:
                           clear message. With ``-f`` configs are grouped
                           by batch size and batches are sampled once per
                           group (still reused within the group).
-    -s / --storage-root   Prefix used to compute the Loss_prepare.json
-                          path: ``<storage_root>/EXPERIMENT/nlcpV4/
-                          <module>/Loss_prepare.json``. Default is
-                          ``./`` (current working directory) — NEVER
-                          a silent project-root fallback. The resolved
-                          absolute path is printed as a ``[STORAGE]``
-                          block at startup. MUST match the ``-s`` that
-                          training was launched with so downstream
-                          tools (``builder_training_prepare.py``) read
-                          the exact JSON written here.
 """
 
 import argparse
@@ -126,6 +128,21 @@ def parse_args():
         description="Prepare loss inspection across a dataset's configs"
     )
     parser.add_argument(
+        "-s",
+        "--storage-root",
+        type=str,
+        default="./",
+        help=(
+            "Prefix used to compute the default Loss_prepare.json "
+            "location: <storage_root>/EXPERIMENT/nlcpV4/<module>/"
+            "Loss_prepare.json. Default is './' (current working "
+            "directory) — NO silent project-root fallback. The resolved "
+            "absolute path is printed at startup. Use a matching -s "
+            "across loss_prepare.py, builder_training_prepare.py, and "
+            "training so every tool reads the same file."
+        ),
+    )
+    parser.add_argument(
         "-m",
         "--module",
         type=str,
@@ -158,34 +175,19 @@ def parse_args():
         "grouping configs by batch_size and sampling batches once "
         "per group. Without -f, a mixed run aborts with an error.",
     )
-    parser.add_argument(
-        "-s",
-        "--storage-root",
-        type=str,
-        default="./",
-        help=(
-            "Prefix used to compute the default Loss_prepare.json "
-            "location: <storage_root>/EXPERIMENT/nlcpV4/<module>/"
-            "Loss_prepare.json. Default is './' (current working "
-            "directory) — NO silent project-root fallback. The resolved "
-            "absolute path is printed at startup. Use a matching -s "
-            "across loss_prepare.py, builder_training_prepare.py, and "
-            "training so every tool reads the same file."
-        ),
-    )
     return parser.parse_args()
 
 
-def loss_prepare_path(module: str, storage_root: str = "./") -> Path:
+def loss_prepare_path(module: str, storage_root: str) -> Path:
     """Return the absolute path of ``Loss_prepare.json`` for a given module.
 
     ``storage_root`` mirrors the trainer's ``-s`` flag: the output file
     lives under ``<storage_root>/EXPERIMENT/nlcpV4/<module>/``. There is
-    NO implicit project-root fallback — the default is ``./`` (current
-    working directory) and is always made visible at startup via
-    ``print_loss_prepare_path``.
+    NO implicit project-root fallback — the CLI default is ``./``
+    (current working directory) and is always made visible at startup
+    via ``print_loss_prepare_path``.
     """
-    base = Path(storage_root) if storage_root else Path("./")
+    base = Path(storage_root)
     return base / "EXPERIMENT" / "nlcpV4" / module / OUT_FILENAME
 
 
@@ -197,17 +199,16 @@ def print_loss_prepare_path(module: str, storage_root: str) -> None:
     startup so the user can verify WHERE the JSON will be read from
     and written to before any compute happens.
     """
-    shown = storage_root if storage_root else "./"
     rel = loss_prepare_path(module, storage_root)
     abs_path = rel.expanduser()
     if not abs_path.is_absolute():
         abs_path = (Path.cwd() / abs_path).resolve()
-    print(f"[STORAGE] storage_root = {shown!r} (cwd={Path.cwd().resolve()})")
+    print(f"[STORAGE] storage_root = {storage_root!r} (cwd={Path.cwd().resolve()})")
     print(f"[STORAGE]   Loss_prepare.json = {rel}")
     print(f"[STORAGE]                       (absolute: {abs_path})")
 
 
-def load_loss_prepare(module: str, storage_root: str = "") -> dict:
+def load_loss_prepare(module: str, storage_root: str) -> dict:
     """Load the persisted Loss_prepare.json store for ``module`` (empty if absent)."""
     path = loss_prepare_path(module, storage_root)
     if path.exists():
@@ -216,7 +217,7 @@ def load_loss_prepare(module: str, storage_root: str = "") -> dict:
     return {}
 
 
-def save_loss_prepare(module: str, data: dict, storage_root: str = "") -> None:
+def save_loss_prepare(module: str, data: dict, storage_root: str) -> None:
     """Persist the Loss_prepare.json store for ``module`` (creates parents)."""
     path = loss_prepare_path(module, storage_root)
     path.parent.mkdir(parents=True, exist_ok=True)

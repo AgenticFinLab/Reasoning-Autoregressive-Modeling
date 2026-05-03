@@ -58,34 +58,34 @@ Usage::
     # MUST match the ``-s`` that ``loss_prepare.py`` was launched with
     # so this tool reads the exact Loss_prepare.json just written.
     # Resolved paths:
-    #   -i: /Data/RAM/EXPERIMENT/nlcpV4/builder/Loss_prepare.json
-    #   -o: /Data/RAM/EXPERIMENT/nlcpV4/builder/training_prepare/
-    python3 examples/nlcpV4/builder_training_prepare.py -s /Data/RAM
+    #   -i: /Data/<proj>/EXPERIMENT/nlcpV4/builder/Loss_prepare.json
+    #   -o: /Data/<proj>/EXPERIMENT/nlcpV4/builder/training_prepare/
+    python3 examples/nlcpV4/builder_training_prepare.py -s /Data/<proj>
 
     # Filter to a single dataset / module subset (still reads the global
     # Loss_prepare.json; keys are filtered in-memory).
     python3 examples/nlcpV4/builder_training_prepare.py \\
-        --dataset GSM8K --module builder -s /Data/RAM
+        --dataset GSM8K --module builder -s /Data/<proj>
 
 Arguments:
+    -s / --storage-root   Prefix used to compute the DEFAULT ``-i`` /
+                          ``-o`` paths. Listed FIRST because it controls
+                          every default input/output path this script
+                          reads and writes. Ignored for explicit ``-i`` /
+                          ``-o`` values. Default is ``./`` (current
+                          working directory) — NEVER an implicit
+                          project root. The resolved paths are printed
+                          as a ``[STORAGE]`` block at startup. MUST
+                          match the ``-s`` used when running
+                          ``loss_prepare.py`` so this tool reads the
+                          JSON just written by it.
     -i / --input          Path to Loss_prepare.json. When omitted the
                           default is computed from ``-s``:
                             <storage_root>/EXPERIMENT/nlcpV4/builder/
                             Loss_prepare.json
-                          (project root is used in place of
-                          ``<storage_root>`` when ``-s`` is empty).
     -o / --output-dir     Output directory for plots + CSV. Default:
                             <storage_root>/EXPERIMENT/nlcpV4/builder/
                             training_prepare/
-    -s / --storage-root   Prefix that replaces the project root when
-                          computing the DEFAULT ``-i`` / ``-o`` paths.
-                          Ignored for explicit ``-i`` / ``-o`` values.
-                          Default is ``./`` (current working directory)
-                          — NEVER an implicit project root. The resolved
-                          paths are printed as a ``[STORAGE]`` block at
-                          startup. MUST match the ``-s`` used when
-                          running ``loss_prepare.py`` so this tool reads
-                          the JSON just written by it.
     --target              Target weighted-contribution per component for
                           the recommender (default: 0.8, ≈ median
                           residual raw so residual weight ≈ 1.0).
@@ -106,8 +106,6 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-
 # Components in fixed display order (must match training.loss_weights keys).
 COMPONENTS = ("recon", "ordering", "residual", "reasoning")
 COMPONENT_COLORS = {
@@ -122,11 +120,6 @@ COMPONENT_COLORS = {
 KEY_PATTERN = re.compile(
     r"^(?P<dataset>[^/]+)/train_(?P<module>[A-Za-z0-9]+)_"
     r"(?P<model>.+)_(?P<level>\d+)level$"
-)
-
-DEFAULT_INPUT = PROJECT_ROOT / "EXPERIMENT" / "nlcpV4" / "builder" / "Loss_prepare.json"
-DEFAULT_OUTPUT_DIR = (
-    PROJECT_ROOT / "EXPERIMENT" / "nlcpV4" / "builder" / "training_prepare"
 )
 
 
@@ -575,14 +568,26 @@ def parse_args():
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
+        "-s",
+        "--storage-root",
+        type=str,
+        default="./",
+        help=(
+            "Prefix used to compute the default -i / -o paths. "
+            "Ignored for paths passed explicitly via -i or -o. "
+            "Default is './' (current working directory) — NO silent "
+            "project-root fallback. Use to match the -s value that "
+            "loss_prepare.py was launched with."
+        ),
+    )
+    parser.add_argument(
         "-i",
         "--input",
         default=None,
         help=(
             "Path to Loss_prepare.json. Default: "
             "<storage_root>/EXPERIMENT/nlcpV4/builder/Loss_prepare.json, "
-            "where <storage_root> is the value of -s (or the project "
-            "root when -s is absent)."
+            "where <storage_root> is the value of -s."
         ),
     )
     parser.add_argument(
@@ -592,19 +597,6 @@ def parse_args():
         help=(
             "Output directory. Default: "
             "<storage_root>/EXPERIMENT/nlcpV4/builder/training_prepare/."
-        ),
-    )
-    parser.add_argument(
-        "-s",
-        "--storage-root",
-        type=str,
-        default="./",
-        help=(
-            "Prefix that replaces the project root when computing the "
-            "default -i / -o paths. Ignored for paths passed "
-            "explicitly via -i or -o. Default is './' (current working "
-            "directory) — NO silent project-root fallback. Use to "
-            "match the -s value that loss_prepare.py was launched with."
         ),
     )
     parser.add_argument(
@@ -632,16 +624,16 @@ def parse_args():
 def main():
     """CLI entry point: analyse Loss_prepare.json and emit plots + CSV."""
     args = parse_args()
-    storage_root = args.storage_root
-    base = Path(storage_root) if storage_root else Path("./")
+    storage_root: str = args.storage_root
+    base = Path(storage_root)
     default_input = base / "EXPERIMENT" / "nlcpV4" / "builder" / "Loss_prepare.json"
     default_output_dir = base / "EXPERIMENT" / "nlcpV4" / "builder" / "training_prepare"
     input_path = Path(args.input) if args.input else default_input
     output_dir = Path(args.output_dir) if args.output_dir else default_output_dir
 
     # Surface the resolved storage paths up front. No silent
-    # PROJECT_ROOT fallback — if ``-s`` is missing we announce ``./``
-    # (current working directory) explicitly so the user can verify.
+    # PROJECT_ROOT fallback — the CLI default ``./`` (current working
+    # directory) is announced explicitly so the user can verify.
     cwd = Path.cwd().resolve()
 
     def _abs(p: Path) -> str:
@@ -650,8 +642,7 @@ def main():
             p2 = (cwd / p2).resolve()
         return str(p2)
 
-    shown = storage_root if storage_root else "./"
-    print(f"[STORAGE] storage_root = {shown!r} (cwd={cwd})")
+    print(f"[STORAGE] storage_root = {storage_root!r} (cwd={cwd})")
     print(f"[STORAGE]   input  Loss_prepare.json = {input_path}")
     print(f"[STORAGE]                              (absolute: {_abs(input_path)})")
     print(f"[STORAGE]   output training_prepare/  = {output_dir}")
