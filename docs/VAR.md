@@ -1025,13 +1025,13 @@ for k in range(K):
 
 ##### 【5】与 Stage 1 的对偶关系（「复原」vs「编码」）
 
-| 视角 | Stage 1（VQ-VAE 前向 / 编码） | Stage 2（`idxBl_to_var_input`） |
-|---|---|---|
-| 作用对象 | `f_rest` = 尚未解释的残差 | `f_hat`  = 已经累积的画布 |
-| 关键操作 | 量化 + 减法 | 查表 + 加法 |
-| 输出 | 离散 `idx_k` | 连续 `f_hat_k` (下采样) |
-| 是否调用 Encoder | 是，一次/minibatch | **否**，只读 indices + codebook + φ_k |
-| 使用的参数 | encoder、codebook、φ_k | codebook、φ_k（encoder 不参与！） |
+| 视角             | Stage 1（VQ-VAE 前向 / 编码） | Stage 2（`idxBl_to_var_input`）       |
+|------------------|-------------------------------|---------------------------------------|
+| 作用对象         | `f_rest` = 尚未解释的残差     | `f_hat`  = 已经累积的画布             |
+| 关键操作         | 量化 + 减法                   | 查表 + 加法                           |
+| 输出             | 离散 `idx_k`                  | 连续 `f_hat_k` (下采样)               |
+| 是否调用 Encoder | 是，一次/minibatch            | **否**，只读 indices + codebook + φ_k |
+| 使用的参数       | encoder、codebook、φ_k        | codebook、φ_k（encoder 不参与！）     |
 
 关键：**Stage 2 的 `idxBl_to_var_input` 不是「再跑一遍训练」**，而是「**按 Stage 1 的解码规则做一次确定性回放**」。因为 VQ-VAE 在 Stage 2 完全冻结，这个回放 100% 与 Stage 1 的中间状态保持一致。
 
