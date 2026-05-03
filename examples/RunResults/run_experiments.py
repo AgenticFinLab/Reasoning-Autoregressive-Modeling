@@ -159,6 +159,21 @@ Resume (SwanLab):
         (``SwanLabIdMissingError``) rather than start a
         disconnected SwanLab run that loses history continuity.
 
+    Usage:
+        python3 examples/RunResults/run_experiments.py -m builder -d GSM8K \
+        -e AutoWeighted/train_builder_Qwen3-0.6B_2level.yml \
+            AutoWeighted/train_builder_Qwen2.5-3B_6level.yml \
+            AutoWeighted/train_builder_Qwen2.5-3B_4level.yml \
+            AutoWeighted/train_builder_Qwen2.5-3B_2level.yml \
+        -s /Data/ReasoningNLCP \
+        --resume \
+        --swanlab-ids sd0j2fdldk1t6hlyoj84x \
+                        fznay39wc04usqdom983t \
+                        otcg3faik7e0v10z5nc4x \
+                        wv1p7lmtnnme42ugj4uri \
+        --one-per-gpu
+
+
 Storage-root behaviour (``-s``):
     * Default: ``./`` (current working directory). NEVER an implicit
       project root — this avoids silent writes to whichever folder
