@@ -122,20 +122,26 @@ Usage (one-per-gpu):
     python3 examples/RunResults/run_experiments.py -m builder -d GSM8K \\
         -e AutoWeighted/*.yml -s /Data/<proj> --one-per-gpu
 
-    # Resume a batch with explicit SwanLab run ids (positional: ONE
-    # id per -e experiment, same order). Use '-' as a placeholder to
-    # defer an individual slot to that experiment's on-disk
-    # logs/<exp>/swanlab.json. The child trainer hard-errors if BOTH
-    # the CLI slot and the on-disk swanlab.json are missing, rather
-    # than silently starting a disconnected SwanLab run. ``-s`` is
-    # orthogonal and combines freely — forwarded to every child as
-    # usual so checkpoints / logs land under the shared storage root.
+    # Resume a batch (all -e experiments resume from their latest
+    # on-disk checkpoint). ``--resume`` is a boolean flag applied to
+    # EVERY child in the batch — the child trainer hard-errors if a
+    # per-experiment checkpoint directory is empty. Pair with
+    # ``--swanlab-ids`` to pin specific SwanLab runs; use ``-`` as a
+    # placeholder slot to defer to the child's logs/<exp>/swanlab.json.
+    # ``-s`` is orthogonal and combines freely.
     python3 examples/RunResults/run_experiments.py -m builder -d GSM8K \\
         -e expA.yml expB.yml expC.yml \\
         -s /Data/<proj> \\
+        --resume \\
         --swanlab-ids abc123 - xyz789
 
 Resume (SwanLab):
+    Resume is a pure CLI concern at BOTH layers: the launcher's
+    ``--resume`` flag is forwarded verbatim to every spawned
+    ``train_{module}.py --resume``. YAML configs no longer carry a
+    ``training.resume`` field — ``--resume`` at the command line
+    is the SINGLE source of truth.
+
     Each child trainer also accepts its own ``--swanlab-id`` (see
     ``train_{module}.py``). When the launcher is passed ``--swanlab-ids
     id1 id2 ... idN`` it fans them out 1-to-1 onto the N ``-e``
@@ -145,13 +151,12 @@ Resume (SwanLab):
       * A literal ``-`` placeholder keeps the slot but DEFERS id
         recovery to the child's ``logs/<exp>/swanlab.json`` (written
         on every fresh run, updated on every resume).
-      * The launcher NEVER inspects YAML ``training.resume`` itself;
-        forwarding just happens whenever the slot is non-``-``. The
-        child ignores ``--swanlab-id`` unless its own config has
-        ``training.resume`` enabled.
+      * ``--swanlab-ids`` is only meaningful alongside ``--resume``.
+        Without ``--resume``, children ignore any forwarded id and
+        let SwanLab allocate a fresh one.
       * If both the CLI slot AND ``logs/<exp>/swanlab.json`` are
-        missing while the child has resume enabled, the child
-        hard-errors (``SwanLabIdMissingError``) rather than start a
+        missing while ``--resume`` is set, the child hard-errors
+        (``SwanLabIdMissingError``) rather than start a
         disconnected SwanLab run that loses history continuity.
 
 Storage-root behaviour (``-s``):
@@ -303,6 +308,19 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--resume",
+        action="store_true",
+        default=False,
+        help=(
+            "Forward --resume to every spawned train_{module}.py. When "
+            "set, each child auto-discovers the latest checkpoint under "
+            "its own log.checkpoint_path and resumes; hard-errors if "
+            "that directory is missing or empty. Resume is a pure CLI "
+            "concern \u2014 YAML configs carry no training.resume field. "
+            "Pair with --swanlab-ids to pin SwanLab run ids per slot."
+        ),
+    )
+    parser.add_argument(
         "--swanlab-ids",
         type=str,
         nargs="+",
@@ -310,10 +328,11 @@ def parse_args() -> argparse.Namespace:
         help=(
             "SwanLab run IDs to resume, ONE per -e experiment, in the "
             "SAME order. Use '-' as a placeholder to defer to that "
-            "experiment's on-disk logs/<exp>/swanlab.json. Ignored "
-            "unless the child's own config enables --resume (via YAML "
-            "training.resume). If both the CLI slot and the on-disk "
-            "swanlab.json are missing, the child hard-errors rather "
+            "experiment's on-disk logs/<exp>/swanlab.json. Only "
+            "meaningful alongside --resume; without --resume the child "
+            "ignores forwarded ids and lets SwanLab allocate fresh "
+            "ones. If both the CLI slot and the on-disk swanlab.json "
+            "are missing under --resume, the child hard-errors rather "
             "than start a disconnected SwanLab run. Length MUST equal "
             "the number of -e arguments or the launcher aborts."
         ),
@@ -1027,6 +1046,7 @@ def build_inner_command(
     conda_env: str,
     keep_alive: bool,
     storage_root: str,
+    resume: bool = False,
 ) -> tuple[str, Path]:
     """Build the full shell command that tmux executes for one experiment.
 
@@ -1054,6 +1074,12 @@ def build_inner_command(
         f"CUDA_VISIBLE_DEVICES={exp.gpu_index} " if exp.gpu_index is not None else ""
     )
     storage_arg = f"-s {shlex.quote(storage_root)} "
+    # Resume is a pure launcher-wide boolean — when on, every child
+    # gets --resume appended; when off, the flag is absent entirely so
+    # the child's default (fresh-start) applies. This mirrors the
+    # train_builder.py contract where --resume is the SINGLE source of
+    # truth (no YAML training.resume field).
+    resume_arg = "--resume " if resume else ""
     # Forward a per-experiment SwanLab id only when the launcher was
     # explicitly given one for this slot. An empty slot (``None``)
     # means "let the child resolve it from logs/<exp>/swanlab.json",
@@ -1070,6 +1096,7 @@ def build_inner_command(
         f"{shlex.quote(str(train_script))} "
         f"-c {shlex.quote(str(exp.cfg_path))} "
         f"{storage_arg}"
+        f"{resume_arg}"
         f"{swanlab_arg}"
         f"2>&1 | tee {shlex.quote(str(log_path))}"
     )
@@ -1165,6 +1192,24 @@ def main() -> int:
     # easy to spot in the launch log. Actual length validation happens
     # after we resolve -e, because the validation message references the
     # resolved experiment count.
+    if args.resume:
+        print(
+            f"[RESUME] --resume is ON; every child train_{args.module}.py "
+            f"will auto-discover its latest checkpoint under "
+            f"log.checkpoint_path. Missing/empty dirs → hard error."
+        )
+        if args.swanlab_ids is None:
+            print(
+                "[RESUME] No --swanlab-ids provided; every child will "
+                "fall back to logs/<exp>/swanlab.json (hard error if "
+                "that file is missing)."
+            )
+    elif args.swanlab_ids is not None:
+        print(
+            "[WARN] --swanlab-ids given without --resume; child trainers "
+            "will IGNORE forwarded ids on a fresh run. Did you mean to "
+            "pass --resume?"
+        )
     if args.swanlab_ids is not None:
         n_supplied = sum(1 for s in args.swanlab_ids if s != "-")
         n_deferred = sum(1 for s in args.swanlab_ids if s == "-")
@@ -1465,6 +1510,7 @@ def main() -> int:
             conda_env=args.conda_env,
             keep_alive=args.keep_alive,
             storage_root=args.storage_root,
+            resume=args.resume,
         )
         status = launch_one(exp, inner, log_path, args)
         stats[status] += 1
@@ -1563,6 +1609,7 @@ def main() -> int:
                     conda_env=args.conda_env,
                     keep_alive=args.keep_alive,
                     storage_root=args.storage_root,
+                    resume=args.resume,
                 )
                 status = launch_one(exp, inner, log_path, args)
                 stats[status] += 1

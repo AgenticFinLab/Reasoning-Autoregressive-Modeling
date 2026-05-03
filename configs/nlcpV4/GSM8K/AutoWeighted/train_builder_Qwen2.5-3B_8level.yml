@@ -118,7 +118,6 @@ model:
 # weight_decay            : L2 regularization coefficient.
 # warmup_ratio            : Fraction of total steps for linear LR warmup.
 # gradient_clip           : Maximum gradient norm for clipping (prevents explosion).
-# resume                  : Checkpoint path to resume from (empty = scratch).
 #
 # loss_weights:
 #   reasoning_loss_weight       : Weight for next-token-prediction reasoning loss.
@@ -136,7 +135,6 @@ training:
   weight_decay: 0.01
   warmup_ratio: 0.1
   gradient_clip: 1.0
-  resume: ''
   reason_model:
     freeze: true
     lora: null

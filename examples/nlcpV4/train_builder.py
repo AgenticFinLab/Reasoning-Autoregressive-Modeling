@@ -61,8 +61,11 @@ Arguments:
                           contains no matching file, the trainer
                           hard-errors (``CheckpointNotFoundError``)
                           rather than silently fresh-starting.
-                          YAML ``training.resume`` has the same
-                          semantics; CLI can flip it on but not off.
+                          Resume is a pure CLI concern — the YAML
+                          config has NO ``training.resume`` field.
+                          Resume is always explicit at invocation
+                          time and never ambient in a checked-in
+                          config file.
     --swanlab-id          Optional SwanLab run id to resume. Only
                           consulted when ``--resume`` is set. Precedence:
                             1. ``--swanlab-id`` (this CLI flag), then
@@ -275,8 +278,10 @@ def parse_args():
             "Resume training from the latest checkpoint auto-discovered "
             "under log.checkpoint_path (pattern "
             "'checkpoint*-epoch<N>-step<M>.pt', picked by max step). "
-            "Boolean flag — no path argument. YAML 'training.resume' has "
-            "the same semantics; this CLI flag can flip it on but not off."
+            "Boolean flag — no path argument. Resume is a pure CLI "
+            "concern; YAML configs no longer carry a 'training.resume' "
+            "field so running with or without --resume is the ONLY "
+            "way to select between resume and fresh-start."
         ),
     )
     parser.add_argument(
@@ -371,12 +376,22 @@ def load_checkpoint(
     )
 
 
-def train_builder(config: dict, config_path: Path, cli_swanlab_id: str = ""):
+def train_builder(
+    config: dict,
+    config_path: Path,
+    cli_swanlab_id: str = "",
+    resume: bool = False,
+):
     """Main training loop.
 
+    ``resume`` is forwarded verbatim from ``--resume`` at the CLI —
+    it is the SINGLE source of truth. The YAML config intentionally
+    has no ``training.resume`` field; resume is always an explicit
+    command-line choice made at invocation time.
+
     ``cli_swanlab_id`` is the value forwarded from ``--swanlab-id``.
-    Only consulted when ``training.resume`` is truthy; otherwise the
-    id is allocated by SwanLab and persisted to
+    Only consulted when ``resume`` is True; otherwise the id is
+    allocated by SwanLab and persisted to
     ``logs/<exp>/swanlab.json`` for subsequent resumes.
     """
     # Extract sub-configs
@@ -395,7 +410,9 @@ def train_builder(config: dict, config_path: Path, cli_swanlab_id: str = ""):
     log_interval = log_cfg["log_step_interval"]
     checkpoint_interval = log_cfg["checkpoint_step_interval"]
     checkpoint_clean = log_cfg["checkpoint_clean"]
-    resume = bool(train_cfg["resume"])
+    # ``resume`` is supplied by the caller (driven by the --resume CLI
+    # flag in main()); intentionally NOT read from config. The YAML
+    # has no ``training.resume`` field — resume is a pure CLI concern.
     ordering_loss_type = train_cfg["ordering_loss_type"]
 
     checkpoint_dir = Path(log_cfg["checkpoint_path"])
@@ -978,13 +995,15 @@ def main():
     # when a later step crashes (e.g. OOM during model init).
     print_storage_paths(yaml_config, args.storage_root)
 
-    # Merge resume flag from CLI if set. CLI can flip it ON; YAML is
-    # the only way to flip it OFF. ``--resume`` is a pure boolean —
-    # the checkpoint path is auto-discovered inside train_builder.
-    if args.resume:
-        yaml_config["training"]["resume"] = True
-
-    train_builder(yaml_config, config_path=config_path, cli_swanlab_id=args.swanlab_id)
+    # Forward --resume directly to train_builder(). Resume is a pure
+    # CLI concern — the YAML has no ``training.resume`` field, so
+    # ``args.resume`` is the single source of truth for this choice.
+    train_builder(
+        yaml_config,
+        config_path=config_path,
+        cli_swanlab_id=args.swanlab_id,
+        resume=args.resume,
+    )
 
 
 if __name__ == "__main__":
