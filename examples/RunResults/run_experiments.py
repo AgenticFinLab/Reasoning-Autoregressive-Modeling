@@ -113,6 +113,32 @@ Usage (one-per-gpu):
     python3 examples/RunResults/run_experiments.py -m builder -d GSM8K \\
         -e AutoWeighted/*.yml --gpus 0,2
 
+    # Redirect every child trainer's relative log paths under a storage
+    # root. The launcher forwards ``-s /Data/RAM`` to each spawned
+    # train_{module}.py inside its tmux session, so save_folder /
+    # checkpoint_path / log_path all land under /Data/RAM/EXPERIMENT/...
+    # Use this on servers where the project-local EXPERIMENT/ tree is
+    # not writable or intentionally kept small.
+    python3 examples/RunResults/run_experiments.py -m builder -d GSM8K \\
+        -e AutoWeighted/*.yml -s /Data/RAM --one-per-gpu
+
+Storage-root behaviour (``-s``):
+    * Default: ``./`` (current working directory). NEVER an implicit
+      project root — this avoids silent writes to whichever folder
+      the script happens to resolve to. Every spawned trainer
+      receives the launcher's ``-s`` value via its own ``-s`` flag.
+    * Custom root (``-s /Data/RAM``): the launcher passes the SAME
+      value to every child ``train_{module}.py``; each trainer then
+      calls ``apply_storage_root(config, storage_root)`` after
+      loading its YAML, so RELATIVE paths under ``config.log`` get
+      prepended with the root. Absolute paths in YAML are preserved.
+    * Every tool prints a ``[STORAGE]`` block at startup — launcher
+      prints the forwarded value here, each child trainer prints
+      its per-config resolved save_folder/checkpoint_path/log_path.
+      Match this with analysis / SCP tools (``-s`` on
+      ``builder_training_analysis.py``, ``run_scp.py``,
+      ``loss_prepare.py``) so every tool looks at the same place.
+
 Attaching:
     Sessions are started detached. To attach/detach:
         tmux ls                 # list sessions
@@ -245,13 +271,18 @@ def parse_args() -> argparse.Namespace:
         "-s",
         "--storage-root",
         type=str,
-        default="",
+        default="./",
         help=(
             "Prefix forwarded to each child train_{module}.py as -s. "
             "Relative output paths in every experiment's config.log "
             "(save_folder / checkpoint_path / log_path) will land under "
             "this directory. Absolute paths in YAML are preserved. "
-            "Leave empty (default) to keep paths verbatim."
+            "Default is './' (current working directory) — NEVER "
+            "silently derived from a project root. The resolved value "
+            "is printed as a ``[STORAGE]`` block at launcher startup "
+            "AND every spawned trainer prints its own per-config "
+            "``[STORAGE]`` block, so you can see exactly where each "
+            "run writes its checkpoints / logs."
         ),
     )
     # ── Conda ───────────────────────────────────────────────────────
@@ -940,7 +971,7 @@ def build_inner_command(
     gpu_prefix = (
         f"CUDA_VISIBLE_DEVICES={exp.gpu_index} " if exp.gpu_index is not None else ""
     )
-    storage_arg = f"-s {shlex.quote(storage_root)} " if storage_root else ""
+    storage_arg = f"-s {shlex.quote(storage_root or './')} "
     inner_cmd = (
         f"cd {shlex.quote(str(PROJECT_ROOT))} && "
         f"source {shlex.quote(str(conda_sh))} && "
@@ -1025,6 +1056,19 @@ def launch_one(
 def main() -> int:
     """CLI entry point: parse args, schedule experiments, launch tmux sessions."""
     args = parse_args()
+
+    # ── Surface the storage-root contract up front ──────────────────
+    # Every spawned trainer will receive ``-s {storage_root}`` (default
+    # ``./``) and emit its own ``[STORAGE]`` block per config. Showing
+    # the launcher-level value here makes the cross-tool contract
+    # visible in a single log line, so misaligned ``-s`` values between
+    # launcher and downstream analysis/scp tools fail loudly.
+    _storage_root_shown = args.storage_root if args.storage_root else "./"
+    print(
+        f"[STORAGE] launcher storage_root = {_storage_root_shown!r} "
+        f"(forwarded as -s to every child train_{args.module}.py); "
+        f"cwd={Path.cwd().resolve()}"
+    )
 
     # ── Validate tmux availability ─────────────────────────────────────
     if not args.dry_run and shutil.which("tmux") is None:

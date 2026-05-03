@@ -1,7 +1,37 @@
 """Train NLCP V4 ConceptPyramidBuilder.
 
 Usage:
-    python3 examples/nlcpV4/train_builder.py -c configs/nlcpV4/GSM8K/train_builder_Qwen2.5-0.5B_6level.yml
+    # Basic: train with the config's own log paths (relative to project root).
+    python3 examples/nlcpV4/train_builder.py \\
+        -c configs/nlcpV4/GSM8K/train_builder_Qwen2.5-0.5B_6level.yml
+
+    # Nested variant (e.g. AutoWeighted/ subtree) — same CLI, path just changes.
+    python3 examples/nlcpV4/train_builder.py \\
+        -c configs/nlcpV4/GSM8K/AutoWeighted/train_builder_Qwen2.5-0.5B_6level.yml
+
+    # Redirect ALL relative outputs (save_folder/checkpoint_path/log_path)
+    # under a storage root — typical on a shared server where the
+    # project-local EXPERIMENT/ tree is not writable.
+    python3 examples/nlcpV4/train_builder.py \\
+        -c configs/nlcpV4/GSM8K/train_builder_Qwen2.5-0.5B_6level.yml \\
+        -s /Data/RAM
+
+    # Resume from a specific checkpoint (CLI --resume overrides config).
+    python3 examples/nlcpV4/train_builder.py \\
+        -c configs/nlcpV4/GSM8K/train_builder_Qwen2.5-0.5B_6level.yml \\
+        --resume /Data/RAM/EXPERIMENT/nlcpV4/builder/.../checkpoints/checkpoint_best.pt
+
+Arguments:
+    -c / --config         Path to a YAML training config.
+    --resume              Optional checkpoint path to resume training from.
+    -s / --storage-root   Prefix prepended to RELATIVE log paths in the
+                          YAML (save_folder/checkpoint_path/log_path).
+                          Absolute YAML paths are preserved. Default is
+                          ``./`` (current working directory) — NEVER an
+                          implicit project root. The resolved absolute
+                          paths are printed as a ``[STORAGE]`` block at
+                          startup so there is zero ambiguity about
+                          where checkpoints / logs will be written.
 
 V4 contract (vs V3):
   - ``ConceptPyramidBuilder.forward(batch: BuilderInput) -> PyramidOutput``
@@ -47,7 +77,7 @@ from nlcpV4.eval_builder import (
     log_terminal_entry,
 )
 from nlcpV4.losses import compute_builder_loss
-from ram.utils import apply_storage_root, load_config
+from ram.utils import apply_storage_root, load_config, print_storage_paths
 
 
 def _seed_single_device(seed: int, device: str) -> None:
@@ -185,12 +215,17 @@ def parse_args():
         "-s",
         "--storage-root",
         type=str,
-        default="",
+        default="./",
         help=(
             "Prefix to prepend to every relative output path in "
             "config.log (save_folder / checkpoint_path / log_path). "
-            "Absolute paths in YAML are preserved. Use on servers "
-            "where outputs should land under, e.g., /Data/<proj>/."
+            "Absolute paths in YAML are preserved. Default is './' so "
+            "paths resolve relative to the CURRENT WORKING DIRECTORY "
+            "you launched the command from (no silent project-root "
+            "fallback). Pass -s /Data/<proj> on servers where outputs "
+            "should land under a dedicated storage root. The resolved "
+            "paths are always printed at startup so you can verify "
+            "where data is written."
         ),
     )
     return parser.parse_args()
@@ -767,6 +802,10 @@ def main():
 
     yaml_config = load_config(str(config_path))
     apply_storage_root(yaml_config, args.storage_root)
+    # Make the resolved output locations impossible to miss. This is
+    # intentionally printed BEFORE any logger setup so it shows up even
+    # when a later step crashes (e.g. OOM during model init).
+    print_storage_paths(yaml_config, args.storage_root)
 
     # Merge resume flag from CLI if not in config
     if args.resume and not yaml_config["training"]["resume"]:

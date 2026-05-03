@@ -11,7 +11,7 @@ Modules:
     factory - Factory functions for creating data structures
 """
 
-from .config import apply_storage_root, load_config
+from .config import apply_storage_root, load_config, print_storage_paths
 from .tools import (
     set_seed,
     count_parameters,
@@ -51,6 +51,7 @@ __all__ = [
     # Config
     "apply_storage_root",
     "load_config",
+    "print_storage_paths",
     # Tools
     "set_seed",
     "count_parameters",

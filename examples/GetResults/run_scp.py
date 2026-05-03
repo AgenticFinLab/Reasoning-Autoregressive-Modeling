@@ -1,25 +1,62 @@
 """Download experiment results (checkpoints + logs) from remote server via SCP.
 
 Usage:
-    python3 examples/GetResults/run_scp.py -m <module> -e <experiment>
-    python3 examples/GetResults/run_scp.py -m <module> -e all
-    python3 examples/GetResults/run_scp.py -m <module> -e all -i checkpoints
-    python3 examples/GetResults/run_scp.py -m <module> -e all -i 'checkpoints/*best.pt'
+    # Fetch a single experiment's best checkpoints + logs/.
+    python3 examples/GetResults/run_scp.py -m builder \\
+        -e GSM8K_Qwen2.5-0.5B_6level
+
+    # Fetch EVERY experiment discovered from configs/nlcpV4/**/train_<module>_*.yml.
+    # Experiment names are read from each config's log.save_folder, so
+    # nested layouts (e.g. GSM8K/AutoWeighted/) are handled transparently.
+    python3 examples/GetResults/run_scp.py -m builder -e all
+
+    # Skip artifact(s) matching one or more -i patterns.
+    #   -i checkpoints                 -> drop the whole checkpoints/ dir
+    #   -i 'checkpoints/*best.pt'      -> drop only files matching the glob
+    #   -i logs                        -> drop the logs/ dir
+    python3 examples/GetResults/run_scp.py -m builder -e all -i checkpoints
+    python3 examples/GetResults/run_scp.py -m builder -e all \\
+        -i 'checkpoints/*best.pt' -i logs
+
+    # Remote artifacts live under a non-default storage root (must match
+    # the ``-s`` that training was launched with on the remote side).
+    # The REMOTE base becomes <storage_root>/EXPERIMENT/nlcpV4; the
+    # LOCAL base is unchanged (still ./EXPERIMENT/nlcpV4).
+    python3 examples/GetResults/run_scp.py -m builder -e all \\
+        -s /Data/RAM
+
+    # Redirect the LOCAL sink as well (e.g. downloading to an external disk).
+    python3 examples/GetResults/run_scp.py -m builder -e all \\
+        -s /Data/RAM \\
+        --local-base /Volumes/Backup/ReasoningAR/EXPERIMENT/nlcpV4
 
 Arguments:
-    -m / --module      Module name: "builder" or "predictor"
-    -e / --experiment  Experiment name (directory under EXPERIMENT/nlcpV4/<module>/)
-                       Pass "all" to iterate over every experiment discovered
-                       recursively from configs/nlcpV4/**/train_<module>_*.yml
-                       (experiment names are read from each config's
-                       log.save_folder, so nested layouts like
-                       configs/nlcpV4/GSM8K/AutoWeighted/ are supported).
-    -i / --ignore      Glob pattern (relative to the experiment dir) of
-                       artifacts to skip entirely. May be given multiple
-                       times. Examples:
-                         -i checkpoints               -> skip whole dir
-                         -i checkpoints/*best.pt      -> skip by glob
-                         -i logs                      -> skip the logs dir
+    -m / --module         Module name: "builder" or "predictor".
+    -e / --experiment     Experiment name (directory under
+                          EXPERIMENT/nlcpV4/<module>/).
+                          Pass "all" to iterate over every experiment
+                          discovered recursively from
+                          configs/nlcpV4/**/train_<module>_*.yml
+                          (experiment names are read from each config's
+                          log.save_folder, so nested layouts like
+                          configs/nlcpV4/GSM8K/AutoWeighted/ are supported).
+    -i / --ignore         Glob pattern (relative to the experiment dir)
+                          of artifacts to skip entirely. May be given
+                          multiple times. Examples:
+                            -i checkpoints               -> skip whole dir
+                            -i checkpoints/*best.pt      -> skip by glob
+                            -i logs                      -> skip the logs dir
+    -s / --storage-root   REMOTE storage root (on the SSH target).
+                          The remote base becomes
+                          ``<storage_root>/EXPERIMENT/nlcpV4``. Default
+                          is ``./`` — resolved against the remote
+                          user's $HOME. NEVER a hardcoded user-path
+                          fallback. Must match the ``-s`` that
+                          training on the remote was launched with.
+                          Accepts absolute or relative paths.
+    --local-base          Override the LOCAL destination base dir.
+                          Default is ``./EXPERIMENT/nlcpV4`` (resolved
+                          against current working directory).
 
 Behavior:
     1. Build full remote & local paths from the two args.
@@ -29,12 +66,6 @@ Behavior:
     4. If everything is already local or ignored -> exit 0 with [DONE].
     5. Otherwise -> SCP the missing items from remote. Missing remote files
        are treated as warnings (scp non-zero exit); the loop keeps going.
-
-Example:
-    python3 examples/GetResults/run_scp.py -m builder \\
-        -e GSM8K_Qwen2.5-0.5B_6level
-    python3 examples/GetResults/run_scp.py -m builder -e all
-    python3 examples/GetResults/run_scp.py -m builder -e all -i checkpoints
 """
 
 from __future__ import annotations
@@ -48,15 +79,14 @@ from pathlib import Path
 import yaml
 
 # --- Default remote / local base paths ---------------------------------
-# ``REMOTE_BASE`` and ``LOCAL_BASE`` point to the default
-# ``EXPERIMENT/nlcpV4`` directory on each side. Pass ``-s <root>`` to
-# redirect the REMOTE side to ``<root>/EXPERIMENT/nlcpV4`` (matches the
-# ``-s`` flag accepted by the trainer and by run_experiments.py). The
-# LOCAL side intentionally stays at ``./EXPERIMENT/nlcpV4`` — you can
-# always override with ``--local-base`` if you need a different sink.
+# The remote host is still hardcoded (``REMOTE_HOST``) because this
+# tool is SSH-based and pointing at a specific lab machine. The remote
+# and local directory bases, however, are now ALWAYS derived from the
+# ``-s`` flag (default ``./``) — there is NO silent fallback to
+# some hardcoded user-home path on the remote. The resolved bases
+# are printed as a ``[STORAGE]`` block at startup so every run is
+# self-documenting.
 REMOTE_HOST = "sjia@10.123.4.30"
-REMOTE_BASE = "/home/sjia/projects/Reasoning-Autoregressive-Modeling/EXPERIMENT/nlcpV4"
-LOCAL_BASE = Path("./EXPERIMENT/nlcpV4")
 CONFIGS_ROOT = Path("./configs/nlcpV4")
 EXPERIMENT_SUBPATH = "EXPERIMENT/nlcpV4"
 
@@ -161,11 +191,17 @@ def process_experiment(
     module: str,
     experiment: str,
     ignore_patterns: list[str] | None = None,
-    remote_base: str = REMOTE_BASE,
-    local_base: Path = LOCAL_BASE,
+    *,
+    remote_base: str,
+    local_base: Path,
 ) -> int:
     """Process a single experiment. Returns 0 on success (incl. all-skipped),
-    non-zero when at least one artifact failed to transfer."""
+    non-zero when at least one artifact failed to transfer.
+
+    ``remote_base`` and ``local_base`` are REQUIRED (no default). The
+    caller must resolve them from ``-s`` / ``--local-base`` and print
+    the ``[STORAGE]`` block so the user always sees which directories
+    are being read from / written to."""
     ignore_patterns = ignore_patterns or []
     remote_path = f"{remote_base}/{module}/{experiment}"
     local_path = local_base / module / experiment
@@ -323,14 +359,16 @@ def main() -> int:
         "-s",
         "--storage-root",
         type=str,
-        default="",
+        default="./",
         help=(
-            "Remote storage root. When provided, the remote base is "
-            f"set to '<storage_root>/{EXPERIMENT_SUBPATH}' instead of "
-            "the hard-coded default. Use this when training was "
-            "launched with a matching -s (e.g. -s /Data/<proj>), so "
-            "artifacts live at <storage_root>/EXPERIMENT/nlcpV4/... on "
-            "the remote. Absolute path expected."
+            "REMOTE storage root (on the SSH target). The remote base "
+            f"becomes ``<storage_root>/{EXPERIMENT_SUBPATH}``. Default "
+            "is ``./`` — i.e. the remote user's $HOME on the SSH host "
+            "(NO hardcoded user-path fallback). Pass ``-s /Data/<proj>`` "
+            "when training on the remote was launched with a matching "
+            "``-s``. The resolved remote + local bases are printed as "
+            "a ``[STORAGE]`` block at startup so mismatches are caught "
+            "before any SSH traffic."
         ),
     )
     parser.add_argument(
@@ -338,10 +376,11 @@ def main() -> int:
         type=str,
         default="",
         help=(
-            "Override the local destination base directory. Defaults "
-            "to ./EXPERIMENT/nlcpV4. Use this only when you want "
-            "downloaded files to land somewhere other than the "
-            "project-local EXPERIMENT/ tree."
+            "Override the LOCAL destination base directory. Default "
+            f"is ``./{EXPERIMENT_SUBPATH}`` (resolved against current "
+            "working directory). Use only when downloaded files "
+            "should land somewhere other than the project-local "
+            "EXPERIMENT/ tree (e.g. an external disk mount)."
         ),
     )
     args = parser.parse_args()
@@ -349,12 +388,28 @@ def main() -> int:
     module: str = args.module
     experiment: str = args.experiment
     ignore_patterns: list[str] = list(args.ignore or [])
-    remote_base: str = (
-        f"{args.storage_root.rstrip('/')}/{EXPERIMENT_SUBPATH}"
-        if args.storage_root
-        else REMOTE_BASE
+
+    # Resolve storage bases — both sides are ALWAYS derived from CLI
+    # flags (no hardcoded fallback). The remote storage root may be
+    # any directory string understood by the remote shell (absolute or
+    # relative to remote $HOME). The local side defaults to
+    # ``./EXPERIMENT/nlcpV4`` (resolved against current working dir).
+    storage_root = args.storage_root or "./"
+    remote_base = f"{storage_root.rstrip('/')}/{EXPERIMENT_SUBPATH}"
+    local_base = (
+        Path(args.local_base) if args.local_base else Path("./") / EXPERIMENT_SUBPATH
     )
-    local_base: Path = Path(args.local_base) if args.local_base else LOCAL_BASE
+
+    # Surface the resolved paths up front. Zero ambiguity about where
+    # files are pulled from (remote) or written to (local).
+    cwd = Path.cwd().resolve()
+    _local_abs = local_base.expanduser()
+    if not _local_abs.is_absolute():
+        _local_abs = (cwd / _local_abs).resolve()
+    print(f"[STORAGE] storage_root = {storage_root!r} (cwd={cwd})")
+    print(f"[STORAGE]   remote base = {REMOTE_HOST}:{remote_base}")
+    print(f"[STORAGE]   local  base = {local_base}")
+    print(f"[STORAGE]                 (absolute: {_local_abs})")
 
     if experiment == ALL_KEYWORD:
         experiments = discover_experiments(module)

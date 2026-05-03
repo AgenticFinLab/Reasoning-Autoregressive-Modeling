@@ -1,23 +1,48 @@
 """Visualize Builder training losses and learning rate from training logs.
 
 Usage:
-    # Single experiment
-    python3 examples/nlcpV4/builder_training_analysis.py \
+    # Single experiment — reads artifacts from the project-local EXPERIMENT/ tree.
+    python3 examples/nlcpV4/builder_training_analysis.py \\
         -m builder -d GSM8K -e Qwen2.5-0.5B_6level
 
-    # All experiments for a module + dataset
-    python3 examples/nlcpV4/builder_training_analysis.py \
+    # All experiments for a module + dataset (baseline + nested variants).
+    python3 examples/nlcpV4/builder_training_analysis.py \\
         -m builder -d GSM8K -e all
 
+    # Variant subtree (e.g. AutoWeighted/). Note the path has to be
+    # given to -d exactly as it appears under configs/nlcpV4/.
+    python3 examples/nlcpV4/builder_training_analysis.py \\
+        -m builder -d GSM8K/AutoWeighted -e all
+
+    # Read training artifacts from a non-default storage root.
+    # MUST match the -s value that train_builder.py / run_experiments.py
+    # was launched with — otherwise this script looks at the wrong
+    # checkpoints / log_path directories and reports [SKIP NO-DATA].
+    python3 examples/nlcpV4/builder_training_analysis.py \\
+        -m builder -d GSM8K -e all -s /Data/RAM
+
+    # Skip already-analyzed configs (by default existing PNGs are overwritten).
+    python3 examples/nlcpV4/builder_training_analysis.py \\
+        -m builder -d GSM8K -e all --no-overlap
+
 Arguments:
-    -m / --module      Module name: 'builder' or 'predictor'.
-    -d / --dataset     Dataset name (directory under configs/nlcpV4/).
-    -e / --experiment  Config stem after 'train_{module}_'
-                       (e.g. 'Qwen2.5-0.5B_6level') or 'all' to process
-                       every matching config under the dataset.
-    -o / --overlap     If true (default), overwrite existing analysis
-                       outputs. Use ``--no-overlap`` to skip configs whose
-                       outputs already exist.
+    -m / --module         Module name: 'builder' or 'predictor'.
+    -d / --dataset        Dataset name (directory under configs/nlcpV4/).
+                          May be a nested path like 'GSM8K/AutoWeighted'.
+    -e / --experiment     Config stem after 'train_{module}_'
+                          (e.g. 'Qwen2.5-0.5B_6level') or 'all' to process
+                          every matching config under the dataset.
+    -o / --overlap        If true (default), overwrite existing analysis
+                          outputs. Use ``--no-overlap`` to skip configs whose
+                          outputs already exist.
+    -s / --storage-root   Prefix prepended to RELATIVE log paths in the
+                          YAML (save_folder/checkpoint_path/log_path).
+                          MUST match the value used at training time so
+                          this script reads the artifacts actually on
+                          disk. Default is ``./`` (current working
+                          directory) — never an implicit project root.
+                          The resolved paths are printed as a
+                          ``[STORAGE]`` block per config at startup.
 
 Behavior:
     For each selected config:
@@ -55,7 +80,7 @@ from lmbase.utils.env_tools import get_device
 from nlcpV4.concept_builder import ConceptPyramidBuilder
 from nlcpV4.data_loader import NLCPV4DataLoader
 from nlcpV4.eval_builder import evaluate_builder
-from ram.utils import apply_storage_root, load_config
+from ram.utils import apply_storage_root, load_config, print_storage_paths
 
 logger = logging.getLogger(__name__)
 
@@ -119,13 +144,17 @@ def parse_args():
         "-s",
         "--storage-root",
         type=str,
-        default="",
+        default="./",
         help=(
             "Prefix to prepend to every relative output path in "
             "config.log (save_folder / checkpoint_path / log_path). "
-            "Must match the value used when training produced the "
-            "artifacts this script reads. Absolute paths in YAML are "
-            "preserved."
+            "MUST match the value used when training produced the "
+            "artifacts this script reads, otherwise this tool will "
+            "look at the wrong log directory and report "
+            "``[SKIP NO-DATA]``. Absolute paths in YAML are preserved. "
+            "Default is './' (current working directory) — no silent "
+            "project-root fallback. The resolved paths are printed "
+            "per-config as a ``[STORAGE]`` block so you can verify."
         ),
     )
     return parser.parse_args()
@@ -259,16 +288,23 @@ def load_eval_history(log_dir: Path):
         return json.load(f)
 
 
-def run_checkpoint_eval(config: dict, project_root: Path) -> dict | None:
+def run_checkpoint_eval(config: dict) -> dict | None:
     """Load best checkpoint and run full evaluation on the test set.
 
     Returns averaged loss dict (keys: total, recon, ordering, residual,
     optionally reasoning), or None if no checkpoint is found.
+
+    Paths are resolved strictly from ``config['log']['checkpoint_path']``
+    as-is — absolute values are used verbatim; relative values are
+    resolved against the CURRENT WORKING DIRECTORY (no silent
+    project-root fallback). The user controls this via ``-s``.
     """
-    # Locate best checkpoint
-    checkpoint_dir = Path(config["log"]["checkpoint_path"])
-    if not checkpoint_dir.is_absolute():
-        checkpoint_dir = project_root / checkpoint_dir
+    # Locate best checkpoint.
+    checkpoint_dir = Path(config["log"]["checkpoint_path"]).expanduser()
+    # NOTE: relative paths intentionally resolve against CWD — every
+    # caller now runs after ``apply_storage_root`` with a mandatory
+    # ``-s`` (default ``./``) so the path shown in ``[STORAGE]`` is
+    # exactly what's opened here.
 
     # Prefer best_eval checkpoint, then best training checkpoint
     ckpt_path = None
@@ -813,9 +849,10 @@ def _run_builder_analysis(config_path: Path, storage_root: str = "") -> None:
         }
     )
 
-    log_dir = Path(config["log"]["log_path"])
-    if not log_dir.is_absolute():
-        log_dir = PROJECT_ROOT / log_dir
+    log_dir = Path(config["log"]["log_path"]).expanduser()
+    # Relative paths resolve against CWD — never PROJECT_ROOT. The
+    # ``-s`` default of ``./`` plus the ``[STORAGE]`` print above make
+    # the exact location visible.
 
     loss_weights = config["training"]["loss_weights"]
     w_recon = loss_weights["recon_loss_weight"]
@@ -842,7 +879,7 @@ def _run_builder_analysis(config_path: Path, storage_root: str = "") -> None:
             level=logging.INFO,
             format="%(asctime)s [%(levelname)s] %(message)s",
         )
-        ckpt_eval = run_checkpoint_eval(config, PROJECT_ROOT)
+        ckpt_eval = run_checkpoint_eval(config)
 
     # Auto smoothing window: 1% of total steps, clamped to [10, 500]
     window = max(10, min(500, len(history) // 100))
@@ -957,10 +994,13 @@ def analyze_one(
         return "error", f"load_config failed: {exc}"
 
     apply_storage_root(config, storage_root)
+    # Surface the resolved log paths per config so downstream failures
+    # (``[SKIP NO-DATA]`` / ``[ERROR]``) are easy to diagnose.
+    print_storage_paths(config, storage_root)
 
-    log_dir = Path(config["log"]["log_path"])
-    if not log_dir.is_absolute():
-        log_dir = PROJECT_ROOT / log_dir
+    log_dir = Path(config["log"]["log_path"]).expanduser()
+    # Relative paths resolve against CWD (matching run_checkpoint_eval
+    # above). No silent project-root fallback.
 
     training_history = log_dir / "training_history.json"
     if not training_history.is_file():

@@ -36,9 +36,55 @@ Re-run tip (IMPORTANT):
     recorded.
 
 Usage:
+    # Single batch per config, project-local Loss_prepare.json.
     python3 examples/RunResults/loss_prepare.py -m builder -d GSM8K
+
+    # Average loss statistics over 5 batches per config.
     python3 examples/RunResults/loss_prepare.py -m builder -d GSM8K -n 5
+
+    # Dataset has configs with MIXED batch sizes: group them and sample
+    # once per (batch_size) group so each config still sees real data.
     python3 examples/RunResults/loss_prepare.py -m builder -d GSM8K -n 5 -f
+
+    # Persist Loss_prepare.json under a non-default storage root (must
+    # match the ``-s`` that training was launched with so downstream
+    # scripts read the same file). Target path becomes:
+    #   <storage_root>/EXPERIMENT/nlcpV4/<module>/Loss_prepare.json
+    python3 examples/RunResults/loss_prepare.py -m builder -d GSM8K -n 5 \\
+        -s /Data/RAM
+
+    # Dataset with MIXED batch sizes AND non-default storage root.
+    # ``-f`` groups configs by batch_size so each group samples batches
+    # once and reuses them, while ``-s`` redirects the persisted JSON.
+    python3 examples/RunResults/loss_prepare.py -m builder -d GSM8K \\
+        -n 5 -f -s /Data/RAM
+
+Arguments:
+    -m / --module         Module name: 'builder' or 'predictor'. Only
+                          YAML configs whose filename starts with
+                          ``train_{module}_`` are selected for inspection.
+    -d / --dataset        Dataset directory under ``configs/nlcpV4/`` to
+                          scan (e.g. ``GSM8K``). Non-recursive by design
+                          so only the direct-child configs participate.
+    -n / --num-batches    Number of batches to sample (default: 1). Per
+                          config, N forward passes are run; per-batch
+                          raw/weighted/total losses plus mean/std/min/max
+                          aggregates are recorded in Loss_prepare.json.
+    -f / --force          Allow configs with MIXED ``training.batch_size``.
+                          Without ``-f`` such a run aborts early with a
+                          clear message. With ``-f`` configs are grouped
+                          by batch size and batches are sampled once per
+                          group (still reused within the group).
+    -s / --storage-root   Prefix used to compute the Loss_prepare.json
+                          path: ``<storage_root>/EXPERIMENT/nlcpV4/
+                          <module>/Loss_prepare.json``. Default is
+                          ``./`` (current working directory) — NEVER
+                          a silent project-root fallback. The resolved
+                          absolute path is printed as a ``[STORAGE]``
+                          block at startup. MUST match the ``-s`` that
+                          training was launched with so downstream
+                          tools (``builder_training_prepare.py``) read
+                          the exact JSON written here.
 """
 
 import argparse
@@ -116,29 +162,49 @@ def parse_args():
         "-s",
         "--storage-root",
         type=str,
-        default="",
+        default="./",
         help=(
-            "Prefix prepended to the default EXPERIMENT/ tree when "
-            "locating Loss_prepare.json. Without -s the file lives at "
-            "<project>/EXPERIMENT/nlcpV4/<module>/Loss_prepare.json; "
-            "with -s <root> it lives at <root>/EXPERIMENT/nlcpV4/<module>/"
-            "Loss_prepare.json. Use this to match the -s value that "
-            "training was launched with."
+            "Prefix used to compute the default Loss_prepare.json "
+            "location: <storage_root>/EXPERIMENT/nlcpV4/<module>/"
+            "Loss_prepare.json. Default is './' (current working "
+            "directory) — NO silent project-root fallback. The resolved "
+            "absolute path is printed at startup. Use a matching -s "
+            "across loss_prepare.py, builder_training_prepare.py, and "
+            "training so every tool reads the same file."
         ),
     )
     return parser.parse_args()
 
 
-def loss_prepare_path(module: str, storage_root: str = "") -> Path:
+def loss_prepare_path(module: str, storage_root: str = "./") -> Path:
     """Return the absolute path of ``Loss_prepare.json`` for a given module.
 
-    ``storage_root`` mirrors the trainer's ``-s`` flag: when set, the
-    output file lives under ``<storage_root>/EXPERIMENT/nlcpV4/<module>/``
-    so downstream consumers see it next to other per-experiment
-    artifacts produced with the same storage root.
+    ``storage_root`` mirrors the trainer's ``-s`` flag: the output file
+    lives under ``<storage_root>/EXPERIMENT/nlcpV4/<module>/``. There is
+    NO implicit project-root fallback — the default is ``./`` (current
+    working directory) and is always made visible at startup via
+    ``print_loss_prepare_path``.
     """
-    base = Path(storage_root) if storage_root else PROJECT_ROOT
+    base = Path(storage_root) if storage_root else Path("./")
     return base / "EXPERIMENT" / "nlcpV4" / module / OUT_FILENAME
+
+
+def print_loss_prepare_path(module: str, storage_root: str) -> None:
+    """Print a ``[STORAGE]`` block showing the resolved Loss_prepare.json path.
+
+    Mirrors the format used by ``ram.utils.print_storage_paths`` but
+    tailored for the single-file output of this script. Called once at
+    startup so the user can verify WHERE the JSON will be read from
+    and written to before any compute happens.
+    """
+    shown = storage_root if storage_root else "./"
+    rel = loss_prepare_path(module, storage_root)
+    abs_path = rel.expanduser()
+    if not abs_path.is_absolute():
+        abs_path = (Path.cwd() / abs_path).resolve()
+    print(f"[STORAGE] storage_root = {shown!r} (cwd={Path.cwd().resolve()})")
+    print(f"[STORAGE]   Loss_prepare.json = {rel}")
+    print(f"[STORAGE]                       (absolute: {abs_path})")
 
 
 def load_loss_prepare(module: str, storage_root: str = "") -> dict:
@@ -418,6 +484,10 @@ def main():
     num_batches: int = max(1, int(args.num_batches))
     force: bool = bool(args.force)
     storage_root: str = args.storage_root
+
+    # Surface the exact Loss_prepare.json location BEFORE any compute
+    # so a misconfigured ``-s`` is caught immediately (no hidden default).
+    print_loss_prepare_path(module, storage_root)
 
     configs_dir = PROJECT_ROOT / "configs" / "nlcpV4" / dataset
     if not configs_dir.is_dir():
