@@ -79,6 +79,40 @@ DIMENSION FLOW:
 REFERENCES:
     - hybrid-analysis.md: Full architectural analysis
     - VAR.md Section 5.2.2: Residual decomposition (f_hat + f_rest)
+
+FUTURE NOTE — Level embeddings for reasoning-loss concept tokens:
+    Per `examples/nlcpV4/nlcpV4-explain.md §2.5`, each C_k is a rank-L_k
+    compressed summary of the *residual* H_rest_k, not a standalone
+    representation of "level k". When `_prepare_reasoning` concatenates
+    [Q_embeds, back_proj([C_0; …; C_{K-1}]), S_embeds] and feeds it to
+    `reason_model`, the 63 concept tokens (for K=6, Σ L_k = 63) carry
+    NO explicit level-identity marker — reason_model must infer from
+    positional order alone which tokens belong to which level and how
+    to combine them across residual granularities. This is learnable
+    but fragile.
+
+    VAR solves the analogous problem in Stage-2 by adding a per-scale
+    level embedding `lvl_emb[k]` to every token of scale k (VAR.md
+    §5.3.1). We should add the same mechanism here:
+
+        # In __init__ (future):
+        #   self.level_embeddings = nn.Embedding(K, D_encoder)
+        #
+        # In _prepare_reasoning (future, between back_proj and concat):
+        #   level_ids = torch.cat([
+        #       torch.full((L_k,), k, device=device, dtype=torch.long)
+        #       for k, L_k in enumerate(self.level_lengths)
+        #   ]).unsqueeze(0).expand(batch_size, -1)     # [B, total_C]
+        #   level_emb = self.level_embeddings(level_ids)   # [B, total_C, D_enc]
+        #   concept_embeds = concept_embeds + level_emb
+
+    Cost: ~K * D_encoder = 6 * 768 ≈ 4.6K extra params.
+    Benefit: explicit level-identity for `reason_model`, aligned with
+    VAR's `lvl_emb` convention, improves learnability of the residual
+    aggregation rule without any Predictor redesign.
+
+    This is a low-cost, principled improvement deferred for a future
+    commit; implementing it does not change the train-test interface.
 """
 
 import math

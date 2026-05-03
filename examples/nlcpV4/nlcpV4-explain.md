@@ -282,6 +282,341 @@ However, `level_proj` is a linear layer that can amplify the magnitude of C_{0,0
 
 ---
 
+## 2.5 Deep Dive: The Rank-Constrained Residual Decomposition Principle
+
+This section synthesizes §2.1–§2.4 and the VAR comparison of §7 into a single, mechanistic statement of what the Builder actually does. It is the most important section of this document — every downstream design choice (Predictor teacher forcing, loss weights, level schedule) flows from here. It is the nlcpV4 counterpart of `docs/VAR.md §5.3.2.1` (which established the dual fact for VAR: *codebook entries are residuals*).
+
+### 2.5.0 Relationship to VAR.md §6 — No Contradiction, Two Layers of Description
+
+Readers coming from [docs/VAR.md](file:///Users/sjia/Documents/AgenticFinLab/Projects/Reasoning-Autoregressive-Modeling/docs/VAR.md) §6 — which declared that nlcpV4's Builder "follows VAR's residual philosophy" and that `C_k` "expresses the semantic remainder scales 0..k-1 cannot cover" — may wonder whether §2.5's emphasis on a *rank-bounded softmax bottleneck* (contrasted with VAR's *discrete codebook bottleneck*) contradicts that claim, **or** whether §2.5's phrase "`C_k` is the best low-rank expression of the residual" is a third, different statement. **Neither is a contradiction.** The three statements operate at three different layers of abstraction and are mutually consistent. This subsection makes the layering explicit.
+
+#### Two layers of architectural description
+
+| Layer           | What it describes                                            | Same in VAR and nlcpV4? | Discussed in                                    |
+|-----------------|--------------------------------------------------------------|-------------------------|-------------------------------------------------|
+| **Outer loop**  | The `H_rest / H_hat` residual-accumulation skeleton          | ✅ **YES — identical**   | VAR.md §6; nlcpV4-explain.md §2.5.5             |
+| **Inner joint** | How each level produces its per-level output from `H_rest_k` | ❌ **NO — different**    | VAR.md §5.3.2.1; nlcpV4-explain.md §2.5.2–2.5.6 |
+
+```
+┌─── OUTER LOOP (shared by VAR and nlcpV4) ─────────────────────────────┐
+│  for k in 0..K-1:                                                      │
+│      level-k output  ←──── [INNER JOINT: differs] ────  H_rest_k       │
+│      R_k             ←  smear level-k output to sequence length        │
+│      H_hat_{k+1}     =  H_hat_k  + R_k      (canvas grows)             │
+│      H_rest_{k+1}    =  H_rest_k - R_k      (residual shrinks)         │
+│                                                                         │
+│    ┌── INNER JOINT (differs) ────────────────────────────────┐         │
+│    │  VAR:     level-k output  =  embedding(argmin_V ‖·‖)     │         │
+│    │           (discrete codebook lookup, V hard options)     │         │
+│    │  nlcpV4:  level-k output  =  level_proj(A_k @ H_rest_k)  │         │
+│    │           (rank-L_k soft summary, softmax weights)       │         │
+│    └───────────────────────────────────────────────────────────┘        │
+└────────────────────────────────────────────────────────────────────────┘
+```
+
+**VAR.md §6** is a statement about the **outer loop** — it's why the Predictor must replay the cumulative canvas `H_hat_k` (identical requirement in both systems).  
+**nlcpV4-explain.md §2.5** is a zoom-in on the **inner joint** — it explains that we swap discrete-argmin for rank-bounded-softmax while leaving the outer loop untouched.
+
+#### Reconciling "residual in nature" vs "best low-rank summary"
+
+These two phrasings describe the **same mathematical object** (`C_k`) from two different vocabularies:
+
+| Phrasing (source)                                                            | Vocabulary       | What exactly it claims                                                           |
+|------------------------------------------------------------------------------|------------------|----------------------------------------------------------------------------------|
+| "`C_k` is residual in nature / expresses what prior can't cover" (VAR.md §6) | **Semantic**     | `C_k`'s information source is `H_rest_k`, not raw `H_proj`                       |
+| "`C_k` is the best rank-`L_k` low-rank summary of `H_rest_k`" (§2.5.3)       | **Mathematical** | `C_k` approximates `H_rest_k` at rank ≤ `L_k`, optimally under training pressure |
+
+The equivalence chain:
+
+```
+  H_rest_k  =  H_proj - Σ_{j<k} R_j    ← by construction
+            =  "what scales 0..k-1 have not yet covered"
+
+  C_k       =  level_proj( A_k @ H_rest_k )
+            =  best rank-L_k summary of H_rest_k       (§2.5.3)
+            =  best rank-L_k summary of what scales 0..k-1 have not yet covered
+            =  "residual in nature"                     (VAR.md §6)
+```
+
+The VAR.md phrasing is the semantic-level consequence of the §2.5 mathematical-level statement. They are the same claim at two zoom levels.
+
+#### Critical subtlety: `C_k ≠ H_rest_k`
+
+It is tempting (and a common source of confusion) to read "`C_k` is residual in nature" as "`C_k` equals the residual tensor." **This is wrong.** `C_k` is a *rank-`L_k` lossy compression* of `H_rest_k`, not `H_rest_k` itself:
+
+```
+ Shape of H_rest_k :  [B, L,   D]     ← uncompressed residual (L positions)
+ Shape of C_k      :  [B, L_k, D]     ← rank-L_k compressed summary (L_k ≪ L)
+ Shape of R_k      :  [B, L,   D]     ← smeared-back rank-L_k reconstruction
+
+ Relation:
+   C_k  =  level_proj(A_k @ H_rest_k)     # compress: L → L_k
+   R_k  =  A_k^T @ C_k                     # smear:    L_k → L
+   H_rest_{k+1}  =  H_rest_k  −  R_k       # subtract R_k (NOT C_k) from residual
+   H_hat_{k+1}   =  H_hat_k   +  R_k       # add       R_k (NOT C_k) to canvas
+```
+
+So three distinct tensors are about the residual, each playing a different role:
+
+| Tensor     | Shape         | Role                                                        | Synonyms in literature                           |
+|------------|---------------|-------------------------------------------------------------|--------------------------------------------------|
+| `H_rest_k` | `[B, L, D]`   | The residual itself — what remains uncovered                | "uncovered information," "current state"         |
+| `C_k`      | `[B, L_k, D]` | Rank-`L_k` **compressed summary** of the residual           | "concepts," "level-k latents," "codes"           |
+| `R_k`      | `[B, L, D]`   | Smeared-back, rank-`L_k` **reconstruction** of the residual | "level-k reconstruction," "h_k" in VAR, "stroke" |
+
+- `C_k` is what the **Predictor** predicts (and what `reason_model` sees after `back_proj`).
+- `R_k` is what the **outer loop** debits from `H_rest` and adds to `H_hat`.
+- `H_rest_k` is what the **inner joint at level k** reads as input.
+
+"`C_k` is residual in nature" means: **`C_k`'s informational content comes from `H_rest_k`**, hence it inherits the property of being "what prior levels couldn't cover." It does **not** mean `C_k = H_rest_k` literally.
+
+#### Summary table — which statement lives at which layer
+
+| Claim                                                              | Layer        | Tensor level | Relationship to other claims           |
+|--------------------------------------------------------------------|--------------|--------------|----------------------------------------|
+| "Predictor must replay cumulative `H_hat_k`" (VAR.md §6)           | Outer loop   | `H_hat`      | Shared by VAR and nlcpV4               |
+| "VAR uses discrete codebook, nlcpV4 uses rank bottleneck" (§2.5.6) | Inner joint  | per-level op | The only structural difference         |
+| "`C_k` is residual in nature" (VAR.md §6)                          | Semantic     | `C_k`        | Equivalent to §2.5.3 at semantic zoom  |
+| "`C_k` is best rank-`L_k` summary of `H_rest_k`" (§2.5.3)          | Mathematical | `C_k`        | The precise form of the semantic claim |
+| "`R_k` is subtracted from `H_rest_k`" (both docs)                  | Operational  | `R_k`        | The canvas-debit step; shared in both  |
+
+All five statements are simultaneously true. They describe different faces of the same architecture.
+
+---
+
+### 2.5.1 The Core Sentence (核心一句话)
+
+> **At each level, the Builder takes the current residual `H_rest_k`, uses `L_k` learnable queries to construct a rank-`L_k`-bounded best low-rank summary `C_k`, smears it back to sequence length as `R_k`, adds `R_k` onto the canvas `H_hat` and subtracts it from the residual, then hands whatever remains to the next level whose `2×`-wider query bank fishes again.**
+>
+> **我们每一层都基于当前残差 `H_rest_k`，用 `L_k` 条可学习查询构造一个秩受 `L_k` 约束的最佳低秩摘要 `C_k`，然后把它 smear 回序列长度得到 `R_k`，加入画布、从残差里扣掉，留下的信息交给下一层用 2 倍宽的查询再捞一次。**
+
+Every clause in this sentence corresponds to an architectural commitment that can be read directly off the code in [concept_builder.py](file:///Users/sjia/Documents/AgenticFinLab/Projects/Reasoning-Autoregressive-Modeling/examples/nlcpV4/concept_builder.py). The rest of §2.5 unpacks it.
+
+### 2.5.2 The Rank Inequality as nlcpV4's "Invisible Codebook"
+
+VAR bottlenecks information flow with a **discrete codebook** (hard argmin lookup against V learned centroids). nlcpV4 has no codebook — so what prevents the model from cheating and dumping all information into a single level? Answer: **a linear-algebraic rank constraint** just as unforgiving as a codebook, only expressed in the language of matrix factorization rather than nearest-neighbor search.
+
+Formal statement. At level `k`, the reconstruction is assembled by matmul:
+
+```
+R_k  =   A_k^T   @   C_k
+         [L,L_k]     [L_k,D]
+         ────────    ────────
+         smear       summary
+```
+
+and the summary itself is built from the attention-weighted residual:
+
+```
+C_k  =  level_proj(  A_k   @   H_rest_k  )
+                     [L_k,L]    [L,D]
+```
+
+Hence `R_k` factors through `R^{L_k × D}`. Therefore:
+
+```
+rank(R_k)  ≤  L_k     (since L_k ≪ L and L_k ≪ D by construction)
+```
+
+This inequality is **strict and mechanical** — no clever initialization or loss can raise it. It is enforced at graph-construction time by setting `num_queries = L_k`. The rank upper bound **is** the bottleneck.
+
+**Why this equals "a codebook of invisible size"**: VAR's codebook has `V` entries of dimension `Cvae`; `embedding(idx_k)` at each spatial position is one of at most `V` possible vectors. nlcpV4's level-k output lives in a continuous rank-`L_k` subspace of `R^{L×D}`; `R_k` is one of infinitely many tensors in this subspace. Both are information-capacity ceilings, merely expressed in different bases:
+
+| Bottleneck shape | VAR                                 | nlcpV4                            |
+|------------------|-------------------------------------|-----------------------------------|
+| Capacity unit    | Discrete codebook entry (V options) | Continuous rank-1 direction       |
+| Budget per level | `L_k^2` patches × V choices each    | `L_k` ranks, continuous           |
+| Nature           | **Hard discrete** (argmin)          | **Hard on rank, soft on weights** |
+| Differentiable?  | No (STE workaround)                 | Yes (softmax is smooth)           |
+
+### 2.5.3 "Best Low-Rank Summary" — Why `C_k` is Optimal
+
+The softmax weights `A_k = softmax(Q_k H_rest_k^T / (√D · τ))` are not arbitrary — they are the **gradient-descent optimum** of a scalar objective balancing two pressures:
+
+1. **Coverage pressure**: `L_recon = ‖back_proj(Σ_j R_j) − H_CoT‖²` penalizes any residual that never gets captured.
+2. **Rank pressure**: `R_k` is forced to rank ≤ `L_k`, so `C_k` cannot be all of `H_rest_k` — it must be a **lossy compression** that prioritizes the dominant directions of the residual.
+
+Under these two pressures, training drives `A_k^T @ A_k @ H_rest_k` toward a rank-`L_k` approximation of the residual that preserves the most reconstructable energy. This is the learnable, non-linear, position-aware analog of the **Eckart–Young theorem**: the best rank-`L_k` approximation of a matrix is its top-`L_k` SVD reconstruction. Softmax attention is a cousin of SVD (with the budget constraint `Σ_j A_{k,j}(t) = 1` replacing orthonormality), and `level_proj` adds a learned feature transform on top.
+
+Therefore the phrase "best low-rank summary" in §2.5.1 is not rhetoric — it is a statement about the loss landscape's optimum.
+
+### 2.5.4 "Smear" — `R_k = A_k^T @ C_k` as a Rank-Bounded Broadcast
+
+Multiplying `A_k^T ∈ R^{L×L_k}` by `C_k ∈ R^{L_k × D}` produces `R_k ∈ R^{L×D}`:
+
+- Each of `L` sequence positions receives a convex-like combination of the `L_k` concepts, weighted by how much that position attended to each concept slot.
+- If position `t` was claimed primarily by `C_{k,j}`, then `R_k[t] ≈ C_{k,j}`.
+- If position `t` is on the boundary between two concepts, `R_k[t]` is a soft blend.
+
+The composition `A_k^T @ A_k ∈ R^{L×L}` is a **rank-`L_k` soft-clustering smoother**: it replaces each position's feature with a soft-cluster-mean of its neighbors. Analogous operations across fields:
+
+| Field          | Compression step       | Smear-back step              | Rank bound             |
+|----------------|------------------------|------------------------------|------------------------|
+| PCA            | project to top-k axes  | reconstruct via `V_k V_k^T`  | rank ≤ k               |
+| K-means        | assign to centroid     | broadcast centroid to points | rank ≤ K               |
+| nlcpV4 Builder | `A_k @ H_rest_k`       | `A_k^T @ C_k`                | rank ≤ L_k             |
+| VAR VQ-VAE     | `argmin` over codebook | `embedding(idx_k)` + upscale | ≤ V discrete centroids |
+
+### 2.5.5 "Paint on the Canvas, Subtract from the Residual" — The Two Ledgers
+
+The Builder maintains two tensors that serve as accounting ledgers:
+
+```
+H_hat_k   = Σ_{j<k} R_j          — "what has already been painted onto the canvas"
+H_rest_k  = H_proj - H_hat_k     — "what is still left to paint"
+```
+
+**Invariant**: at every level, `H_hat_k + H_rest_k = H_proj`. Both live in `R^{L×D}`.
+
+After level k executes:
+
+```
+H_hat_{k+1}  = H_hat_k  + R_k     # add rank-L_k stroke to canvas
+H_rest_{k+1} = H_rest_k - R_k     # debit the residual
+```
+
+Crucially, `H_rest_{k+1}` is **exactly the part of `H_proj` not spanned (in the rank-reduction sense) by everything captured so far**. When level `k+1` attends against `H_rest_{k+1}`, the directions it can discover are precisely those orthogonal (in the residual sense) to `R_0, ..., R_k`. **The residual itself performs the non-overlap enforcement that VAR achieves via codebook separation** — the mechanism is different (subtraction vs. discrete partition), but the net effect is equivalent: no level can redundantly re-capture information already booked by a coarser level.
+
+Flow diagram of the ledger dynamics (K=6 levels, `L_k = 2^k`):
+
+```
+               level 0         level 1        level 2         ...    level 5
+               (L_0=1)         (L_1=2)        (L_2=4)                (L_5=32)
+
+H_proj ─► H_rest_0 ─► H_rest_1 ─► H_rest_2 ─► H_rest_3 ─► H_rest_4 ─► H_rest_5
+              │           │            │                                 │
+          Q_0/A_0/C_0  Q_1/A_1/C_1  Q_2/A_2/C_2                     Q_5/A_5/C_5
+              │           │            │                                 │
+              R_0         R_1          R_2                               R_5
+              │           │            │                                 │
+              ▼           ▼            ▼                                 ▼
+H_hat: 0 ──► H_hat_1 ──► H_hat_2 ──► H_hat_3 ──► ... ──► H_hat_6 ≈ H_proj
+
+rank(R_k):        1    ≤   2       ≤   4      ≤   8    ≤  16   ≤  32
+cum. rank(H_hat): 1    ≤   3       ≤   7      ≤  15    ≤  31   ≤  63
+
+(Σ L_k = 2^K - 1 = 63 concepts total, matching min(L, D) for typical L=128, D=64.)
+```
+
+### 2.5.6 Side-by-Side with VAR's Hard Codebook Bottleneck
+
+The statement "VAR has a codebook, we don't" is true but misses the structural parallel. Here is the precise correspondence:
+
+| Aspect                    | VAR Stage-1 (VQ-VAE)                              | nlcpV4 Builder                                   |
+|---------------------------|---------------------------------------------------|--------------------------------------------------|
+| Residual tensor           | `f_rest`, shape `[B, Cvae, H, W]`                 | `H_rest`, shape `[B, L, D]`                      |
+| Canvas tensor             | `f_hat`                                           | `H_hat`                                          |
+| Per-level atomic output   | `embedding(idx_k)` — codebook lookup (residual!)  | `C_k` — attention summary of residual            |
+| Bottleneck mechanism      | Discrete lookup in V-entry codebook               | Rank-`L_k` matrix factorization                  |
+| Bottleneck strength       | **Hard discrete** (argmin)                        | **Hard rank** (matmul-imposed)                   |
+| Coefficients nature       | Binary indicator (one-hot codebook index)         | Continuous softmax weights                       |
+| Capacity at level k       | `V^{L_k^2}` discrete patches (enormous but fixed) | Continuous rank-`L_k` subspace of `R^{L×D}`      |
+| Reconstruction operator   | `φ_k(upsample(embedding(idx_k)))`                 | `A_k^T @ C_k`                                    |
+| Non-overlap mechanism     | Each scale quantizes its own residual             | Each level subtracts its own `R_k` from residual |
+| Coarse-to-fine guarantee  | Small spatial patch count at coarse scales        | Small `L_k` at coarse levels                     |
+| Differentiability         | **Non-diff** (argmin); needs STE                  | **Fully differentiable** (softmax all the way)   |
+| Training loss shape       | CE over indices + VQ + reconstruction             | MSE/NTP + ordering + residual + reasoning        |
+| Failure mode              | Codebook collapse (few entries used)              | Attention collapse (queries attend uniformly)    |
+| Zero residual achievable? | In practice yes (codebook spans the space)        | Yes iff `Σ L_k ≥ min(L, D)`                      |
+
+**Key insight**: VAR's and nlcpV4's bottlenecks are **duals of each other in information-capacity space** — different shapes of the same constraint. VAR trades differentiability for a crisp discrete vocabulary; nlcpV4 trades the discrete vocabulary for end-to-end differentiable training. Neither is strictly more powerful; they are two fixed points on a bottleneck-shape axis:
+
+```
+         hard discrete            soft continuous
+         ┌────────────┐          ┌────────────────┐
+         │ VAR VQ-VAE │ ◄──────► │ nlcpV4 Builder │
+         │  codebook  │          │ rank-bounded   │
+         │  (V entries│          │ attention      │
+         │   per pos) │          │ (L_k ranks)    │
+         └────────────┘          └────────────────┘
+               │                         │
+               │                         │
+         non-differentiable          fully differentiable
+         sparse codes                dense low-rank codes
+         CE loss over indices        MSE/NTP over vectors
+```
+
+### 2.5.7 Numerical Walk-Through
+
+Take `L_0,…,L_5 = 1, 2, 4, 8, 16, 32`, sequence length `L = 128`, concept dim `D = 64`, batch `B = 1`:
+
+```
+Level 0 (L_0=1):
+  H_rest_0 : [1, 128, 64]                  # full CoT information
+  Q_0      : [1, 64]                        # 1 learnable query
+  A_0      : [1, 1, 128]                    # softmax over 128 positions
+  C_0      : [1, 1, 64]                     # 1 concept, rank-1 summary
+  R_0      : A_0^T @ C_0 : [1, 128, 64]     # rank(R_0) ≤ 1
+  → all 128 positions share one globally-dominant direction
+
+Level 1 (L_1=2):
+  H_rest_1 = H_rest_0 − R_0 : [1, 128, 64]  # rank-1 direction removed
+  Q_1      : [2, 64]                        # 2 independent queries
+  A_1      : [1, 2, 128]                    # softmax forces queries to partition
+  C_1      : [1, 2, 64]                     # rank ≤ 2 summary
+  R_1      : [1, 128, 64], rank ≤ 2
+  → positions split into ≈2 clusters by dominant residual direction
+
+Level 5 (L_5=32):
+  H_rest_5 : [1, 128, 64]                   # 1+2+4+8+16 = 31 ranks already removed
+  Q_5      : [32, 64]
+  A_5      : [1, 32, 128]
+  C_5      : [1, 32, 64], rank ≤ 32
+  R_5      : [1, 128, 64], rank ≤ 32
+  → fine-grained detail captured in remaining 33 ranks of residual space
+
+Cumulative rank at the end:
+  Σ L_k = 1 + 2 + 4 + 8 + 16 + 32 = 63 ≈ min(L, D) = 64
+```
+
+**Observation**: `Σ L_k = 2^K − 1` is intentionally sized to match `min(L, D)`. More ranks would be redundant; fewer would leave information uncaptured. The doubling schedule `L_k = 2^k` is not arbitrary — it is the **geometric partitioning of the rank budget** that, combined with residual subtraction, gives the sharpest coarse-to-fine spectral staircase.
+
+### 2.5.8 Why Doubling `L_k`? — The Exponential Rank Schedule
+
+The clause "hand to the next level whose `2×`-wider query bank fishes again" encodes the doubling `L_k = 2 L_{k-1}`. Three independent alignments justify it:
+
+1. **Dyadic segmentation**: each level halves the segment width, doubling the segment count. This matches the DLCM intra-level correspondence (§3).
+2. **Geometric residual decay**: after a rank-`L_k` pursuit, the residual's L2 energy decays geometrically. The next level needs proportionally more ranks to keep up with the thinner residual.
+3. **VAR alignment**: VAR's token counts per scale `{1, 4, 16, 64, 256, 1024}` grow by `4×` (which is `2×` along each spatial axis). Our `L_k = 2^k` is the 1-D analog.
+
+The nonlinear contraction is:
+
+```
+H_rest_{k+1}  =  H_rest_k  −  A_k^T @ level_proj(A_k @ H_rest_k)
+```
+
+Iterating it K times with doubling `L_k` removes cumulatively rank `Σ L_k = 2^K − 1` — an exponential rank coverage per level, versus a linear coverage `K` that uniform rank-1 pursuit would give. The doubling schedule is an order-of-magnitude faster coverage than uniform matching pursuit.
+
+### 2.5.9 Implications for the Predictor (Stage 2)
+
+The §2.5 principle has a direct, non-negotiable consequence for ConceptPredictor teacher-forcing. This is the nlcpV4 analog of the warning in [docs/VAR.md §5.3.2.1](file:///Users/sjia/Documents/AgenticFinLab/Projects/Reasoning-Autoregressive-Modeling/docs/VAR.md) about using `embedding(idx_k)` naively.
+
+**Rule**: when predicting level k given levels `<k`, the context fed to the Predictor must represent the cumulative canvas `H_hat_k = Σ_{j<k} R_j`, **not raw concept stacks `[C_0, ..., C_{k-1}]`**.
+
+Why? Because `H_hat_k` is the *position-aware, smeared* accumulation that captures what "has been painted" at every sequence position. A naked `C_{k-1} ∈ R^{L_{k-1}×D}` is missing:
+
+1. The smearing operator `A_{k-1}^T` that maps `L_{k-1}` concepts back to `L` sequence positions.
+2. All prior levels' `R_0, ..., R_{k-2}` that together constitute the canvas.
+3. The cross-level index alignment (because `L_k = 2 L_{k-1}` — concept `C_{k,2j}` and `C_{k,2j+1}` are both children of `C_{k-1,j}`, a fact lost if we stack raw `C_j` tensors).
+
+**Two admissible Predictor designs**:
+
+| Design               | Input shape at level k                            | Faithful to §2.5?                            |
+|----------------------|---------------------------------------------------|----------------------------------------------|
+| Canvas-based         | `downsample(H_hat_k, to=L_k)`                     | ✅ Direct VAR analog (`idxBl_to_var_input`)   |
+| Concept-stack + attn | `[C_0, ..., C_{k-1}]` + cross-attn over `H_hat_k` | ✅ Only if cross-attention truly reads canvas |
+| Concept-stack alone  | `[C_0, ..., C_{k-1}]` (no canvas)                 | ❌ Loses smearing, ancestor alignment         |
+
+Any Predictor that stacks concepts alone (without canvas reconstruction or a proxy for it) silently violates the rank-accumulation invariant and will need to re-learn `A_j^T` internally for every `j < k` — an expensive waste of parameters.
+
+**Actionable check**: `concept_predictor.py`'s level-conditioning path (e.g., `_upsample_prev_to_level` or analogous) must either reconstruct `H_hat_k` explicitly or provide positional/level embeddings rich enough that the Transformer can reconstruct it in-attention. This is the single most important Predictor correctness property inherited from §2.5.
+
+### 2.5.10 One-Line Mnemonic (For Everyday Use)
+
+> **VAR constrains via a discrete codebook; nlcpV4 constrains via matrix rank. Both iteratively peel a residual, both enforce non-overlap through subtraction, both produce a coarse-to-fine pyramid. The only real difference is which algebraic structure (finite set vs. rank-bounded subspace) plays the role of "information capacity ceiling" at each level.**
+
+---
+
 ## 3. Intra-Level Analysis: Segment-Concept Correspondence
 
 ### 3.1 The DLCM Principle
