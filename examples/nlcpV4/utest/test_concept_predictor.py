@@ -32,6 +32,7 @@ from nlcpV4.concept_predictor import (
     build_scale_causal_mask,
 )
 from nlcpV4.data_loader import NLCPV4DataLoader
+from nlcpV4.losses import compute_predictor_concept_loss, compute_predictor_loss
 from lmbase.utils.env_tools import get_device
 from ram.utils import load_config
 
@@ -210,8 +211,14 @@ def run_pipeline(config, device):
     )
 
     log_check("returns PredictorOutput", isinstance(train_out, PredictorOutput))
+    log_check("gt_concepts carried in output", train_out.gt_concepts is not None)
     log_value("predicted_concepts count", len(train_out.predicted_concepts))
     log_check("count == num_levels", len(train_out.predicted_concepts) == num_levels)
+
+    # Compute per-level + total concept loss via losses.py (new API).
+    concept_total, per_level = compute_predictor_concept_loss(
+        train_out.predicted_concepts, train_out.gt_concepts, concept_loss_type="mse"
+    )
 
     logging.info("  -- Per-level detail (training) --")
     logging.info(
@@ -227,11 +234,7 @@ def run_pipeline(config, device):
         pred = train_out.predicted_concepts[k]
         expected = (batch.batch_size, level_lengths[k], hidden_dim)
         shape_ok = pred.shape == expected
-        loss_val = (
-            train_out.per_level_losses[k].item()
-            if k < len(train_out.per_level_losses)
-            else float("nan")
-        )
+        loss_val = per_level[k].item() if k < len(per_level) else float("nan")
         logging.info(
             "  │  %d    │ %3d │ %-18s │ %10.4f │ %+7.4f │ %7.4f  │",
             k,
@@ -246,21 +249,29 @@ def run_pipeline(config, device):
         "  └──────────────────────────────────────────────────────────────────┘"
     )
 
-    log_check("prediction_loss is not None", train_out.prediction_loss is not None)
-    log_value("prediction_loss (total avg)", f"{train_out.prediction_loss.item():.4f}")
-    log_check(
-        "prediction_loss is finite", torch.isfinite(train_out.prediction_loss).item()
-    )
-    log_check("prediction_loss > 0", train_out.prediction_loss.item() > 0)
+    log_value("concept_total_loss", f"{concept_total.item():.4f}")
+    log_check("concept_total is finite", torch.isfinite(concept_total).item())
+    log_check("concept_total > 0", concept_total.item() > 0)
 
     # Verify total = mean of per-level
-    manual_avg = sum(ll.item() for ll in train_out.per_level_losses) / num_levels
-    avg_diff = abs(train_out.prediction_loss.item() - manual_avg)
+    manual_avg = sum(ll.item() for ll in per_level) / num_levels
+    avg_diff = abs(concept_total.item() - manual_avg)
     log_check(
         "total_loss ≈ mean(per_level_losses)",
         avg_diff < 1e-4,
-        f"total={train_out.prediction_loss.item():.6f}, manual={manual_avg:.6f}",
+        f"total={concept_total.item():.6f}, manual={manual_avg:.6f}",
     )
+
+    # Verify the combined compute_predictor_loss helper also works.
+    combined_loss, combined_dict = compute_predictor_loss(
+        train_out,
+        loss_weights={"concept_loss_weight": 1.0, "reasoning_loss_weight": 1.0},
+    )
+    log_check(
+        "compute_predictor_loss returns finite",
+        torch.isfinite(combined_loss).item(),
+    )
+    log_value("compute_predictor_loss dict keys", list(combined_dict.keys()))
 
     # ==================================================================
     # Step 7: Inference Forward (autoregressive)
@@ -272,8 +283,10 @@ def run_pipeline(config, device):
         infer_out = predictor(q_ids, question_attention_mask=q_mask)
 
     log_check("returns PredictorOutput", isinstance(infer_out, PredictorOutput))
-    log_check("prediction_loss is None", infer_out.prediction_loss is None)
-    log_check("per_level_losses is empty", len(infer_out.per_level_losses) == 0)
+    log_check("gt_concepts is None in inference", infer_out.gt_concepts is None)
+    log_check(
+        "reasoning_logits is None (no solution)", infer_out.reasoning_logits is None
+    )
     log_value("predicted_concepts count", len(infer_out.predicted_concepts))
 
     logging.info("  -- Per-level detail (inference) --")
@@ -293,16 +306,19 @@ def run_pipeline(config, device):
         log_check(f"level {k} shapes match", t_shape == i_shape)
 
     # ==================================================================
-    # Step 8: Gradient Flow — backward through prediction loss
+    # Step 8: Gradient Flow — backward through concept loss
     # ==================================================================
-    log_section("Step 8: Gradient Flow (backward on prediction_loss)")
+    log_section("Step 8: Gradient Flow (backward on concept loss)")
 
     predictor.train()
     predictor.zero_grad()
     train_out2 = predictor(
         q_ids, question_attention_mask=q_mask, gt_concepts=gt_concepts
     )
-    train_out2.prediction_loss.backward()
+    concept_loss2, _ = compute_predictor_concept_loss(
+        train_out2.predicted_concepts, train_out2.gt_concepts
+    )
+    concept_loss2.backward()
 
     # Check predictor-owned parameters
     param_checks = [

@@ -1,234 +1,327 @@
-"""NLCP V4 Concept Predictor — Stage 2: Next-Level Concept Prediction.
+"""NLCP V4 Concept Predictor — Option X: Standard Causal AR over flat concepts.
 
-PURPOSE (VAR.md Section 5.3, docs/VAR.md):
-    Stage 2 of the two-stage architecture. Given a trained (frozen)
-    ConceptPyramidBuilder that produces ground truth concept pyramids
-    from CoT, the ConceptPredictor learns to predict next-level concepts
-    autoregressively — analogous to VAR's Transformer that predicts
-    next-scale codebook indices.
+================================================================================
+PURPOSE
+================================================================================
+Stage 2 of the two-stage architecture (see VAR.md / nlcpV4-explain.md).
 
-TWO-STAGE ARCHITECTURE:
-    Stage 1 (Builder):  CoT → ground truth concept pyramid [C_0, ..., C_{K-1}]
-                        Trained with recon_loss + reasoning_loss.
-                        Frozen during Stage 2 training.
+Given a trained (frozen) ConceptPyramidBuilder that produces ground-truth
+concept pyramids [C_0, C_1, ..., C_{K-1}] from (Q, CoT), the ConceptPredictor
+learns to generate that pyramid from the question alone — NO CoT at inference
+time.  This mirrors VAR's Stage-2: an autoregressive Transformer that
+"amortises" the Stage-1 residual decisions without re-running Stage-1.
 
-    Stage 2 (Predictor): Q + [C_0, ..., C_{k-1}] → predict C_k
-                         Trained with prediction_loss (MSE or cosine).
-                         Uses scale-level causal attention.
+================================================================================
+CENTRAL IDEA — Option X
+================================================================================
+Flatten the pyramid into a SINGLE causal sequence of
+    total_C = sum(L_k)  =  1 + 2 + 4 + 8 + 16 + 32  =  63
+concept slots (for K=6), ordered level-major then intra-level:
 
-VAR ANALOGY:
-    VAR Stage 1 (VQ-VAE):      Image → multi-scale discrete indices
-    VAR Stage 2 (Transformer):  class_emb + prev_scales → predict next scale indices
+    slot index     :  0    1    2    3    4    5    6    ...  62
+    level id       :  0    1    1    2    2    2    2    ...   5
+    intra-pos      :  0    0    1    0    1    2    3    ...  31
 
-    NLCP Stage 1 (Builder):     CoT → multi-level concept vectors
-    NLCP Stage 2 (Predictor):   Q + prev_levels → predict next level concepts
+Reuse the Builder's `reason_model` (Qwen2.5) as the backbone.  The backbone
+operates in encoder space D_enc, so lift every concept into D_enc using
+the Builder's learned `back_decode` (D → D_enc).  Prepend the question
+token embeddings:
 
-SCALE-LEVEL CAUSALITY (VAR.md Section 5.3.1):
-    Position i can attend to position j iff level[i] >= level[j].
-    Within the same level, all concept slots are mutually visible
-    (parallel prediction). Across levels, strict causality.
+    inputs_embeds = [ Q_embeds (L_Q tokens, D_enc)
+                    , back_decode(C_0 .. C_{K-1}) + slot_markers (63 tokens, D_enc) ]
 
-MODEL SELECTION:
-    The predictor backbone can be configured via config:
-    - use_shared_model: true  → reuse builder's reason_model (shared weights)
-    - use_shared_model: false → load a separate model from predictor_model_name
+Run ONE causal forward pass — the LLM's native causal mask is exactly what
+is needed (no custom attention mask required).  Then read out the next-slot
+predictions from the hidden states at positions (L_Q - 1) .. (L_Q + 61)
+and project back to concept space with a small MLP head.
 
-USAGE:
-    from nlcpV4.concept_predictor import ConceptPredictor
+================================================================================
+GLOSSARY (used throughout this file)
+================================================================================
+B               batch size (e.g. 4)
+L_Q             question token length (variable, e.g. 40)
+K               number of pyramid levels (e.g. 6)
+L_k             number of concepts at level k (e.g. [1, 2, 4, 8, 16, 32])
+total_C         sum(L_k) — total number of concept slots (e.g. 63)
+D               concept space dimension (e.g. 896, must match hidden_dim)
+D_enc           backbone (encoder) hidden dim (e.g. 896 for Qwen2.5-0.5B)
+V               vocabulary size of reason_model (e.g. 151936 for Qwen2.5)
+L_S             solution token length (variable)
 
-    # Option A: shared model with builder
-    predictor = ConceptPredictor(config, builder=builder)
+For the running examples below:
+    B = 4
+    L_Q = 40
+    K = 6,  L_k = [1, 2, 4, 8, 16, 32],  total_C = 63
+    D = D_enc = 896
 
-    # Option B: standalone (own model)
-    predictor = ConceptPredictor(config)
+================================================================================
+FLAT 63-SLOT LAYOUT (running example)
+================================================================================
+    slot:   0 | 1  2 | 3  4  5  6 | 7  .. 14 | 15 ..  30 | 31 ..  62
+    level:  0 | 1  1 | 2  2  2  2 | 3  ..  3 |  4 ..   4 |  5 ..   5
+    pos  :  0 | 0  1 | 0  1  2  3 | 0  ..  7 |  0 ..  15 |  0 ..  31
 
-    # Training (teacher-forcing with GT concepts from frozen builder)
-    predicted_concepts = predictor(
-        question_ids=Q_ids,
-        question_attention_mask=Q_mask,
-        gt_concepts=[C_0, C_1, ..., C_{K-1}],  # from builder
-    )
+    └─L0┘  └─L1──┘ └───L2──────┘  └──L3───┘  └───L4────┘  └───L5────┘
+      1     2           4            8          16           32
 
-    # Inference (autoregressive, no GT)
-    predicted_concepts = predictor.predict(
-        question_ids=Q_ids,
-        question_attention_mask=Q_mask,
-    )
+================================================================================
+TEACHER-FORCED SEQUENCE (training, single LLM forward pass)
+================================================================================
+                       ◄──────── L_Q = 40 ────────►◄──── total_C = 63 ────►
+    position index :   [  0   1   2   ...   39  ][ 40  41  42 ... 101 102 ]
+    content        :   [ Q0  Q1  Q2   ...   Q39 ][ c0  c1  c2 ... c61 c62 ]
+    role           :   question tokens (embedded)   lifted concept slots
 
-DIMENSION FLOW:
-    Input:
-        question_ids:     [B, L_Q]           — tokenized question
-        gt_concepts:      List of [B, L_k, D] for k=0..K-1 (training only)
+    where c_t  =  back_decode(concept_at_flat_slot_t)
+                + level_embeddings[level_id[t]]
+                + position_embeddings[intra_pos[t]]
 
-    Internal:
-        Q_hidden:         [B, L_Q, D_model]  — question hidden states
-        concept_sequence: [B, L_total, D]    — flattened concept tokens
-        scale_causal_mask:[L_total, L_total] — scale-level causality
+    Shape evolution:
+        question_ids       : [B=4, L_Q=40]           int64
+        Q_embeds           : [B=4, L_Q=40, D_enc=896]
+        concepts_flat_D    : [B=4, total_C=63, D=896]
+        concept_embeds     : [B=4, total_C=63, D_enc=896]
+        inputs_embeds      : [B=4, 103, 896]
+        hidden_states      : [B=4, 103, 896]     (LLM output)
 
-    Output:
-        predicted:        List of [B, L_k, D] for k=0..K-1
+================================================================================
+CAUSAL MASK — native LLM causal mask (nothing custom needed)
+================================================================================
+Position `i` attends to all positions `j <= i`.  Example for a tiny setting
+with L_Q=3, total_C=4 (so sequence length = 7):
+
+                       attends to position j →
+                      0   1   2   3   4   5   6
+                     ┌─────────────────────────┐
+    position 0 (Q0)  │ 1   0   0   0   0   0   0 │   sees Q0
+    position 1 (Q1)  │ 1   1   0   0   0   0   0 │   sees Q0, Q1
+    position 2 (Q2)  │ 1   1   1   0   0   0   0 │   sees Q0..Q2
+    position 3 (c0)  │ 1   1   1   1   0   0   0 │   sees Q0..Q2, c0
+    position 4 (c1)  │ 1   1   1   1   1   0   0 │   sees +c1
+    position 5 (c2)  │ 1   1   1   1   1   1   0 │   sees +c2
+    position 6 (c3)  │ 1   1   1   1   1   1   1 │   sees +c3
+                     └─────────────────────────┘
+
+Reading rule: row i = "the tokens that position i can look at".
+    1 = attend, 0 = blocked by causal mask.
+
+================================================================================
+NEXT-SLOT READOUT ALIGNMENT
+================================================================================
+In a causal LM, hidden_state at position `t` predicts the token at `t+1`.
+Therefore, to predict the 63 concept slots, we read hidden states at
+positions [L_Q - 1, L_Q, ..., L_Q + total_C - 2]:
+
+    hidden[L_Q - 1]  (= hidden[39])   → predicts slot  0  (= C_0[0])
+    hidden[L_Q    ]  (= hidden[40])   → predicts slot  1  (= C_1[0])
+    hidden[L_Q + 1]  (= hidden[41])   → predicts slot  2  (= C_1[1])
+    ...
+    hidden[L_Q + 61] (= hidden[101])  → predicts slot 62  (= C_5[31])
+
+    Slice indices:  start = L_Q - 1 = 39
+                    end   = L_Q - 1 + total_C = 102
+                    length = total_C = 63
+
+================================================================================
+INFERENCE — autoregressive loop (63 sequential steps, KV-cached)
+================================================================================
+    step 0:
+        feed inputs_embeds = Q_embeds                   (L_Q positions)
+        take hidden[:, -1:, :]                          → hidden_last
+        concept_head(hidden_last) → slot 0              ( = C_0[0] )
+
+    step t ∈ [1, 62]:
+        emb = back_decode(slot_{t-1}) + level_emb + pos_emb   (1 position)
+        feed inputs_embeds = emb with past_key_values = pkv
+        take hidden[:, -1:, :]                                → hidden_last
+        concept_head(hidden_last) → slot t
+
+    After 63 steps:  torch.cat(slots) = flat_predicted [B, 63, D]
+                     split by level_lengths → per-level list
+
+================================================================================
+LOSS PATH (integration with losses.py)
+================================================================================
+The returned PredictorOutput carries:
+    predicted_concepts      list of K tensors,  [B, L_k, D]
+    gt_concepts             list of K tensors,  [B, L_k, D]   (pass-through)
+    reasoning_logits        [B, L_S, V]         (optional)
+    reasoning_target_ids    [B, L_S]            (optional, -100 on pad)
+
+`losses.py :: compute_predictor_loss` then computes
+        concept_loss   = mean_k MSE(predicted_k, gt_k)
+        reasoning_loss = CE(reasoning_logits, reasoning_target_ids)
+        total          = w_c * concept_loss + w_r * reasoning_loss
+
+================================================================================
+DESIGN CONSTRAINTS (why THIS design)
+================================================================================
+  - NO interpolation of concepts across levels: text concepts are discrete
+    semantic anchors, not smooth spatial fields.  F.interpolate is
+    ARCHITECTURALLY INVALID for text pyramids.
+  - NO learnable query_slots mixed into the LLM input: learnable parameters
+    and real content embeddings never share one sequence.  The only extras
+    added to the LLM sequence are per-position level / intra-pos markers
+    (tiny nn.Embedding lookups), which are applied ON TOP of real content
+    embeddings, not as standalone tokens.
+  - NO start_token: the LLM already knows how to "begin" — the last
+    question hidden state acts as the implicit start signal.
+================================================================================
 """
 
-import math
-import warnings
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import List, Optional
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from peft import LoraConfig, get_peft_model
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+
 # =========================================================================
-# Output Dataclass
+# Output Dataclass — same interface losses.py consumes
 # =========================================================================
 
 
 @dataclass
 class PredictorOutput:
-    """Output of ConceptPredictor forward pass.
+    """Full output of ConceptPredictor.forward().
 
-    DIMENSION FLOW:
-        predicted_concepts: List of [B, L_k, D] for k=0..K-1
-        prediction_loss:    scalar (if gt_concepts provided)
-        per_level_losses:   List of K scalars (per-level breakdown)
+    Carries everything `losses.py :: compute_predictor_loss` needs to
+    compute the two predictor losses:
+        (1) concept reconstruction MSE    — predicted_concepts vs gt_concepts
+        (2) solution cross-entropy        — reasoning_logits vs reasoning_target_ids
 
     Attributes:
-        predicted_concepts: Predicted concept vectors per level.
-            Each [B, L_k, D]. During training, these are one-step-ahead
-            predictions from teacher-forcing. During inference, these are
-            autoregressively generated.
-        prediction_loss: Overall prediction loss (MSE between predicted
-            and GT concepts). None if gt_concepts not provided.
-        per_level_losses: Per-level loss breakdown for diagnostics.
-            Empty list if gt_concepts not provided.
+        predicted_concepts: List of K tensors, the predicted concept
+            pyramid in concept space.
+            Shape: each tensor is [B, L_k, D].
+            Example (K=6, level_lengths=[1,2,4,8,16,32], B=4, D=896):
+                [0] [4,  1, 896]
+                [1] [4,  2, 896]
+                [2] [4,  4, 896]
+                [3] [4,  8, 896]
+                [4] [4, 16, 896]
+                [5] [4, 32, 896]
+        gt_concepts: Optional list of K tensors passed through unchanged
+            from the frozen builder. None in pure inference mode.
+            Same shapes as predicted_concepts.
+        num_levels: K — number of pyramid levels (e.g. 6).
+        level_lengths: [L_0, ..., L_{K-1}] — e.g. [1, 2, 4, 8, 16, 32].
+        reasoning_logits: Next-token-prediction logits for solution tokens
+            when `solution_ids` was supplied to forward(), else None.
+            Shape: [B, L_S, V].
+        reasoning_target_ids: Target token ids for the solution with
+            padding positions replaced by -100 so cross_entropy ignores
+            them, or None when reasoning was not requested.
+            Shape: [B, L_S].
+        reasoning_texts: Teacher-forced argmax decode of reasoning_logits
+            — one string per batch element, useful for qualitative
+            inspection. None when reasoning was not requested.
+            Shape: list of length B.
     """
 
     predicted_concepts: List[torch.Tensor]
-    prediction_loss: Optional[torch.Tensor] = None
-    per_level_losses: List[torch.Tensor] = field(default_factory=list)
+    gt_concepts: Optional[List[torch.Tensor]] = None
+    num_levels: int = 0
+    level_lengths: List[int] = field(default_factory=list)
+    reasoning_logits: Optional[torch.Tensor] = None
+    reasoning_target_ids: Optional[torch.Tensor] = None
+    reasoning_texts: Optional[List[str]] = None
 
 
 # =========================================================================
-# Scale-Level Causal Mask
-# =========================================================================
-
-
-def build_scale_causal_mask(
-    level_lengths: List[int],
-    device: torch.device,
-    dtype: torch.dtype = torch.float32,
-) -> torch.Tensor:
-    """Build scale-level causal attention mask.
-
-    PRINCIPLE (VAR.md Section 2.4, Section 5.3.1):
-        Position i can attend to position j iff level[i] >= level[j].
-        Within the same level: full visibility (parallel prediction).
-        Across levels: strict causality (only attend to earlier levels).
-
-    Args:
-        level_lengths: [L_0, L_1, ..., L_{K-1}] — concepts per level.
-        device: Target device.
-        dtype: Target dtype (float for additive mask).
-
-    Returns:
-        mask: [L_total, L_total] — additive mask where 0 = attend,
-            -inf = block. L_total = sum(level_lengths).
-
-    Example (K=3, level_lengths=[1, 2, 4]):
-        Level IDs:  [0, 1, 1, 2, 2, 2, 2]
-        Mask (1=attend, 0=block):
-            pos: 0  1  2  3  4  5  6
-          0:  [1  0  0  0  0  0  0]  ← level 0 sees only level 0
-          1:  [1  1  1  0  0  0  0]  ← level 1 sees levels 0,1
-          2:  [1  1  1  0  0  0  0]
-          3:  [1  1  1  1  1  1  1]  ← level 2 sees levels 0,1,2
-          4:  [1  1  1  1  1  1  1]
-          5:  [1  1  1  1  1  1  1]
-          6:  [1  1  1  1  1  1  1]
-    """
-    total_len = sum(level_lengths)
-
-    # Build level ID for each position
-    level_ids = []
-    for level_idx, length in enumerate(level_lengths):
-        level_ids.extend([level_idx] * length)
-    # Level ID tensor: [L_total]
-    level_ids = torch.tensor(level_ids, device=device)
-
-    # mask[i, j] = 1 if level_ids[i] >= level_ids[j], else 0
-    # level_ids[i] as rows, level_ids[j] as columns
-    # row_levels: [L_total, 1], col_levels: [1, L_total]
-    row_levels = level_ids.unsqueeze(1)
-    col_levels = level_ids.unsqueeze(0)
-    # bool_mask: [L_total, L_total]
-    bool_mask = row_levels >= col_levels
-
-    # Convert to additive mask: 0 where attend, -inf where block
-    mask = torch.zeros(total_len, total_len, device=device, dtype=dtype)
-    mask.masked_fill_(~bool_mask, float("-inf"))
-
-    # Result: [L_total, L_total]
-    return mask
-
-
-# =========================================================================
-# ConceptPredictor
+# ConceptPredictor — Option X (flat causal AR over 63 concept slots)
 # =========================================================================
 
 
 class ConceptPredictor(nn.Module):
-    """Stage 2: Predict next-level concepts autoregressively.
+    """Stage-2 predictor — Option X: flat causal AR via the LLM backbone.
 
-    PURPOSE (VAR.md Section 5.3):
-        Given a frozen builder that extracts ground truth concept pyramids,
-        the predictor learns to generate concept pyramids from questions
-        alone — without access to CoT at inference time.
+    ARCHITECTURE (training, single forward pass)
+    --------------------------------------------
+        ┌──────────────────────────────────────────────────────────────┐
+        │   question_ids                                               │
+        │         │                                                    │
+        │         ▼  (backbone.embed_tokens)                           │
+        │   Q_embeds  [B, L_Q, D_enc]                                  │
+        │                                                              │
+        │   gt_concepts (list of K tensors)                            │
+        │         │                                                    │
+        │         ▼  (torch.cat dim=1)                                 │
+        │   concepts_flat  [B, total_C=63, D]                          │
+        │         │                                                    │
+        │         ▼  (back_decode + lvl_emb + pos_emb)                 │
+        │   concept_embeds  [B, 63, D_enc]                             │
+        │                                                              │
+        │   Q_embeds      concept_embeds                               │
+        │         \\         /                                          │
+        │          torch.cat(dim=1)                                    │
+        │         [B, L_Q + 63, D_enc]                                 │
+        │                  │                                           │
+        │                  ▼  (reason_model backbone, causal mask)     │
+        │   hidden_states  [B, L_Q + 63, D_enc]                        │
+        │                  │                                           │
+        │                  ▼  slice: positions [L_Q-1 : L_Q-1+63]      │
+        │   readout        [B, 63, D_enc]                              │
+        │                  │                                           │
+        │                  ▼  (concept_head MLP: D_enc → D)            │
+        │   flat_predicted [B, 63, D]                                  │
+        │                  │                                           │
+        │                  ▼  split by level_lengths                   │
+        │   predicted_concepts = [C_0, C_1, ..., C_{K-1}]              │
+        └──────────────────────────────────────────────────────────────┘
 
-    ARCHITECTURE:
-        1. Encode question Q via backbone → Q_hidden [B, L_Q, D_model]
-        2. Project Q_hidden to concept space → Q_proj [B, L_Q, D]
-        3. During training (teacher-forcing):
-           - Concatenate [Q_proj, C_0_gt, C_1_gt, ..., C_{K-2}_gt]
-           - Apply Transformer with scale-level causal mask
-           - Predict [C_0_pred, C_1_pred, ..., C_{K-1}_pred]
-        4. During inference (autoregressive):
-           - Start with Q_proj
-           - Predict C_0, feed back, predict C_1, ...
+    ARCHITECTURE (inference, K=63 cached sequential steps)
+    ------------------------------------------------------
+        step 0:  LLM(Q_embeds, use_cache=True) → pkv, hidden_last
+                 concept_head(hidden_last) → slot 0 (= C_0[0])
 
-    MODEL SELECTION:
-        config["model"]["predictor"]["use_shared_model"]:
-            true  → reuse builder.reason_model (pass builder= in __init__)
-            false → load own model from predictor_model_name
+        step t:  x = back_decode(slot_{t-1}) + lvl + pos
+                 LLM(x, past_key_values=pkv, use_cache=True) → pkv, hidden_last
+                 concept_head(hidden_last) → slot t
 
-    ATTRIBUTES:
-        reason_model: Backbone Transformer (shared or own).
-        concept_proj: Projects backbone hidden states → concept space D.
-        level_embeddings: Learnable per-level embeddings [K, D] to
-            distinguish concept levels (analogous to VAR's level_embed).
-        concept_head: Prediction head, Transformer hidden → concept D.
+        After 63 steps: split flat_predicted by level_lengths.
+
+    SHARED COMPONENTS (with the frozen Builder, when use_shared_model=True)
+    ----------------------------------------------------------------------
+        reason_model        — AutoModelForCausalLM (Qwen2.5 etc.)
+        tokenizer           — paired tokenizer
+        back_proj           — Linear(D → D_enc), used by back_decode
+
+    OWNED COMPONENTS
+    ----------------
+        level_embeddings    — Embedding(K,            D_enc)
+        position_embeddings — Embedding(max(L_k),     D_enc)
+        concept_head        — MLP (D_enc → D_enc → D)
     """
 
-    def __init__(
-        self,
-        config: dict,
-        builder=None,
-    ):
-        """Initialize Concept Predictor.
+    # ------------------------------------------------------------------ #
+    #  construction                                                      #
+    # ------------------------------------------------------------------ #
+
+    def __init__(self, config: dict, builder: Optional[nn.Module] = None):
+        """Instantiate the predictor.
 
         Args:
-            config: Full config dict. Expected keys:
-                config["model"]["predictor"]:
-                    use_shared_model: bool
-                    predictor_model_name: str (if use_shared_model=false)
-                    predictor_num_layers: int (-1 = all)
-                config["model"]["pyramid"]:
-                    hidden_dim, num_levels, level_lengths, max_seq_len
-                config["training"]["predictor"]:
-                    freeze: bool, lora: dict or null
-            builder: Optional ConceptPyramidBuilder instance.
-                Required when use_shared_model=true.
+            config: Full config dict (see configs/nlcpV4/**.yml).
+                Required keys:
+                    config["model"]["pyramid"]["num_levels"]        — int K
+                    config["model"]["pyramid"]["hidden_dim"]        — int D
+                    config["model"]["pyramid"]["level_lengths"]     — list[int]
+                    config["model"]["pyramid"]["num_heads"]         — int
+                    config["model"]["predictor"]["use_shared_model"]— bool
+                    config["model"]["predictor"]["dropout"]         — float
+                When use_shared_model=False, also requires:
+                    config["model"]["predictor"]["predictor_model_name"]
+                    config["model"]["predictor"]["predictor_num_layers"]
+                    config["training"]["predictor"]["freeze"]
+                    config["training"]["predictor"]["lora"]
+            builder: ConceptPyramidBuilder — REQUIRED when
+                use_shared_model=True.  Its reason_model, tokenizer
+                and back_proj are WEIGHT-TIED into this predictor, so
+                predicted concepts live in the same encoder-space basis
+                the Builder has already learned.
         """
         super().__init__()
         self.config = config
@@ -237,116 +330,138 @@ class ConceptPredictor(nn.Module):
 
         num_levels = self.pyramid_cfg["num_levels"]
         concept_dim = self.pyramid_cfg["hidden_dim"]
-        level_lengths = self.pyramid_cfg["level_lengths"]
+        level_lengths = list(self.pyramid_cfg["level_lengths"])
 
-        # =================================================================
-        # Component 0: Backbone Model (shared or own)
-        # =================================================================
+        # Cache pyramid geometry for fast access in forward().
+        # For K=6 and level_lengths=[1,2,4,8,16,32]:
+        #     self._total_concepts == 63
+        self._level_lengths = level_lengths
+        self._num_levels = num_levels
+        self._concept_dim = concept_dim
+        self._total_concepts = sum(level_lengths)
+
+        # ================================================================
+        # Precomputed flat-slot → (level_id, intra_pos) lookup tables.
+        # ================================================================
+        # Principle: every one of the 63 flat slots needs (a) a level
+        # marker to tell the LLM which pyramid level it represents, and
+        # (b) an intra-level position marker to distinguish concepts
+        # within the same level.  Precompute the id tables once at
+        # construction; look them up via .to(device) inside forward().
+        #
+        # Logic: iterate levels in order, emit L_k copies of level id,
+        # and list(range(L_k)) as intra-level positions.
+        #
+        # Example (K=6, level_lengths=[1,2,4,8,16,32]):
+        #     level_ids_flat[:7] = [0, 1, 1, 2, 2, 2, 2]
+        #     pos_ids_flat  [:7] = [0, 0, 1, 0, 1, 2, 3]
+        #
+        # Shape: both buffers are [total_C] = [63] for K=6.
+        level_ids: List[int] = []
+        pos_ids: List[int] = []
+        for k, Lk in enumerate(level_lengths):
+            level_ids.extend([k] * Lk)
+            pos_ids.extend(list(range(Lk)))
+        self.register_buffer(
+            "_level_ids_flat",
+            torch.tensor(level_ids, dtype=torch.long),
+            persistent=False,
+        )
+        self.register_buffer(
+            "_pos_ids_flat",
+            torch.tensor(pos_ids, dtype=torch.long),
+            persistent=False,
+        )
+
+        # ================================================================
+        # Component 0: backbone (reason_model + tokenizer + back_proj)
+        # ================================================================
+        # Principle: the backbone runs in D_enc space (NOT in D space).
+        # Option A (use_shared_model=True): weight-share everything with
+        #     the Builder so the predictor's concept tokens live in the
+        #     SAME encoder-space basis that the Builder has learned.
+        #     back_decode and reason_model are thus consistent.
+        # Option B (use_shared_model=False): load an independent
+        #     reason_model and own a fresh back_proj.  Concept space
+        #     will DRIFT unless additional alignment losses are used.
         use_shared = self.predictor_cfg["use_shared_model"]
-
         if use_shared:
             if builder is None:
                 raise ValueError(
-                    "builder must be provided when use_shared_model=true. "
-                    "Pass the trained ConceptPyramidBuilder instance."
+                    "ConceptPredictor requires `builder` when "
+                    "config.model.predictor.use_shared_model=True."
                 )
             self.reason_model = builder.reason_model
             self.tokenizer = builder.tokenizer
             self.reason_model_hidden_dim = builder.reason_model_hidden_dim
             self._owns_model = False
+
+            self.back_proj = builder.back_proj
+            self._owns_back_proj = False
         else:
-            pred_model_cfg = self.predictor_cfg
-            train_pred_cfg = config["training"]["predictor"]
             self.reason_model, self.tokenizer, self.reason_model_hidden_dim = (
-                self._init_reason_model(pred_model_cfg, train_pred_cfg)
+                self._init_reason_model(
+                    self.predictor_cfg, config["training"]["predictor"]
+                )
             )
             self._owns_model = True
 
-        # =================================================================
-        # Component 1: Question Projection (D_model → D)
-        # =================================================================
-        # PRINCIPLE: Map question hidden states to concept space.
-        #   Analogous to VAR's Linear(Cvae→D) that projects codebook
-        #   embeddings to Transformer hidden dimension.
-        self.q_proj = nn.Linear(self.reason_model_hidden_dim, concept_dim)
-        self.q_proj_norm = nn.LayerNorm(concept_dim)
+            # Own back_proj — predictor must learn D → D_enc from
+            # scratch.  Shape: (D, D_enc), no bias to stay close to a
+            # pure linear projection.
+            self.back_proj = nn.Linear(
+                concept_dim, self.reason_model_hidden_dim, bias=False
+            )
+            self._owns_back_proj = True
 
-        # =================================================================
-        # Component 2: Level Embeddings
-        # =================================================================
-        # PRINCIPLE (VAR.md Section 5.3.2, Step 5):
-        #   lvl_emb marks which scale each position belongs to.
-        #   This tells the Transformer "I am a level-k concept".
-        self.level_embeddings = nn.Embedding(num_levels, concept_dim)
+        D_enc = self.reason_model_hidden_dim
 
-        # =================================================================
-        # Component 3: Position Embeddings (within each level)
-        # =================================================================
-        # PRINCIPLE: Within a level, concepts have positional structure
-        #   (coarse-to-fine ordering). Learnable per-position embedding
-        #   within each level distinguishes concept slot positions.
-        max_concepts_per_level = max(level_lengths)
-        self.position_embeddings = nn.Embedding(max_concepts_per_level, concept_dim)
+        # ================================================================
+        # Component 1: per-slot level + intra-level position embeddings
+        # ================================================================
+        # Purpose: when the LLM sees 63 back-decoded concept vectors,
+        # it has no way to tell "this is level 2 position 0" from
+        # "this is level 3 position 0" except via position in the
+        # sequence.  Adding these two tiny embeddings on top of the
+        # back_decode output gives an explicit marker for each slot.
+        #
+        # Shape table (K=6, level_lengths=[1,2,4,8,16,32], D_enc=896):
+        #     level_embeddings.weight    : [6,  896]
+        #     position_embeddings.weight : [32, 896]   (max(L_k) = 32)
+        # Total extra parameters: (6 + 32) * 896 ≈ 34k, negligible.
+        max_len_per_level = max(level_lengths)
+        self.level_embeddings = nn.Embedding(num_levels, D_enc)
+        self.position_embeddings = nn.Embedding(max_len_per_level, D_enc)
 
-        # =================================================================
-        # Component 4: Concept Transformer Blocks
-        # =================================================================
-        # PRINCIPLE (VAR.md Section 5.3.2, Step 6):
-        #   Transformer blocks with scale-level causal attention.
-        #   Processes the concept sequence to predict next-level concepts.
-        num_heads = self.pyramid_cfg["num_heads"]
-        num_predictor_layers = self.predictor_cfg["num_transformer_layers"]
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=concept_dim,
-            nhead=num_heads,
-            dim_feedforward=concept_dim * 4,
-            dropout=self.predictor_cfg["dropout"],
-            activation="gelu",
-            batch_first=True,
-            norm_first=True,
-        )
-        self.concept_transformer = nn.TransformerEncoder(
-            encoder_layer,
-            num_layers=num_predictor_layers,
-        )
-
-        # =================================================================
-        # Component 5: Concept Prediction Head
-        # =================================================================
-        # PRINCIPLE: Project Transformer output to concept vectors.
-        #   Each position predicts the concept vector at that slot.
-        #   Input dimension = concept_dim (from transformer),
-        #   Output dimension = concept_dim (target concept space).
+        # ================================================================
+        # Component 2: concept_head — project LLM hidden → concept space
+        # ================================================================
+        # Purpose: the backbone produces hidden states in D_enc, but the
+        # Builder's ground-truth pyramid lives in D.  concept_head maps
+        # D_enc → D so the MSE loss can compare apples to apples.
+        #
+        # Architecture: Linear → GELU → Linear.  Two layers (with a
+        # non-linearity) give enough capacity to invert the linear
+        # back_decode, without over-parameterising the head.
+        #
+        # Shape flow (input readout [B, 63, D_enc], output [B, 63, D]):
+        #     [B, 63, D_enc=896] → Linear(896, 896)
+        #                        → GELU
+        #                        → Linear(896, D=896)
         self.concept_head = nn.Sequential(
-            nn.Linear(concept_dim, concept_dim),
+            nn.Linear(D_enc, D_enc),
             nn.GELU(),
-            nn.Linear(concept_dim, concept_dim),
+            nn.Linear(D_enc, concept_dim),
         )
-
-        # =================================================================
-        # Component 6: Start-of-Pyramid Token
-        # =================================================================
-        # PRINCIPLE (VAR.md Section 5.3.2, Step 2):
-        #   VAR uses class_emb as the "start token" for scale 0.
-        #   We use a learnable start token that aggregates question info.
-        self.start_token = nn.Parameter(torch.randn(1, 1, concept_dim))
-
-        # =================================================================
-        # Precompute level lengths and offsets
-        # =================================================================
-        self._level_lengths = list(level_lengths)
-        self._total_concepts = sum(level_lengths)
-        self._num_levels = num_levels
-
-        # Cache for scale-level causal mask
-        self._cached_mask: Optional[torch.Tensor] = None
 
         self._init_weights()
 
-    def _init_reason_model(self, pred_cfg: dict, train_cfg: dict) -> tuple:
-        """Initialize own reason_model (when not sharing with builder).
+    # ------------------------------------------------------------------ #
+    #  helpers                                                           #
+    # ------------------------------------------------------------------ #
 
-        Mirrors ConceptPyramidBuilder._init_reason_model() logic.
+    def _init_reason_model(self, pred_cfg: dict, train_cfg: dict) -> tuple:
+        """Load a fresh reason_model (only when use_shared_model=False).
 
         Args:
             pred_cfg: config["model"]["predictor"] sub-dict.
@@ -354,41 +469,47 @@ class ConceptPredictor(nn.Module):
 
         Returns:
             Tuple of (reason_model, tokenizer, hidden_dim).
+                reason_model: AutoModelForCausalLM, optionally
+                    LoRA-wrapped.  Includes lm_head.
+                tokenizer: AutoTokenizer with pad_token set.
+                hidden_dim: int D_enc.
         """
         reason_model = AutoModelForCausalLM.from_pretrained(
             pred_cfg["predictor_model_name"]
         )
         hidden_dim = reason_model.config.hidden_size
-
         tokenizer = AutoTokenizer.from_pretrained(pred_cfg["predictor_model_name"])
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
 
-        # Optional LoRA
+        # Optional LoRA wrap.  Principle: train a small low-rank
+        # adapter while leaving the base model frozen.  This keeps
+        # Stage-2 training cheap and avoids catastrophic drift of the
+        # Stage-1 alignment.
         lora_cfg = train_cfg["lora"]
         if lora_cfg is not None:
-            lora_config = LoraConfig(
-                r=lora_cfg["r"],
-                lora_alpha=lora_cfg["lora_alpha"],
-                target_modules=lora_cfg["target_modules"],
-                lora_dropout=lora_cfg["lora_dropout"],
-                bias=lora_cfg["bias"],
+            reason_model = get_peft_model(
+                reason_model,
+                LoraConfig(
+                    r=lora_cfg["r"],
+                    lora_alpha=lora_cfg["lora_alpha"],
+                    target_modules=lora_cfg["target_modules"],
+                    lora_dropout=lora_cfg["lora_dropout"],
+                    bias=lora_cfg["bias"],
+                ),
             )
-            reason_model = get_peft_model(reason_model, lora_config)
-
-        # Freeze if configured
         if train_cfg["freeze"]:
-            for param in reason_model.parameters():
-                param.requires_grad = False
+            for p in reason_model.parameters():
+                p.requires_grad = False
             if lora_cfg is not None:
-                reason_model.enable_adapter_layers()
-                for name, param in reason_model.named_parameters():
-                    if "lora_" in name:
-                        param.requires_grad = True
+                for n, p in reason_model.named_parameters():
+                    if "lora_" in n:
+                        p.requires_grad = True
 
-        # Layer pruning
+        # Optional layer pruning for fast unit tests.
+        # predictor_num_layers > 0 means "keep only the first N layers".
         num_layers = pred_cfg["predictor_num_layers"]
-        if num_layers > 0:
+        if num_layers is not None and num_layers > 0:
             for obj in [
                 reason_model,
                 getattr(reason_model, "model", None),
@@ -398,195 +519,215 @@ class ConceptPredictor(nn.Module):
                     if num_layers < len(obj.layers):
                         obj.layers = obj.layers[:num_layers]
                         break
-
         return reason_model, tokenizer, hidden_dim
 
     def _get_backbone(self) -> nn.Module:
-        """Get Transformer backbone (handles PEFT wrapping).
+        """Return the underlying Transformer backbone.
+
+        Principle: we need the DECODER backbone (without lm_head) for
+        hidden-state outputs.  Depending on whether PEFT has wrapped the
+        model, the backbone is reachable via different attribute paths.
 
         Returns:
-            The backbone module (e.g., Qwen2Model).
+            nn.Module — the raw Transformer producing hidden states.
         """
         if hasattr(self.reason_model, "base_model"):
             inner = self.reason_model.base_model
             if hasattr(inner, "model"):
                 return inner.model
             return inner
-        elif hasattr(self.reason_model, "model"):
+        if hasattr(self.reason_model, "model"):
             return self.reason_model.model
-        else:
-            return self.reason_model
+        return self.reason_model
 
-    def _init_weights(self):
-        """Initialize predictor-specific weights."""
-        nn.init.xavier_uniform_(self.q_proj.weight)
-        nn.init.zeros_(self.q_proj.bias)
+    def _init_weights(self) -> None:
+        """Initialise predictor-specific parameters.
+
+        Principle:
+            - nn.Embedding weights: normal(std=0.02) matches GPT-style
+              init so they blend naturally with the backbone's token
+              embeddings.
+            - concept_head Linear: Xavier uniform; biases zero.
+            - back_proj (only if owned): Xavier uniform.  When shared
+              with the Builder, it keeps its already-learned weights.
+        """
         nn.init.normal_(self.level_embeddings.weight, std=0.02)
         nn.init.normal_(self.position_embeddings.weight, std=0.02)
-        nn.init.normal_(self.start_token, std=0.02)
+        for m in self.concept_head:
+            if isinstance(m, nn.Linear):
+                nn.init.xavier_uniform_(m.weight)
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+        if self._owns_back_proj:
+            nn.init.xavier_uniform_(self.back_proj.weight)
 
-        for module in self.concept_head:
-            if isinstance(module, nn.Linear):
-                nn.init.xavier_uniform_(module.weight)
-                nn.init.zeros_(module.bias)
+    def back_decode(self, concept_space_tensor: torch.Tensor) -> torch.Tensor:
+        """Lift a concept-space tensor into encoder space.
 
-    def _get_scale_causal_mask(
-        self, device: torch.device, dtype: torch.dtype
-    ) -> torch.Tensor:
-        """Get or build cached scale-level causal mask.
-
-        Returns:
-            mask: [L_total, L_total] additive mask.
-        """
-        if self._cached_mask is None or self._cached_mask.device != device:
-            self._cached_mask = build_scale_causal_mask(
-                self._level_lengths, device, dtype
-            )
-        return self._cached_mask
-
-    def encode_question(
-        self,
-        question_ids: torch.Tensor,
-        question_attention_mask: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        """Encode question tokens via backbone.
-
-        DIMENSION FLOW:
-            Input:  question_ids [B, L_Q]
-            Output: q_hidden [B, L_Q, D_model]
+        Mirrors `ConceptPyramidBuilder.back_decode`, a thin wrapper
+        around back_proj.  Named as a method so future extensions
+        (e.g. a richer D → D_enc decoder module) drop in without
+        touching any call site.
 
         Args:
-            question_ids: Token IDs [B, L_Q].
-            question_attention_mask: Mask [B, L_Q] (optional).
+            concept_space_tensor: Tensor in concept space D.
+                Shape: [..., D].
 
         Returns:
-            Hidden states [B, L_Q, D_model].
+            Tensor in encoder space D_enc.
+            Shape: [..., D_enc].
         """
-        backbone = self._get_backbone()
-        outputs = backbone(
-            input_ids=question_ids,
-            attention_mask=question_attention_mask,
-            output_hidden_states=True,
+        return self.back_proj(concept_space_tensor)
+
+    # ------------------------------------------------------------------ #
+    #  input construction                                                #
+    # ------------------------------------------------------------------ #
+
+    def _embed_questions(self, question_ids: torch.Tensor) -> torch.Tensor:
+        """Run the backbone's embedding layer on question token ids.
+
+        Args:
+            question_ids: Token ids for the question.
+                Shape: [B, L_Q].
+
+        Returns:
+            Q_embeds in encoder space.
+            Shape: [B, L_Q, D_enc].
+        """
+        embed_layer = self._get_backbone().get_input_embeddings()
+        return embed_layer(question_ids)
+
+    def _build_concept_input_embeds(
+        self,
+        concepts_flat: torch.Tensor,
+        start_slot: int,
+    ) -> torch.Tensor:
+        """Lift N concept vectors into D_enc and add per-slot markers.
+
+        Principle:
+            Every position that the LLM sees is either (a) a real token
+            embedding from the vocabulary, or (b) a back-decoded concept
+            vector PLUS a (level, intra-pos) marker so the LLM can tell
+            which pyramid slot the vector came from.
+
+        Logic:
+            1. Apply back_decode to map D → D_enc.
+            2. Look up the (level_id, intra_pos) for each of the N slots,
+               starting from `start_slot`.
+            3. Add level_embeddings[level_id] + position_embeddings[pos]
+               to every slot.
+
+        Flow:
+            concepts_flat [B, N, D]
+                ↓ back_decode (Linear D→D_enc)
+            emb           [B, N, D_enc]
+                + level_emb[level_ids_flat[slot]]   [N, D_enc] → [B, N, D_enc]
+                + pos_emb[pos_ids_flat[slot]]       [N, D_enc] → [B, N, D_enc]
+            return        [B, N, D_enc]
+
+        Example (start_slot=3, N=4, K=6):
+            slot_ids     = [3, 4, 5, 6]
+            level_ids    = [2, 2, 2, 2]     (all within level 2)
+            pos_ids      = [0, 1, 2, 3]
+
+        Args:
+            concepts_flat: Concept vectors to lift.  N can be anything
+                from 1..total_C.
+                Shape: [B, N, D].
+            start_slot: Global flat-slot index of the first of the N
+                vectors.  Used to look up the correct per-slot markers.
+                Range: 0..total_C - N.
+
+        Returns:
+            Encoder-space embeddings with markers added.
+            Shape: [B, N, D_enc].
+        """
+        B, N, _ = concepts_flat.shape
+        end_slot = start_slot + N
+
+        emb = self.back_decode(concepts_flat)
+
+        slot_ids = torch.arange(start_slot, end_slot, device=emb.device)
+        lvl = self.level_embeddings(
+            self._level_ids_flat.to(emb.device)[slot_ids]
         )
-        if hasattr(outputs, "last_hidden_state"):
-            return outputs.last_hidden_state
-        elif hasattr(outputs, "hidden_states") and outputs.hidden_states is not None:
-            return outputs.hidden_states[-1]
-        else:
-            return outputs[0]
+        pos = self.position_embeddings(
+            self._pos_ids_flat.to(emb.device)[slot_ids]
+        )
 
-    def _build_concept_input(
-        self,
-        q_context: torch.Tensor,
-        gt_concepts: Optional[List[torch.Tensor]] = None,
-        predicted_so_far: Optional[List[torch.Tensor]] = None,
-    ) -> Tuple[torch.Tensor, int]:
-        """Build the concept token sequence for the Transformer.
+        # Expand [N, D_enc] markers to [B, N, D_enc] via broadcasting.
+        markers = (lvl + pos).unsqueeze(0).expand(B, -1, -1)
 
-        PRINCIPLE (VAR.md Section 5.3.2, Step 2-4):
-            Training (teacher-forcing):
-                input = [start_token, C_0_gt, C_1_gt, ..., C_{K-2}_gt]
-                target = [C_0_gt, C_1_gt, ..., C_{K-1}_gt]
-                (shifted by one level, like VAR's teacher-forcing)
+        # Dtype alignment.  back_decode may produce fp32 even inside an
+        # autocast block while `emb` could be bf16; the addition below
+        # requires matching dtype.
+        if markers.dtype != emb.dtype:
+            markers = markers.to(emb.dtype)
+        return emb + markers
 
-            Inference (autoregressive, partial):
-                input = [start_token, C_0_pred, ..., C_{k-1}_pred]
-                predict C_k from the output positions for level k.
-
-        Args:
-            q_context: Aggregated question context [B, 1, D] or [B, L_Q, D].
-            gt_concepts: Ground truth concepts (training). List of K tensors.
-            predicted_so_far: Previously predicted concepts (inference).
-
-        Returns:
-            Tuple of:
-                concept_input: [B, L_input, D] — input to concept transformer.
-                q_len: Length of question context prefix.
-        """
-        batch_size = q_context.shape[0]
-        device = q_context.device
-        concept_dim = self.pyramid_cfg["hidden_dim"]
-
-        # Start token: [B, 1, D]
-        start = self.start_token.expand(batch_size, -1, -1)
-
-        # Build input sequence with level + position embeddings
-        # start_token has no level/pos embedding
-        parts = [start]
-
-        if gt_concepts is not None:
-            # Teacher-forcing: input is [start, C_0, C_1, ..., C_{K-2}]
-            # (we don't include C_{K-1} in input since it's the last target)
-            concepts_to_feed = gt_concepts[:-1]
-        elif predicted_so_far is not None:
-            concepts_to_feed = predicted_so_far
-        else:
-            concepts_to_feed = []
-
-        for level_idx, concepts in enumerate(concepts_to_feed):
-            # concepts: [B, L_k, D]
-            L_k = concepts.shape[1]
-
-            # Level embedding: [L_k, D]
-            lvl_emb = self.level_embeddings(
-                torch.full((L_k,), level_idx, device=device, dtype=torch.long)
-            )
-            # Expand to batch: [B, L_k, D]
-            lvl_emb = lvl_emb.unsqueeze(0).expand(batch_size, -1, -1)
-
-            # Position embedding (within level)
-            # pos_ids: [L_k], pos_emb: [L_k, D]
-            pos_ids = torch.arange(L_k, device=device)
-            pos_emb = self.position_embeddings(pos_ids)
-            # Expand to batch: [B, L_k, D]
-            pos_emb = pos_emb.unsqueeze(0).expand(batch_size, -1, -1)
-
-            parts.append(concepts + lvl_emb + pos_emb)
-
-        # Concatenated input: [B, L_input, D]
-        concept_input = torch.cat(parts, dim=1)
-        # q_len = 1 (start token)
-        return concept_input, 1
+    # ------------------------------------------------------------------ #
+    #  forward dispatch                                                  #
+    # ------------------------------------------------------------------ #
 
     def forward(
         self,
         question_ids: torch.Tensor,
         question_attention_mask: Optional[torch.Tensor] = None,
         gt_concepts: Optional[List[torch.Tensor]] = None,
+        solution_ids: Optional[torch.Tensor] = None,
+        solution_attention_mask: Optional[torch.Tensor] = None,
     ) -> PredictorOutput:
-        """Forward pass: predict concept pyramid.
+        """Predict the concept pyramid from Q.
 
-        PRINCIPLE (VAR.md Section 5.3.2):
-            Training (teacher-forcing):
-                Input:  [start_token, C_0_gt, ..., C_{K-2}_gt]
-                Target: [C_0_gt, C_1_gt, ..., C_{K-1}_gt]
-                Loss:   MSE(predicted, target) averaged over all levels.
+        Branches on `gt_concepts`:
+            * Supplied  — teacher-forced single forward pass (training).
+            * Missing   — autoregressive generation (inference).
 
-            Inference (no gt_concepts):
-                Autoregressive generation level by level.
-
-        DIMENSION FLOW:
-            Input:
-                question_ids: [B, L_Q]
-                gt_concepts: List of [B, L_k, D] for k=0..K-1 (optional)
-            Output:
-                PredictorOutput with predicted_concepts, prediction_loss
+        If `solution_ids` is supplied, the reasoning fields of the
+        returned PredictorOutput are also populated.
 
         Args:
-            question_ids: Question token IDs [B, L_Q].
-            question_attention_mask: Question mask [B, L_Q] (optional).
-            gt_concepts: Ground truth concepts from frozen builder (training).
-                If None, runs in inference mode (autoregressive).
+            question_ids: Question token ids.
+                Shape: [B, L_Q].
+            question_attention_mask: 1=valid, 0=pad.
+                Shape: [B, L_Q].
+            gt_concepts: Ground-truth pyramid from the frozen Builder.
+                Training only.  List of K tensors, each [B, L_k, D].
+            solution_ids: Optional solution token ids — enables the
+                reasoning CE loss path.
+                Shape: [B, L_S].
+            solution_attention_mask: Required when solution_ids is set.
+                Shape: [B, L_S].
 
         Returns:
-            PredictorOutput with predicted concepts and optional loss.
+            PredictorOutput — see class docstring.
         """
         if gt_concepts is not None:
-            return self._forward_training(
+            out = self._forward_training(
                 question_ids, question_attention_mask, gt_concepts
             )
         else:
-            return self._forward_inference(question_ids, question_attention_mask)
+            out = self._forward_inference(
+                question_ids, question_attention_mask
+            )
+
+        if solution_ids is not None:
+            if solution_attention_mask is None:
+                raise ValueError(
+                    "solution_attention_mask is required when solution_ids is given."
+                )
+            self._prepare_reasoning(
+                out,
+                question_ids,
+                question_attention_mask,
+                solution_ids,
+                solution_attention_mask,
+            )
+        return out
+
+    # ------------------------------------------------------------------ #
+    #  training — teacher-forced single pass                             #
+    # ------------------------------------------------------------------ #
 
     def _forward_training(
         self,
@@ -594,290 +735,361 @@ class ConceptPredictor(nn.Module):
         question_attention_mask: Optional[torch.Tensor],
         gt_concepts: List[torch.Tensor],
     ) -> PredictorOutput:
-        """Training forward with teacher-forcing.
+        """Teacher-forced training forward (single LLM pass).
 
-        PRINCIPLE (VAR.md Section 5.3.2):
-            Feed ground truth concepts as input (shifted by one level).
-            The Transformer predicts the next level at each position.
+        Pipeline (for B=4, L_Q=40, K=6, total_C=63, D=D_enc=896):
 
-        DIMENSION FLOW:
-            1. Encode Q → q_hidden [B, L_Q, D_model]
-            2. Project → q_proj [B, L_Q, D]
-            3. Aggregate → q_context [B, 1, D] (mean pool)
-            4. Build input: [start, C_0_gt, ..., C_{K-2}_gt]
-               Total input length = 1 + sum(L_0..L_{K-2})
-            5. Apply concept_transformer with scale-level causal mask
-            6. Extract predictions at target positions
-            7. Compute MSE loss against GT
+            1. Concatenate GT concepts:      [4, 63, 896]
+            2. back_decode + slot markers:   [4, 63, 896]
+            3. embed questions:              [4, 40, 896]
+            4. concat [Q, concepts]:         [4, 103, 896]
+            5. attention mask concat:        [4, 103]
+            6. backbone forward:             [4, 103, 896]   (hidden_states)
+            7. slice positions [39 : 102]:   [4, 63, 896]    (readout)
+            8. concept_head:                 [4, 63, 896]    (D=896)
+            9. split by level_lengths:
+                   [4, 1, 896]
+                   [4, 2, 896]
+                   [4, 4, 896]
+                   [4, 8, 896]
+                   [4, 16, 896]
+                   [4, 32, 896]
+
+        Args:
+            question_ids: [B, L_Q].
+            question_attention_mask: [B, L_Q] or None.
+            gt_concepts: List of K tensors, each [B, L_k, D].
+
+        Returns:
+            PredictorOutput with predicted_concepts and gt_concepts set;
+            reasoning_* fields left as None until _prepare_reasoning is
+            called by the caller.
         """
-        batch_size = question_ids.shape[0]
+        if len(gt_concepts) != self._num_levels:
+            raise ValueError(
+                f"gt_concepts has {len(gt_concepts)} levels, "
+                f"expected {self._num_levels}."
+            )
+
+        B = question_ids.shape[0]
         device = question_ids.device
 
-        # Step 1-3: Encode question and aggregate
-        q_hidden = self.encode_question(question_ids, question_attention_mask)
-        # q_hidden: [B, L_Q, D_model]
-        # Project and normalize: [B, L_Q, D]
-        q_proj = self.q_proj_norm(self.q_proj(q_hidden))
+        # Step 1: flatten GT concepts to [B, total_C, D].
+        # Principle: level-major ordering matches the flat-slot layout
+        # diagrammed in the module docstring.
+        concepts_flat = torch.cat(gt_concepts, dim=1)
 
-        # Mean-pool question to single context vector
+        # Step 2: lift to D_enc + attach slot markers.
+        # Shape: [B, total_C, D_enc].
+        concept_embeds = self._build_concept_input_embeds(
+            concepts_flat, start_slot=0
+        )
+        total_C = concept_embeds.shape[1]
+
+        # Step 3: question embeddings via backbone.embed_tokens.
+        # Shape: [B, L_Q, D_enc].
+        Q_embeds = self._embed_questions(question_ids)
+        L_Q = Q_embeds.shape[1]
+
+        # Dtype alignment across the two branches (autocast robustness).
+        if concept_embeds.dtype != Q_embeds.dtype:
+            concept_embeds = concept_embeds.to(Q_embeds.dtype)
+
+        # Step 4: concatenate for a single standard causal pass.
+        # Shape: [B, L_Q + total_C, D_enc].
+        inputs_embeds = torch.cat([Q_embeds, concept_embeds], dim=1)
+
+        # Step 5: attention mask — real Q mask plus ones(total_C)
+        # because concepts have no padding.
         if question_attention_mask is not None:
-            mask_expanded = question_attention_mask.unsqueeze(-1).float()
-            q_context = (q_proj * mask_expanded).sum(dim=1, keepdim=True) / (
-                mask_expanded.sum(dim=1, keepdim=True).clamp(min=1.0)
+            concept_mask = torch.ones(
+                B, total_C, device=device, dtype=question_attention_mask.dtype
+            )
+            attention_mask = torch.cat(
+                [question_attention_mask, concept_mask], dim=1
             )
         else:
-            q_context = q_proj.mean(dim=1, keepdim=True)
-        # q_context: [B, 1, D]
+            attention_mask = None
 
-        # Inject question context into start token
-        start = self.start_token.expand(batch_size, -1, -1) + q_context
-        # start: [B, 1, D]
-
-        # Step 4: Build teacher-forcing input
-        # Input:  [start, C_0_gt, C_1_gt, ..., C_{K-2}_gt]
-        # Target: [C_0_gt, C_1_gt, ..., C_{K-1}_gt]
-        parts = [start]
-        for level_idx in range(self._num_levels - 1):
-            # GT concepts at this level: [B, L_k, D]
-            concepts = gt_concepts[level_idx]
-            L_k = concepts.shape[1]
-
-            lvl_emb = (
-                self.level_embeddings(
-                    torch.full((L_k,), level_idx, device=device, dtype=torch.long)
-                )
-                .unsqueeze(0)
-                .expand(batch_size, -1, -1)
-            )
-
-            pos_emb = (
-                self.position_embeddings(torch.arange(L_k, device=device))
-                .unsqueeze(0)
-                .expand(batch_size, -1, -1)
-            )
-
-            parts.append(concepts + lvl_emb + pos_emb)
-
-        transformer_input = torch.cat(parts, dim=1)
-        # transformer_input: [B, 1 + sum(L_0..L_{K-2}), D]
-
-        # Step 5: Build attention mask for the input sequence
-        # The input has: [start(1), level_0(L_0), level_1(L_1), ..., level_{K-2}(L_{K-2})]
-        # We need scale-level causality over the concept part.
-        # Start token is visible to all (like VAR's class token at scale -1).
-        input_len = transformer_input.shape[1]
-        attn_mask = torch.zeros(
-            input_len, input_len, device=device, dtype=transformer_input.dtype
+        # Step 6: backbone forward (LLM causal mask is applied internally).
+        # Shape: [B, L_Q + total_C, D_enc].
+        backbone = self._get_backbone()
+        backbone_out = backbone(
+            inputs_embeds=inputs_embeds,
+            attention_mask=attention_mask,
+            output_hidden_states=False,
         )
+        if hasattr(backbone_out, "last_hidden_state"):
+            hidden = backbone_out.last_hidden_state
+        else:
+            hidden = backbone_out[0]
 
-        # Build level assignment for each position in the input
-        # Start token: level -1 (visible to all)
-        # C_0 tokens: level 0, C_1 tokens: level 1, ...
-        # Start token gets level -1 (visible to all)
-        input_level_ids = [-1]
-        for level_idx in range(self._num_levels - 1):
-            L_k = self._level_lengths[level_idx]
-            input_level_ids.extend([level_idx] * L_k)
-        input_level_ids = torch.tensor(input_level_ids, device=device)
+        # Step 7: next-slot readout slice.
+        # Principle: in a causal LM, hidden[t] predicts the token at t+1.
+        # Position (L_Q - 1) predicts slot 0; position (L_Q + total_C - 2)
+        # predicts slot (total_C - 1).  Therefore slice length total_C
+        # starting at (L_Q - 1).
+        #
+        # Shape: [B, total_C, D_enc].
+        start = L_Q - 1
+        readout = hidden[:, start : start + total_C, :]
 
-        # Position i can attend to j iff level[i] >= level[j]
-        # row_levels: [L_input, 1], col_levels: [1, L_input]
-        row_levels = input_level_ids.unsqueeze(1)
-        col_levels = input_level_ids.unsqueeze(0)
-        # can_attend: [L_input, L_input]
-        can_attend = row_levels >= col_levels
-        attn_mask.masked_fill_(~can_attend, float("-inf"))
+        # Step 8: map from D_enc back to concept space D.
+        # Shape: [B, total_C, D].
+        flat_predicted = self.concept_head(readout)
 
-        # Step 6: Forward through concept transformer
-        transformer_output = self.concept_transformer(transformer_input, mask=attn_mask)
-        # transformer_output: [B, L_input, D]
-
-        # Step 7: Extract predictions at target positions and compute loss
-        # The output at position range for level k predicts level k concepts.
-        # Mapping: start(1) predicts C_0, C_0 positions predict C_1, etc.
-        predicted_concepts = []
-        per_level_losses = []
-        total_loss = torch.tensor(0.0, device=device)
-
-        # Position 0 (start token output) → predicts C_0
-        # Positions [1, 1+L_0) (C_0 output) → predicts C_1
-        # Positions [1+L_0, 1+L_0+L_1) (C_1 output) → predicts C_2
-        # etc.
+        # Step 9: split the flat prediction back into per-level tensors.
+        # For K=6 and level_lengths=[1,2,4,8,16,32], offsets are
+        # [0, 1, 3, 7, 15, 31, 63].
+        predicted_concepts: List[torch.Tensor] = []
         offset = 0
-        for level_idx in range(self._num_levels):
-            # Target for this level: [B, L_k, D]
-            target = gt_concepts[level_idx]
-            L_k = target.shape[1]
-
-            # Extract transformer output for the prediction positions
-            if level_idx == 0:
-                # Start token output → expand to L_0 predictions
-                # [B, 1, D] → [B, L_k, D]
-                pred_hidden = transformer_output[:, 0:1, :]
-                pred_hidden = pred_hidden.expand(-1, L_k, -1)
-            else:
-                # Previous level's output positions → predict this level
-                prev_start = 1 + sum(self._level_lengths[: level_idx - 1])
-                prev_end = prev_start + self._level_lengths[level_idx - 1]
-                pred_hidden = transformer_output[:, prev_start:prev_end, :]
-                # pred_hidden: [B, L_{k-1}, D]
-
-                # Pool or project to match target length L_k
-                # Use linear interpolation to go from L_{k-1} → L_k
-                # Interpolate: [B, L_{k-1}, D] → [B, D, L_{k-1}] → [B, D, L_k] → [B, L_k, D]
-                if pred_hidden.shape[1] != L_k:
-                    pred_hidden = pred_hidden.transpose(1, 2)
-                    pred_hidden = F.interpolate(
-                        pred_hidden, size=L_k, mode="linear", align_corners=False
-                    )
-                    pred_hidden = pred_hidden.transpose(1, 2)
-
-            # Apply prediction head
-            # Apply prediction head: [B, L_k, D]
-            predicted = self.concept_head(pred_hidden)
-
-            # Add target-level embedding to prediction
-            target_lvl_emb = (
-                self.level_embeddings(
-                    torch.full((L_k,), level_idx, device=device, dtype=torch.long)
-                )
-                .unsqueeze(0)
-                .expand(batch_size, -1, -1)
-            )
-            target_pos_emb = (
-                self.position_embeddings(torch.arange(L_k, device=device))
-                .unsqueeze(0)
-                .expand(batch_size, -1, -1)
-            )
-
-            predicted = predicted + target_lvl_emb + target_pos_emb
-
-            predicted_concepts.append(predicted)
-
-            # Per-level MSE loss
-            level_loss = F.mse_loss(predicted, target.detach())
-            per_level_losses.append(level_loss)
-            total_loss = total_loss + level_loss
-
-        # Average loss across levels
-        total_loss = total_loss / self._num_levels
+        for Lk in self._level_lengths:
+            predicted_concepts.append(flat_predicted[:, offset : offset + Lk, :])
+            offset += Lk
 
         return PredictorOutput(
             predicted_concepts=predicted_concepts,
-            prediction_loss=total_loss,
-            per_level_losses=per_level_losses,
+            gt_concepts=gt_concepts,
+            num_levels=self._num_levels,
+            level_lengths=list(self._level_lengths),
         )
 
+    # ------------------------------------------------------------------ #
+    #  inference — autoregressive generation with KV-cache               #
+    # ------------------------------------------------------------------ #
+
+    @torch.no_grad()
     def _forward_inference(
         self,
         question_ids: torch.Tensor,
         question_attention_mask: Optional[torch.Tensor],
     ) -> PredictorOutput:
-        """Inference forward: autoregressive level-by-level generation.
+        """Autoregressive greedy generation (total_C = 63 sequential steps).
 
-        PRINCIPLE (VAR.md Section 6 — Inference):
-            Without ground truth, generate concepts level by level.
-            Each level uses all previously predicted levels as context.
+        State maintained across steps:
+            pkv           — HuggingFace past_key_values (KV cache).
+            running_mask  — full attention mask covering everything in
+                            the cache so far.
 
-        DIMENSION FLOW:
-            For each level k:
-                Input:  [start, C_0_pred, ..., C_{k-1}_pred]
-                Output: C_k_pred [B, L_k, D]
+        Loop diagram (B=4, L_Q=40, total_C=63, D_enc=896):
+
+            step 0 (consume question):
+                x = Q_embeds                   [4,  40, 896]
+                running_mask                   [4,  40]
+                backbone(x, use_cache=True)
+                    → pkv (covers 40 positions)
+                    → hidden.last_hidden_state [4,  40, 896]
+                hidden_last = hidden[:, -1:, :] [4,  1,  896]
+                slot 0 = concept_head(hidden_last)  [4, 1, D]
+
+            step t ∈ [1, 62] (consume prev slot):
+                prev = slot_{t-1}              [4,  1,   D]
+                x = back_decode(prev)+lvl+pos  [4,  1,   896]
+                running_mask ← concat +1       [4, 40+t]
+                backbone(x, pkv, use_cache)
+                    → pkv (covers 40+t+1 positions)
+                    → hidden.last_hidden_state [4,  1,   896]
+                slot t = concept_head(hidden.last_hidden_state[:, -1:, :])
+
+            After 63 steps:
+                flat_predicted = cat(slots, dim=1)   [4, 63, D]
+                split by level_lengths → per-level list.
+
+        Args:
+            question_ids: [B, L_Q].
+            question_attention_mask: [B, L_Q] or None.
+
+        Returns:
+            PredictorOutput with predicted_concepts; gt_concepts=None.
         """
-        batch_size = question_ids.shape[0]
+        B = question_ids.shape[0]
         device = question_ids.device
+        backbone = self._get_backbone()
 
-        # Encode question
-        q_hidden = self.encode_question(question_ids, question_attention_mask)
-        q_proj = self.q_proj_norm(self.q_proj(q_hidden))
+        # ================================================================
+        # Step 0: consume the question and emit the first concept slot.
+        # ================================================================
+        Q_embeds = self._embed_questions(question_ids)
+        out = backbone(
+            inputs_embeds=Q_embeds,
+            attention_mask=question_attention_mask,
+            use_cache=True,
+        )
+        pkv = out.past_key_values
+        hidden_last = out.last_hidden_state[:, -1:, :]
+        C_0 = self.concept_head(hidden_last)
+        flat_slots: List[torch.Tensor] = [C_0]
 
+        # Running full attention mask so the backbone knows how many
+        # positions the cache covers (needed for RoPE / ALiBi).
         if question_attention_mask is not None:
-            mask_expanded = question_attention_mask.unsqueeze(-1).float()
-            q_context = (q_proj * mask_expanded).sum(dim=1, keepdim=True) / (
-                mask_expanded.sum(dim=1, keepdim=True).clamp(min=1.0)
-            )
+            running_mask = question_attention_mask
         else:
-            q_context = q_proj.mean(dim=1, keepdim=True)
-
-        start = self.start_token.expand(batch_size, -1, -1) + q_context
-
-        predicted_concepts = []
-
-        for level_idx in range(self._num_levels):
-            L_k = self._level_lengths[level_idx]
-
-            # Build input: [start, C_0_pred, ..., C_{k-1}_pred]
-            parts = [start]
-            for prev_idx, prev_concepts in enumerate(predicted_concepts):
-                L_prev = prev_concepts.shape[1]
-                lvl_emb = (
-                    self.level_embeddings(
-                        torch.full((L_prev,), prev_idx, device=device, dtype=torch.long)
-                    )
-                    .unsqueeze(0)
-                    .expand(batch_size, -1, -1)
-                )
-                pos_emb = (
-                    self.position_embeddings(torch.arange(L_prev, device=device))
-                    .unsqueeze(0)
-                    .expand(batch_size, -1, -1)
-                )
-                parts.append(prev_concepts + lvl_emb + pos_emb)
-
-            transformer_input = torch.cat(parts, dim=1)
-
-            # Build causal mask for current input
-            input_len = transformer_input.shape[1]
-            input_level_ids = [-1]
-            for prev_idx in range(level_idx):
-                input_level_ids.extend([prev_idx] * self._level_lengths[prev_idx])
-            input_level_ids = torch.tensor(input_level_ids, device=device)
-            row_levels = input_level_ids.unsqueeze(1)
-            col_levels = input_level_ids.unsqueeze(0)
-            can_attend = row_levels >= col_levels
-            attn_mask = torch.zeros(
-                input_len,
-                input_len,
-                device=device,
-                dtype=transformer_input.dtype,
-            )
-            attn_mask.masked_fill_(~can_attend, float("-inf"))
-
-            # Forward
-            transformer_output = self.concept_transformer(
-                transformer_input, mask=attn_mask
+            running_mask = torch.ones(
+                B, Q_embeds.shape[1], device=device, dtype=torch.long
             )
 
-            # Extract prediction from the last positions
-            if level_idx == 0:
-                pred_hidden = transformer_output[:, 0:1, :].expand(-1, L_k, -1)
-            else:
-                prev_L = self._level_lengths[level_idx - 1]
-                pred_hidden = transformer_output[:, -prev_L:, :]
-                if pred_hidden.shape[1] != L_k:
-                    pred_hidden = pred_hidden.transpose(1, 2)
-                    pred_hidden = F.interpolate(
-                        pred_hidden, size=L_k, mode="linear", align_corners=False
-                    )
-                    pred_hidden = pred_hidden.transpose(1, 2)
+        # ================================================================
+        # Steps 1..total_C-1: each step feeds one lifted concept and
+        # reads back one new slot.
+        # ================================================================
+        for t in range(1, self._total_concepts):
+            prev = flat_slots[-1]
 
-            predicted = self.concept_head(pred_hidden)
+            # start_slot = t - 1 because the slot we are feeding is the
+            # one we emitted at the previous step, i.e. global flat
+            # slot index (t - 1).
+            x = self._build_concept_input_embeds(prev, start_slot=t - 1)
 
-            # Add level/position embeddings
-            target_lvl_emb = (
-                self.level_embeddings(
-                    torch.full((L_k,), level_idx, device=device, dtype=torch.long)
-                )
-                .unsqueeze(0)
-                .expand(batch_size, -1, -1)
+            # Dtype alignment with the cached hidden stream.
+            if x.dtype != hidden_last.dtype:
+                x = x.to(hidden_last.dtype)
+
+            running_mask = torch.cat(
+                [
+                    running_mask,
+                    torch.ones(B, 1, device=device, dtype=running_mask.dtype),
+                ],
+                dim=1,
             )
-            target_pos_emb = (
-                self.position_embeddings(torch.arange(L_k, device=device))
-                .unsqueeze(0)
-                .expand(batch_size, -1, -1)
+            out = backbone(
+                inputs_embeds=x,
+                attention_mask=running_mask,
+                past_key_values=pkv,
+                use_cache=True,
             )
-            predicted = predicted + target_lvl_emb + target_pos_emb
+            pkv = out.past_key_values
+            hidden_last = out.last_hidden_state[:, -1:, :]
+            flat_slots.append(self.concept_head(hidden_last))
 
-            predicted_concepts.append(predicted)
+        # Concatenate the 63 per-step slots and split by level.
+        # Shape: [B, total_C, D].
+        flat_predicted = torch.cat(flat_slots, dim=1)
 
-        return PredictorOutput(predicted_concepts=predicted_concepts)
+        predicted_concepts: List[torch.Tensor] = []
+        offset = 0
+        for Lk in self._level_lengths:
+            predicted_concepts.append(flat_predicted[:, offset : offset + Lk, :])
+            offset += Lk
+
+        return PredictorOutput(
+            predicted_concepts=predicted_concepts,
+            gt_concepts=None,
+            num_levels=self._num_levels,
+            level_lengths=list(self._level_lengths),
+        )
+
+    # ------------------------------------------------------------------ #
+    #  optional reasoning CE loss path                                   #
+    # ------------------------------------------------------------------ #
+
+    def _prepare_reasoning(
+        self,
+        output: PredictorOutput,
+        question_ids: torch.Tensor,
+        question_attention_mask: Optional[torch.Tensor],
+        solution_ids: torch.Tensor,
+        solution_attention_mask: torch.Tensor,
+    ) -> None:
+        """Populate output.reasoning_* via teacher-forced NTP.
+
+        Sequence layout fed to reason_model (B=4, L_Q=40, total_C=63,
+        L_S=30):
+
+            ◄──── L_Q = 40 ────►◄──── total_C = 63 ────►◄── L_S = 30 ──►
+            [  Q_embeds         ][ back_decode(predicted) ][  S_embeds  ]
+              40 positions         63 positions              30 positions
+                                                         total T = 133
+
+        Causal logit alignment:
+            logits[:, L_Q + total_C - 1,           :] predicts S_0
+            logits[:, L_Q + total_C,               :] predicts S_1
+            ...
+            logits[:, L_Q + total_C + L_S - 2,     :] predicts S_{L_S-1}
+
+            slice: [:, L_Q+total_C-1 : L_Q+total_C+L_S-1, :]
+                   = [:, 102 : 132, :]  (length 30)
+            shape: [B, L_S, V]
+
+        Loss: CE(reasoning_logits, targets_with_-100_on_pad).
+        Gradient path:   predicted_concepts → back_decode → reason_model → CE.
+        This trains the predictor to emit concepts that actually support
+        solution decoding.
+
+        Note: we intentionally do NOT add slot markers here so this
+        exactly matches the Builder convention and the two reasoning
+        losses (Stage-1 and Stage-2) are numerically comparable.
+
+        Args:
+            output: PredictorOutput to mutate in-place.
+            question_ids: [B, L_Q].
+            question_attention_mask: [B, L_Q] (required).
+            solution_ids: [B, L_S].
+            solution_attention_mask: [B, L_S].
+        """
+        if question_attention_mask is None:
+            raise ValueError(
+                "question_attention_mask is required for reasoning loss."
+            )
+
+        device = question_ids.device
+        B = question_ids.shape[0]
+
+        # Step 1: concatenate predicted concepts — [B, total_C, D].
+        concepts = torch.cat(output.predicted_concepts, dim=1)
+        total_C = concepts.shape[1]
+
+        # Step 2: back_decode to D_enc — [B, total_C, D_enc].
+        concept_embeds = self.back_decode(concepts)
+
+        # Step 3: embed Q and S token ids.
+        embed_layer = self._get_backbone().get_input_embeddings()
+        Q_embeds = embed_layer(question_ids)
+        L_Q = Q_embeds.shape[1]
+        S_embeds = embed_layer(solution_ids)
+        L_S = S_embeds.shape[1]
+
+        if concept_embeds.dtype != Q_embeds.dtype:
+            concept_embeds = concept_embeds.to(Q_embeds.dtype)
+
+        # Step 4: concatenate — [B, L_Q + total_C + L_S, D_enc].
+        decoder_input_embeds = torch.cat(
+            [Q_embeds, concept_embeds, S_embeds], dim=1
+        )
+
+        # Step 5: attention mask — [B, L_Q + total_C + L_S].
+        concept_mask = torch.ones(
+            B, total_C, device=device, dtype=question_attention_mask.dtype
+        )
+        decoder_attention_mask = torch.cat(
+            [question_attention_mask, concept_mask, solution_attention_mask], dim=1
+        )
+
+        # Step 6: forward through the full reason_model (with lm_head).
+        # Shape: [B, T, V] where T = L_Q + total_C + L_S.
+        model_out = self.reason_model(
+            inputs_embeds=decoder_input_embeds,
+            attention_mask=decoder_attention_mask,
+        )
+        logits = model_out.logits
+
+        # Step 7: slice out positions that predict S tokens.
+        # Shape: [B, L_S, V].
+        sol_start = L_Q + total_C - 1
+        sol_end = L_Q + total_C + L_S - 1
+        solution_logits = logits[:, sol_start:sol_end, :]
+
+        # Step 8: build targets with -100 on pad positions so
+        # cross_entropy (ignore_index=-100) skips them automatically.
+        targets = solution_ids.clone()
+        targets[solution_attention_mask == 0] = -100
+
+        output.reasoning_logits = solution_logits
+        output.reasoning_target_ids = targets
+
+        # Step 9: argmax decode for qualitative inspection.
+        with torch.no_grad():
+            predicted_ids = solution_logits.argmax(dim=-1)
+            output.reasoning_texts = self.tokenizer.batch_decode(
+                predicted_ids, skip_special_tokens=True
+            )

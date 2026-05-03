@@ -379,9 +379,7 @@ def load_checkpoint(
     # Defensive .get for ``loss``: legacy ``checkpoint_best_eval-*.pt``
     # files wrote ``eval_loss`` instead. Either is acceptable as a
     # best_loss seed; absent both, ``inf`` is the correct neutral.
-    loss_value = checkpoint.get(
-        "loss", checkpoint.get("eval_loss", float("inf"))
-    )
+    loss_value = checkpoint.get("loss", checkpoint.get("eval_loss", float("inf")))
     return (
         int(checkpoint["epoch"]),
         int(checkpoint["step"]),

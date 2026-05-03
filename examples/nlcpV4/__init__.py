@@ -44,6 +44,7 @@ from nlcpV4.concept_builder import (
     PyramidOutput,
 )
 from nlcpV4.concept_predictor import ConceptPredictor
+from nlcpV4.concept_predictor_parallel import ConceptPredictorParallel
 from nlcpV4.data_loader import BuilderInput, NLCPV4DataLoader
 from nlcpV4.eval_builder import (
     evaluate_builder,
@@ -55,6 +56,7 @@ __all__ = [
     "ConceptPyramidBuilder",
     # Concept Predictor (Phase 2: next-level prediction)
     "ConceptPredictor",
+    "ConceptPredictorParallel",
     # Builder input / output dataclasses
     "BuilderInput",
     "EncoderOutput",
