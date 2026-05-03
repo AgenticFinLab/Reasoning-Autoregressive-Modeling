@@ -55,7 +55,7 @@ from lmbase.utils.env_tools import get_device
 from nlcpV4.concept_builder import ConceptPyramidBuilder
 from nlcpV4.data_loader import NLCPV4DataLoader
 from nlcpV4.eval_builder import evaluate_builder
-from ram.utils import load_config
+from ram.utils import apply_storage_root, load_config
 
 logger = logging.getLogger(__name__)
 
@@ -113,6 +113,19 @@ def parse_args():
         help=(
             "If true (default), overwrite existing analysis outputs. "
             "Pass --no-overlap to skip configs whose outputs already exist."
+        ),
+    )
+    parser.add_argument(
+        "-s",
+        "--storage-root",
+        type=str,
+        default="",
+        help=(
+            "Prefix to prepend to every relative output path in "
+            "config.log (save_folder / checkpoint_path / log_path). "
+            "Must match the value used when training produced the "
+            "artifacts this script reads. Absolute paths in YAML are "
+            "preserved."
         ),
     )
     return parser.parse_args()
@@ -764,7 +777,7 @@ def _build_figures(
     plt.close(fig3)
 
 
-def _run_builder_analysis(config_path: Path) -> None:
+def _run_builder_analysis(config_path: Path, storage_root: str = "") -> None:
     """Run the full analysis for a single config and write 6 PNGs to
     ``<experiment>/train_analysis/`` (sibling of ``logs/``).
 
@@ -775,6 +788,7 @@ def _run_builder_analysis(config_path: Path) -> None:
     exists under config.log.log_path.
     """
     config = load_config(str(config_path))
+    apply_storage_root(config, storage_root)
 
     # --- Plot styling: larger, bold titles/labels/legend/ticks ----
     # Set once via rcParams so every set_title / set_xlabel /
@@ -916,7 +930,11 @@ def _run_builder_analysis(config_path: Path) -> None:
     print("Saved to %s" % output_dir)
 
 
-def analyze_one(config_path: Path, overlap: bool = True) -> tuple[str, str]:
+def analyze_one(
+    config_path: Path,
+    overlap: bool = True,
+    storage_root: str = "",
+) -> tuple[str, str]:
     """Analyze a single config. Returns (status, detail) tuple.
 
     Args:
@@ -938,6 +956,8 @@ def analyze_one(config_path: Path, overlap: bool = True) -> tuple[str, str]:
     except Exception as exc:  # noqa: BLE001
         return "error", f"load_config failed: {exc}"
 
+    apply_storage_root(config, storage_root)
+
     log_dir = Path(config["log"]["log_path"])
     if not log_dir.is_absolute():
         log_dir = PROJECT_ROOT / log_dir
@@ -950,7 +970,7 @@ def analyze_one(config_path: Path, overlap: bool = True) -> tuple[str, str]:
     if not overlap and all((output_dir / name).is_file() for name in ANALYSIS_OUTPUTS):
         return "skip_exists", f"all outputs already exist at {output_dir}"
     try:
-        _run_builder_analysis(config_path)
+        _run_builder_analysis(config_path, storage_root=storage_root)
     except Exception as exc:  # noqa: BLE001
         # Close any half-drawn figures to avoid leaks in batch mode.
         plt.close("all")
@@ -992,6 +1012,7 @@ def main():
     dataset: str = args.dataset
     experiment: str = args.experiment
     overlap: bool = args.overlap
+    storage_root: str = args.storage_root
 
     configs = discover_configs(module, dataset, experiment)
     if not configs:
@@ -1013,7 +1034,9 @@ def main():
         print("=" * 70)
         print(f"[CONFIG] {cfg_path.name}")
         print("=" * 70)
-        status, detail = analyze_one(cfg_path, overlap=overlap)
+        status, detail = analyze_one(
+            cfg_path, overlap=overlap, storage_root=storage_root
+        )
         if status == "analyzed":
             print(f"[OK]   {detail}")
         elif status == "skip_no_data":

@@ -530,14 +530,34 @@ def parse_args():
     parser.add_argument(
         "-i",
         "--input",
-        default=str(DEFAULT_INPUT),
-        help=f"Path to Loss_prepare.json (default: {DEFAULT_INPUT}).",
+        default=None,
+        help=(
+            "Path to Loss_prepare.json. Default: "
+            "<storage_root>/EXPERIMENT/nlcpV4/builder/Loss_prepare.json, "
+            "where <storage_root> is the value of -s (or the project "
+            "root when -s is absent)."
+        ),
     )
     parser.add_argument(
         "-o",
         "--output-dir",
-        default=str(DEFAULT_OUTPUT_DIR),
-        help=f"Output directory (default: {DEFAULT_OUTPUT_DIR}).",
+        default=None,
+        help=(
+            "Output directory. Default: "
+            "<storage_root>/EXPERIMENT/nlcpV4/builder/training_prepare/."
+        ),
+    )
+    parser.add_argument(
+        "-s",
+        "--storage-root",
+        type=str,
+        default="",
+        help=(
+            "Prefix that replaces the project root when computing the "
+            "default -i / -o paths. Ignored for paths passed "
+            "explicitly via -i or -o. Use to match the -s value that "
+            "loss_prepare.py was launched with."
+        ),
     )
     parser.add_argument(
         "--target",
@@ -564,8 +584,11 @@ def parse_args():
 def main():
     """CLI entry point: analyse Loss_prepare.json and emit plots + CSV."""
     args = parse_args()
-    input_path = Path(args.input)
-    output_dir = Path(args.output_dir)
+    base = Path(args.storage_root) if args.storage_root else PROJECT_ROOT
+    default_input = base / "EXPERIMENT" / "nlcpV4" / "builder" / "Loss_prepare.json"
+    default_output_dir = base / "EXPERIMENT" / "nlcpV4" / "builder" / "training_prepare"
+    input_path = Path(args.input) if args.input else default_input
+    output_dir = Path(args.output_dir) if args.output_dir else default_output_dir
 
     if not input_path.is_file():
         print(f"[ERROR] Input file not found: {input_path}")

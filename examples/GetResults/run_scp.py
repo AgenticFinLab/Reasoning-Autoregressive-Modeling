@@ -48,10 +48,17 @@ from pathlib import Path
 import yaml
 
 # --- Default remote / local base paths ---------------------------------
+# ``REMOTE_BASE`` and ``LOCAL_BASE`` point to the default
+# ``EXPERIMENT/nlcpV4`` directory on each side. Pass ``-s <root>`` to
+# redirect the REMOTE side to ``<root>/EXPERIMENT/nlcpV4`` (matches the
+# ``-s`` flag accepted by the trainer and by run_experiments.py). The
+# LOCAL side intentionally stays at ``./EXPERIMENT/nlcpV4`` — you can
+# always override with ``--local-base`` if you need a different sink.
 REMOTE_HOST = "sjia@10.123.4.30"
 REMOTE_BASE = "/home/sjia/projects/Reasoning-Autoregressive-Modeling/EXPERIMENT/nlcpV4"
 LOCAL_BASE = Path("./EXPERIMENT/nlcpV4")
 CONFIGS_ROOT = Path("./configs/nlcpV4")
+EXPERIMENT_SUBPATH = "EXPERIMENT/nlcpV4"
 
 # --- Files to fetch (relative to <module>/<experiment>/) ----------------
 CHECKPOINT_FILES = [
@@ -151,13 +158,17 @@ def discover_experiments(module: str) -> list[str]:
 
 
 def process_experiment(
-    module: str, experiment: str, ignore_patterns: list[str] | None = None
+    module: str,
+    experiment: str,
+    ignore_patterns: list[str] | None = None,
+    remote_base: str = REMOTE_BASE,
+    local_base: Path = LOCAL_BASE,
 ) -> int:
     """Process a single experiment. Returns 0 on success (incl. all-skipped),
     non-zero when at least one artifact failed to transfer."""
     ignore_patterns = ignore_patterns or []
-    remote_path = f"{REMOTE_BASE}/{module}/{experiment}"
-    local_path = LOCAL_BASE / module / experiment
+    remote_path = f"{remote_base}/{module}/{experiment}"
+    local_path = local_base / module / experiment
 
     print("=" * 70)
     print(f"Module     : {module}")
@@ -308,11 +319,42 @@ def main() -> int:
             "'-i logs' skips the logs directory."
         ),
     )
+    parser.add_argument(
+        "-s",
+        "--storage-root",
+        type=str,
+        default="",
+        help=(
+            "Remote storage root. When provided, the remote base is "
+            f"set to '<storage_root>/{EXPERIMENT_SUBPATH}' instead of "
+            "the hard-coded default. Use this when training was "
+            "launched with a matching -s (e.g. -s /Data/<proj>), so "
+            "artifacts live at <storage_root>/EXPERIMENT/nlcpV4/... on "
+            "the remote. Absolute path expected."
+        ),
+    )
+    parser.add_argument(
+        "--local-base",
+        type=str,
+        default="",
+        help=(
+            "Override the local destination base directory. Defaults "
+            "to ./EXPERIMENT/nlcpV4. Use this only when you want "
+            "downloaded files to land somewhere other than the "
+            "project-local EXPERIMENT/ tree."
+        ),
+    )
     args = parser.parse_args()
 
     module: str = args.module
     experiment: str = args.experiment
     ignore_patterns: list[str] = list(args.ignore or [])
+    remote_base: str = (
+        f"{args.storage_root.rstrip('/')}/{EXPERIMENT_SUBPATH}"
+        if args.storage_root
+        else REMOTE_BASE
+    )
+    local_base: Path = Path(args.local_base) if args.local_base else LOCAL_BASE
 
     if experiment == ALL_KEYWORD:
         experiments = discover_experiments(module)
@@ -332,7 +374,13 @@ def main() -> int:
 
         partial: list[str] = []
         for e in experiments:
-            rc = process_experiment(module, e, ignore_patterns)
+            rc = process_experiment(
+                module,
+                e,
+                ignore_patterns,
+                remote_base=remote_base,
+                local_base=local_base,
+            )
             if rc != 0:
                 partial.append(e)
             print()
@@ -349,7 +397,13 @@ def main() -> int:
         return 0
 
     # Single-experiment mode.
-    return process_experiment(module, experiment, ignore_patterns)
+    return process_experiment(
+        module,
+        experiment,
+        ignore_patterns,
+        remote_base=remote_base,
+        local_base=local_base,
+    )
 
 
 if __name__ == "__main__":

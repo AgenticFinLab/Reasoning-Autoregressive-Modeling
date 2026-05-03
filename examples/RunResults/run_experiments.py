@@ -241,6 +241,19 @@ def parse_args() -> argparse.Namespace:
             "'{session_name}.log'. Default: logs/run_experiments/"
         ),
     )
+    parser.add_argument(
+        "-s",
+        "--storage-root",
+        type=str,
+        default="",
+        help=(
+            "Prefix forwarded to each child train_{module}.py as -s. "
+            "Relative output paths in every experiment's config.log "
+            "(save_folder / checkpoint_path / log_path) will land under "
+            "this directory. Absolute paths in YAML are preserved. "
+            "Leave empty (default) to keep paths verbatim."
+        ),
+    )
     # ── Conda ───────────────────────────────────────────────────────
     parser.add_argument(
         "--conda-env",
@@ -900,6 +913,7 @@ def build_inner_command(
     conda_base: Path | None,
     conda_env: str,
     keep_alive: bool,
+    storage_root: str = "",
 ) -> tuple[str, Path]:
     """Build the full shell command that tmux executes for one experiment.
 
@@ -926,6 +940,7 @@ def build_inner_command(
     gpu_prefix = (
         f"CUDA_VISIBLE_DEVICES={exp.gpu_index} " if exp.gpu_index is not None else ""
     )
+    storage_arg = f"-s {shlex.quote(storage_root)} " if storage_root else ""
     inner_cmd = (
         f"cd {shlex.quote(str(PROJECT_ROOT))} && "
         f"source {shlex.quote(str(conda_sh))} && "
@@ -933,6 +948,7 @@ def build_inner_command(
         f"{gpu_prefix}PYTHONUNBUFFERED=1 python "
         f"{shlex.quote(str(train_script))} "
         f"-c {shlex.quote(str(exp.cfg_path))} "
+        f"{storage_arg}"
         f"2>&1 | tee {shlex.quote(str(log_path))}"
     )
     piped = f"bash -o pipefail -c {shlex.quote(inner_cmd)}"
@@ -1236,6 +1252,7 @@ def main() -> int:
             conda_base=conda_base,
             conda_env=args.conda_env,
             keep_alive=args.keep_alive,
+            storage_root=args.storage_root,
         )
         status = launch_one(exp, inner, log_path, args)
         stats[status] += 1
@@ -1333,6 +1350,7 @@ def main() -> int:
                     conda_base=conda_base,
                     conda_env=args.conda_env,
                     keep_alive=args.keep_alive,
+                    storage_root=args.storage_root,
                 )
                 status = launch_one(exp, inner, log_path, args)
                 stats[status] += 1

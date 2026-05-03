@@ -5,10 +5,10 @@ Supports !include directive for modular configs.
 """
 
 import os
+from pathlib import Path
 from typing import Any
 
 import yaml
-
 
 # =============================================================================
 # Config Loading with !include Support
@@ -94,4 +94,47 @@ def load_config(config_path: str) -> dict:
     """
     with open(config_path, "r", encoding="utf-8") as f:
         config = yaml.load(f, IncludeLoader)
+    return config
+
+
+# =============================================================================
+# Storage-root override
+# =============================================================================
+
+
+_STORAGE_ROOT_KEYS = ("save_folder", "checkpoint_path", "log_path")
+
+
+def apply_storage_root(config: dict, storage_root: str | os.PathLike | None) -> dict:
+    """Redirect relative output paths under ``config['log']`` to ``storage_root``.
+
+    Rewrites the three well-known output keys in ``config['log']``
+    (``save_folder``, ``checkpoint_path``, ``log_path``) so that any
+    *relative* value is prepended with ``storage_root``. Absolute paths
+    are kept verbatim so the user can always force a specific location
+    from YAML. When ``storage_root`` is ``None`` or empty, the config is
+    returned unchanged.
+
+    This enables a single ``-s/--storage-root`` CLI flag (e.g. on
+    remote servers where outputs should live under ``/Data/<proj>/``)
+    without editing every YAML.
+
+    Args:
+        config: Configuration dict produced by ``load_config``.
+        storage_root: Directory to prepend to relative output paths,
+            or ``None`` to disable the rewrite.
+
+    Returns:
+        The same ``config`` dict, mutated in place.
+    """
+    if storage_root is None or str(storage_root) == "":
+        return config
+    root = Path(storage_root)
+    log_cfg = config["log"]
+    for key in _STORAGE_ROOT_KEYS:
+        raw = log_cfg[key]
+        p = Path(raw)
+        if p.is_absolute():
+            continue
+        log_cfg[key] = str(root / p)
     return config

@@ -47,7 +47,7 @@ from nlcpV4.eval_builder import (
     log_terminal_entry,
 )
 from nlcpV4.losses import compute_builder_loss
-from ram.utils import load_config
+from ram.utils import apply_storage_root, load_config
 
 
 def _seed_single_device(seed: int, device: str) -> None:
@@ -180,6 +180,18 @@ def parse_args():
     )
     parser.add_argument(
         "--resume", type=str, default="", help="Path to checkpoint to resume from"
+    )
+    parser.add_argument(
+        "-s",
+        "--storage-root",
+        type=str,
+        default="",
+        help=(
+            "Prefix to prepend to every relative output path in "
+            "config.log (save_folder / checkpoint_path / log_path). "
+            "Absolute paths in YAML are preserved. Use on servers "
+            "where outputs should land under, e.g., /Data/<proj>/."
+        ),
     )
     return parser.parse_args()
 
@@ -754,6 +766,7 @@ def main():
         config_path = PROJECT_ROOT / config_path
 
     yaml_config = load_config(str(config_path))
+    apply_storage_root(yaml_config, args.storage_root)
 
     # Merge resume flag from CLI if not in config
     if args.resume and not yaml_config["training"]["resume"]:

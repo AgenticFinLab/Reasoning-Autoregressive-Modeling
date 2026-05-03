@@ -112,26 +112,47 @@ def parse_args():
         "grouping configs by batch_size and sampling batches once "
         "per group. Without -f, a mixed run aborts with an error.",
     )
+    parser.add_argument(
+        "-s",
+        "--storage-root",
+        type=str,
+        default="",
+        help=(
+            "Prefix prepended to the default EXPERIMENT/ tree when "
+            "locating Loss_prepare.json. Without -s the file lives at "
+            "<project>/EXPERIMENT/nlcpV4/<module>/Loss_prepare.json; "
+            "with -s <root> it lives at <root>/EXPERIMENT/nlcpV4/<module>/"
+            "Loss_prepare.json. Use this to match the -s value that "
+            "training was launched with."
+        ),
+    )
     return parser.parse_args()
 
 
-def loss_prepare_path(module: str) -> Path:
-    """Return the absolute path of ``Loss_prepare.json`` for a given module."""
-    return PROJECT_ROOT / "EXPERIMENT" / "nlcpV4" / module / OUT_FILENAME
+def loss_prepare_path(module: str, storage_root: str = "") -> Path:
+    """Return the absolute path of ``Loss_prepare.json`` for a given module.
+
+    ``storage_root`` mirrors the trainer's ``-s`` flag: when set, the
+    output file lives under ``<storage_root>/EXPERIMENT/nlcpV4/<module>/``
+    so downstream consumers see it next to other per-experiment
+    artifacts produced with the same storage root.
+    """
+    base = Path(storage_root) if storage_root else PROJECT_ROOT
+    return base / "EXPERIMENT" / "nlcpV4" / module / OUT_FILENAME
 
 
-def load_loss_prepare(module: str) -> dict:
+def load_loss_prepare(module: str, storage_root: str = "") -> dict:
     """Load the persisted Loss_prepare.json store for ``module`` (empty if absent)."""
-    path = loss_prepare_path(module)
+    path = loss_prepare_path(module, storage_root)
     if path.exists():
         with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
     return {}
 
 
-def save_loss_prepare(module: str, data: dict) -> None:
+def save_loss_prepare(module: str, data: dict, storage_root: str = "") -> None:
     """Persist the Loss_prepare.json store for ``module`` (creates parents)."""
-    path = loss_prepare_path(module)
+    path = loss_prepare_path(module, storage_root)
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, default=str)
@@ -396,6 +417,7 @@ def main():
     dataset: str = args.dataset
     num_batches: int = max(1, int(args.num_batches))
     force: bool = bool(args.force)
+    storage_root: str = args.storage_root
 
     configs_dir = PROJECT_ROOT / "configs" / "nlcpV4" / dataset
     if not configs_dir.is_dir():
@@ -493,7 +515,7 @@ def main():
 
         for config_path, config in group:
             key = f"{dataset}/{config_path.stem}"
-            store = load_loss_prepare(module)
+            store = load_loss_prepare(module, storage_root)
 
             if key in store:
                 logger.info("[SKIP] %s (key already present)", key)
@@ -594,9 +616,9 @@ def main():
                 continue
 
             # Re-read store right before write to preserve concurrent edits.
-            store = load_loss_prepare(module)
+            store = load_loss_prepare(module, storage_root)
             store[key] = result
-            save_loss_prepare(module, store)
+            save_loss_prepare(module, store, storage_root)
 
             total_stats = result["stats"]["total_weighted"]
             weighted_summary = ", ".join(
