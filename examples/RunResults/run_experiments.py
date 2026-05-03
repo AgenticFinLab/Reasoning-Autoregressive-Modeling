@@ -122,6 +122,38 @@ Usage (one-per-gpu):
     python3 examples/RunResults/run_experiments.py -m builder -d GSM8K \\
         -e AutoWeighted/*.yml -s /Data/<proj> --one-per-gpu
 
+    # Resume a batch with explicit SwanLab run ids (positional: ONE
+    # id per -e experiment, same order). Use '-' as a placeholder to
+    # defer an individual slot to that experiment's on-disk
+    # logs/<exp>/swanlab.json. The child trainer hard-errors if BOTH
+    # the CLI slot and the on-disk swanlab.json are missing, rather
+    # than silently starting a disconnected SwanLab run. ``-s`` is
+    # orthogonal and combines freely — forwarded to every child as
+    # usual so checkpoints / logs land under the shared storage root.
+    python3 examples/RunResults/run_experiments.py -m builder -d GSM8K \\
+        -e expA.yml expB.yml expC.yml \\
+        -s /Data/<proj> \\
+        --swanlab-ids abc123 - xyz789
+
+Resume (SwanLab):
+    Each child trainer also accepts its own ``--swanlab-id`` (see
+    ``train_{module}.py``). When the launcher is passed ``--swanlab-ids
+    id1 id2 ... idN`` it fans them out 1-to-1 onto the N ``-e``
+    experiments in the SAME order. Rules:
+      * Length MUST equal ``len(-e)`` or the launcher aborts with
+        exit code 2 BEFORE any tmux session is started.
+      * A literal ``-`` placeholder keeps the slot but DEFERS id
+        recovery to the child's ``logs/<exp>/swanlab.json`` (written
+        on every fresh run, updated on every resume).
+      * The launcher NEVER inspects YAML ``training.resume`` itself;
+        forwarding just happens whenever the slot is non-``-``. The
+        child ignores ``--swanlab-id`` unless its own config has
+        ``training.resume`` enabled.
+      * If both the CLI slot AND ``logs/<exp>/swanlab.json`` are
+        missing while the child has resume enabled, the child
+        hard-errors (``SwanLabIdMissingError``) rather than start a
+        disconnected SwanLab run that loses history continuity.
+
 Storage-root behaviour (``-s``):
     * Default: ``./`` (current working directory). NEVER an implicit
       project root — this avoids silent writes to whichever folder
@@ -268,6 +300,22 @@ def parse_args() -> argparse.Namespace:
             "still holds its GPU and would cause the new launch to "
             "double-schedule onto the same device. Pass this flag only "
             "when you are sure every colliding session should be replaced."
+        ),
+    )
+    parser.add_argument(
+        "--swanlab-ids",
+        type=str,
+        nargs="+",
+        default=None,
+        help=(
+            "SwanLab run IDs to resume, ONE per -e experiment, in the "
+            "SAME order. Use '-' as a placeholder to defer to that "
+            "experiment's on-disk logs/<exp>/swanlab.json. Ignored "
+            "unless the child's own config enables --resume (via YAML "
+            "training.resume). If both the CLI slot and the on-disk "
+            "swanlab.json are missing, the child hard-errors rather "
+            "than start a disconnected SwanLab run. Length MUST equal "
+            "the number of -e arguments or the launcher aborts."
         ),
     )
     parser.add_argument(
@@ -769,6 +817,11 @@ class Experiment:
     breakdown: dict
     # Assigned at scheduling time; None means queued.
     gpu_index: int | None = None
+    # Optional per-experiment SwanLab run id forwarded from the
+    # launcher's ``--swanlab-ids`` flag. ``None`` means "defer to the
+    # child's on-disk swanlab.json" (or hard-error if neither source
+    # has it).
+    swanlab_id: str | None = None
 
 
 def schedule_assignments(
@@ -1001,6 +1054,14 @@ def build_inner_command(
         f"CUDA_VISIBLE_DEVICES={exp.gpu_index} " if exp.gpu_index is not None else ""
     )
     storage_arg = f"-s {shlex.quote(storage_root)} "
+    # Forward a per-experiment SwanLab id only when the launcher was
+    # explicitly given one for this slot. An empty slot (``None``)
+    # means "let the child resolve it from logs/<exp>/swanlab.json",
+    # which is the normal case for resumes originating from a prior
+    # crash on this same host.
+    swanlab_arg = (
+        f"--swanlab-id {shlex.quote(exp.swanlab_id)} " if exp.swanlab_id else ""
+    )
     inner_cmd = (
         f"cd {shlex.quote(str(PROJECT_ROOT))} && "
         f"source {shlex.quote(str(conda_sh))} && "
@@ -1009,6 +1070,7 @@ def build_inner_command(
         f"{shlex.quote(str(train_script))} "
         f"-c {shlex.quote(str(exp.cfg_path))} "
         f"{storage_arg}"
+        f"{swanlab_arg}"
         f"2>&1 | tee {shlex.quote(str(log_path))}"
     )
     piped = f"bash -o pipefail -c {shlex.quote(inner_cmd)}"
@@ -1098,6 +1160,20 @@ def main() -> int:
         f"cwd={Path.cwd().resolve()}"
     )
 
+    # ── Surface the --swanlab-ids fan-out up front ─────────────────────
+    # Print a single banner line so misaligned --swanlab-ids lists are
+    # easy to spot in the launch log. Actual length validation happens
+    # after we resolve -e, because the validation message references the
+    # resolved experiment count.
+    if args.swanlab_ids is not None:
+        n_supplied = sum(1 for s in args.swanlab_ids if s != "-")
+        n_deferred = sum(1 for s in args.swanlab_ids if s == "-")
+        print(
+            f"[SWANLAB] --swanlab-ids received {len(args.swanlab_ids)} slot(s): "
+            f"{n_supplied} explicit id(s), {n_deferred} deferred ('-' → "
+            f"logs/<exp>/swanlab.json). Child aborts if both sources miss."
+        )
+
     # ── Validate tmux availability ─────────────────────────────────────
     if not args.dry_run and shutil.which("tmux") is None:
         print(
@@ -1150,10 +1226,30 @@ def main() -> int:
         print(f"[ERROR] {e}", file=sys.stderr)
         return 2
 
+    # ── Align --swanlab-ids with -e experiments ────────────────────────
+    # Strict length check: positional pairing only makes sense when the
+    # two lists have the same arity. A '-' placeholder keeps the slot
+    # but defers id recovery to the child's logs/<exp>/swanlab.json.
+    swanlab_ids_aligned: list[str | None]
+    if args.swanlab_ids is None:
+        swanlab_ids_aligned = [None] * len(resolved_experiments)
+    else:
+        if len(args.swanlab_ids) != len(resolved_experiments):
+            print(
+                f"[ERROR] --swanlab-ids length ({len(args.swanlab_ids)}) "
+                f"does not match number of -e experiments "
+                f"({len(resolved_experiments)}). Use '-' as a placeholder "
+                f"for any slot that should fall back to the child's "
+                f"logs/<exp>/swanlab.json.",
+                file=sys.stderr,
+            )
+            return 2
+        swanlab_ids_aligned = [None if s == "-" else s for s in args.swanlab_ids]
+
     # ── Build Experiment objects + estimate memory ─────────────────────
     experiments: list[Experiment] = []
     seen_names: set[str] = set()
-    for raw, cfg_path in resolved_experiments:
+    for (raw, cfg_path), swanlab_id in zip(resolved_experiments, swanlab_ids_aligned):
         label = experiment_label(cfg_path, dataset_dir)
         session_name = sanitize_session_name(f"{args.module}-{args.dataset}-{label}")
         if session_name in seen_names:
@@ -1196,6 +1292,7 @@ def main() -> int:
                 session_name=session_name,
                 mem_mb=mem_mb,
                 breakdown=breakdown,
+                swanlab_id=swanlab_id,
             )
         )
 

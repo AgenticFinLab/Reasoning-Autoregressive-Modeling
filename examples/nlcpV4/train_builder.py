@@ -16,10 +16,18 @@ Usage:
         -c configs/nlcpV4/GSM8K/train_builder_Qwen2.5-0.5B_6level.yml \\
         -s /Data/<proj>
 
-    # Resume from a specific checkpoint (CLI --resume overrides config).
+    # Resume: boolean flag. The checkpoint to load is auto-discovered
+    # under ``log.checkpoint_path`` (the latest epoch/step file).
     python3 examples/nlcpV4/train_builder.py \\
         -c configs/nlcpV4/GSM8K/train_builder_Qwen2.5-0.5B_6level.yml \\
-        --resume /Data/<proj>/EXPERIMENT/nlcpV4/builder/.../checkpoints/checkpoint_best.pt
+        --resume
+
+    # Resume AND pin the SwanLab run explicitly (rare — normally the
+    # swanlab_id is auto-recovered from logs/<exp>/swanlab.json).
+    python3 examples/nlcpV4/train_builder.py \\
+        -c configs/nlcpV4/GSM8K/train_builder_Qwen2.5-0.5B_6level.yml \\
+        --resume \\
+        --swanlab-id 5hjp09vuqh402irzz9j9h
 
 Arguments:
     -s / --storage-root   Prefix prepended to RELATIVE log paths in the
@@ -33,7 +41,38 @@ Arguments:
                           Listed FIRST because it controls every output
                           path this script writes.
     -c / --config         Path to a YAML training config.
-    --resume              Optional checkpoint path to resume training from.
+    --resume              Boolean flag (store_true). When set, the
+                          trainer auto-discovers the latest checkpoint
+                          under ``log.checkpoint_path`` (pattern
+                          ``checkpoint*-epoch<N>-step<M>.pt``, picked
+                          by max ``(step, epoch)``) and restores:
+                            - model / optimizer / scheduler state,
+                            - ``start_epoch`` / ``global_step`` /
+                              ``best_loss`` / ``best_eval_loss``,
+                          then rotates ``training.log`` and
+                          ``terminal_output.jsonl`` to
+                          ``<stem>.partN<ext>`` (N = next free) so the
+                          new run's logs never clobber the old chunks,
+                          and loads ``training_history.json`` /
+                          ``eval_history.json`` /
+                          ``eval_sample_history.json`` so epoch-end
+                          rewrites append instead of wiping history.
+                          If ``log.checkpoint_path`` is missing or
+                          contains no matching file, the trainer
+                          hard-errors (``CheckpointNotFoundError``)
+                          rather than silently fresh-starting.
+                          YAML ``training.resume`` has the same
+                          semantics; CLI can flip it on but not off.
+    --swanlab-id          Optional SwanLab run id to resume. Only
+                          consulted when ``--resume`` is set. Precedence:
+                            1. ``--swanlab-id`` (this CLI flag), then
+                            2. ``logs/<exp>/swanlab.json`` on disk,
+                               otherwise
+                            3. HARD ERROR — we refuse to start a
+                               disconnected SwanLab run.
+                          ``logs/<exp>/swanlab.json`` is written
+                          automatically at the start of every fresh
+                          run and updated on every resume.
 
 V4 contract (vs V3):
   - ``ConceptPyramidBuilder.forward(batch: BuilderInput) -> PyramidOutput``
@@ -71,6 +110,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(PROJECT_ROOT / "examples"))
 
 from lmbase.utils.env_tools import get_device
+from nlcpV4 import _resume_io
 from nlcpV4.concept_builder import ConceptPyramidBuilder
 from nlcpV4.data_loader import NLCPV4DataLoader
 from nlcpV4.eval_builder import (
@@ -228,7 +268,28 @@ def parse_args():
         "-c", "--config", type=str, required=True, help="Path to YAML config file"
     )
     parser.add_argument(
-        "--resume", type=str, default="", help="Path to checkpoint to resume from"
+        "--resume",
+        action="store_true",
+        default=False,
+        help=(
+            "Resume training from the latest checkpoint auto-discovered "
+            "under log.checkpoint_path (pattern "
+            "'checkpoint*-epoch<N>-step<M>.pt', picked by max step). "
+            "Boolean flag — no path argument. YAML 'training.resume' has "
+            "the same semantics; this CLI flag can flip it on but not off."
+        ),
+    )
+    parser.add_argument(
+        "--swanlab-id",
+        type=str,
+        default="",
+        help=(
+            "SwanLab run id to resume. Only consulted when --resume is "
+            "set. Precedence: CLI --swanlab-id  >  logs/<exp>/swanlab.json "
+            " >  hard error. A fresh (non-resume) run ignores this flag "
+            "and lets SwanLab allocate a new id, then records it in "
+            "logs/<exp>/swanlab.json for later resumes."
+        ),
     )
     return parser.parse_args()
 
@@ -242,13 +303,22 @@ def save_checkpoint(
     loss: float,
     checkpoint_dir: Path,
     filename: str,
+    best_eval_loss: float = float("inf"),
 ) -> Path:
-    """Save model/optimizer/scheduler state to ``checkpoint_dir / filename``."""
+    """Save model/optimizer/scheduler state to ``checkpoint_dir / filename``.
+
+    ``best_eval_loss`` is the running minimum eval loss at the moment
+    of save; persisting it is what allows resume to preserve the
+    "best eval" bar across process restarts. Old checkpoints written
+    before this field existed load fine — ``load_checkpoint`` falls
+    back to ``float('inf')`` via ``.get``.
+    """
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
     checkpoint = {
         "epoch": epoch,
         "step": step,
         "loss": loss,
+        "best_eval_loss": best_eval_loss,
         "model_state_dict": builder.state_dict(),
         "optimizer_state_dict": optimizer.state_dict(),
         "scheduler_state_dict": scheduler.state_dict(),
@@ -282,8 +352,13 @@ def load_checkpoint(
     builder: ConceptPyramidBuilder,
     optimizer: torch.optim.Optimizer,
     scheduler: torch.optim.lr_scheduler._LRScheduler,
-) -> tuple[int, int, float]:
-    """Load a checkpoint and return ``(epoch, step, loss)``."""
+) -> tuple[int, int, float, float]:
+    """Load a checkpoint and return ``(epoch, step, loss, best_eval_loss)``.
+
+    ``best_eval_loss`` is a post-hoc addition; checkpoints produced
+    before the field existed load without error and surface
+    ``float('inf')`` for it.
+    """
     checkpoint = torch.load(checkpoint_path, map_location="cpu")
     builder.load_state_dict(checkpoint["model_state_dict"])
     optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
@@ -292,11 +367,18 @@ def load_checkpoint(
         int(checkpoint["epoch"]),
         int(checkpoint["step"]),
         float(checkpoint["loss"]),
+        float(checkpoint.get("best_eval_loss", float("inf"))),
     )
 
 
-def train_builder(config: dict, config_path: Path):
-    """Main training loop."""
+def train_builder(config: dict, config_path: Path, cli_swanlab_id: str = ""):
+    """Main training loop.
+
+    ``cli_swanlab_id`` is the value forwarded from ``--swanlab-id``.
+    Only consulted when ``training.resume`` is truthy; otherwise the
+    id is allocated by SwanLab and persisted to
+    ``logs/<exp>/swanlab.json`` for subsequent resumes.
+    """
     # Extract sub-configs
     train_cfg = config["training"]
     data_cfg = config["data"]
@@ -313,13 +395,25 @@ def train_builder(config: dict, config_path: Path):
     log_interval = log_cfg["log_step_interval"]
     checkpoint_interval = log_cfg["checkpoint_step_interval"]
     checkpoint_clean = log_cfg["checkpoint_clean"]
-    resume = train_cfg["resume"]
+    resume = bool(train_cfg["resume"])
     ordering_loss_type = train_cfg["ordering_loss_type"]
 
     checkpoint_dir = Path(log_cfg["checkpoint_path"])
     log_dir = Path(log_cfg["log_path"])
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
     log_dir.mkdir(parents=True, exist_ok=True)
+
+    # ── Resume pre-flight: rotate un-appendable text logs ─────────
+    # Must happen BEFORE ``logging.basicConfig`` below because
+    # FileHandler opens training.log for write on construction; if
+    # we rotate afterwards the new run would have already clobbered
+    # the file. terminal_output.jsonl is opened append-mode lazily
+    # in eval_builder.log_terminal_entry, so rotation timing is less
+    # critical there, but we keep the two files in lockstep for
+    # operator sanity.
+    if resume:
+        _resume_io.rotate_if_exists(log_dir / "training.log")
+        _resume_io.rotate_if_exists(log_dir / "terminal_output.jsonl")
 
     logging.basicConfig(
         level=getattr(logging, log_cfg["log_level"].upper()),
@@ -364,8 +458,58 @@ def train_builder(config: dict, config_path: Path):
         rel_parts = (config_path.parent.name,)
     experiment_name = "-".join([*rel_parts, config_path.stem])
 
-    swanlab.init(project="ReasoningAR", experiment_name=experiment_name, config=config)
-    logger.info("SwanLab initialized")
+    # ── SwanLab init (resume-aware) ───────────────────────────────
+    # Resolve the run id BEFORE calling swanlab.init because the
+    # resume and fresh-start code paths take different arguments.
+    # Precedence: --swanlab-id  >  on-disk swanlab.json  >  hard
+    # error (on resume) or fresh allocation (on non-resume).
+    swanlab_meta = _resume_io.load_swanlab_meta(log_dir)
+    if resume:
+        swanlab_id = _resume_io.resolve_swanlab_id(
+            cli_swanlab_id, swanlab_meta, log_dir, resume=True
+        )
+        swanlab.init(
+            project="ReasoningAR",
+            experiment_name=experiment_name,
+            config=config,
+            id=swanlab_id,
+            resume="must",
+        )
+        logger.info("SwanLab resumed (id=%s)", swanlab_id)
+    else:
+        if cli_swanlab_id:
+            logger.info(
+                "--swanlab-id=%s ignored: --resume is not set; SwanLab "
+                "will allocate a new id.",
+                cli_swanlab_id,
+            )
+        swanlab.init(
+            project="ReasoningAR", experiment_name=experiment_name, config=config
+        )
+        # Capture the allocated id and persist it so future resumes
+        # can find it without the operator having to remember.
+        run = swanlab.get_run()
+        swanlab_id = getattr(run, "id", None) or ""
+        if swanlab_id:
+            _resume_io.init_swanlab_meta(
+                log_dir, "ReasoningAR", experiment_name, swanlab_id
+            )
+            logger.info(
+                "SwanLab initialized (id=%s, recorded to %s)",
+                swanlab_id,
+                log_dir / _resume_io.SWANLAB_META_FILENAME,
+            )
+        else:
+            # Disabled/offline mode returns id=None. Log a warning
+            # but do not fail — the operator may intentionally be
+            # running offline, and resume from such a run is
+            # already impossible regardless of this file.
+            logger.warning(
+                "SwanLab returned no run id (mode=%s); swanlab.json "
+                "NOT written. Future --resume from this run will "
+                "require an explicit --swanlab-id.",
+                getattr(run, "mode", "<unknown>"),
+            )
 
     builder = ConceptPyramidBuilder(config)
     builder.to(device)
@@ -467,19 +611,40 @@ def train_builder(config: dict, config_path: Path):
     history: list = []
 
     if resume:
-        resume_path = Path(resume)
-        if resume_path.exists():
-            start_epoch, global_step, best_loss = load_checkpoint(
-                resume_path, builder, optimizer, scheduler
+        # No CLI path: auto-discover the latest checkpoint under the
+        # configured checkpoint_dir. Fail loudly if nothing is found —
+        # silent fresh-starts on --resume would lose all continuity.
+        resume_path = _resume_io.find_latest_checkpoint(checkpoint_dir)
+        logger.info("Auto-discovered resume checkpoint: %s", resume_path)
+        start_epoch, global_step, best_loss, best_eval_loss = load_checkpoint(
+            resume_path, builder, optimizer, scheduler
+        )
+        # Load-and-extend the history lists so epoch-end rewrites
+        # below append to, rather than clobber, the previous run.
+        history = _resume_io.load_history(log_dir / "training_history.json")
+        eval_history = _resume_io.load_history(log_dir / "eval_history.json")
+        eval_sample_history = _resume_io.load_history(
+            log_dir / "eval_sample_history.json"
+        )
+        # Record the resume event in swanlab.json (counts + last
+        # checkpoint + epoch/step). Only safe to call when the
+        # file actually exists — otherwise the operator passed
+        # --swanlab-id manually and we have nothing to update.
+        if swanlab_meta is not None:
+            _resume_io.record_resume_event(
+                log_dir, resume_path, start_epoch, global_step
             )
-            logger.info(
-                "Resumed from epoch %d, step %d, loss=%.4f",
-                start_epoch,
-                global_step,
-                best_loss,
-            )
-        else:
-            logger.warning("Resume path not found: %s", resume_path)
+        logger.info(
+            "Resumed from epoch %d, step %d, loss=%.4f, best_eval=%.4f "
+            "(history rows: train=%d eval=%d eval_samples=%d)",
+            start_epoch,
+            global_step,
+            best_loss,
+            best_eval_loss,
+            len(history),
+            len(eval_history),
+            len(eval_sample_history),
+        )
 
     config_save_path = log_dir / "config.json"
     with open(config_save_path, "w", encoding="utf-8") as f:
@@ -667,6 +832,7 @@ def train_builder(config: dict, config_path: Path):
                         avg_loss,
                         checkpoint_dir,
                         filename=(f"checkpoint_best-epoch{epoch}-step{global_step}.pt"),
+                        best_eval_loss=best_eval_loss,
                     )
                     logger.info("Best checkpoint: %s", best_path.name)
                 tag_part = f"-{save_tag}" if save_tag else ""
@@ -681,6 +847,7 @@ def train_builder(config: dict, config_path: Path):
                     filename=(
                         f"checkpoint{tag_part}-epoch{epoch}-step{global_step}.pt"
                     ),
+                    best_eval_loss=best_eval_loss,
                 )
                 logger.info("Checkpoint: %s", path.name)
 
@@ -721,6 +888,7 @@ def train_builder(config: dict, config_path: Path):
                         filename=(
                             f"checkpoint_best_eval-epoch{epoch}-step{global_step}.pt"
                         ),
+                        best_eval_loss=best_eval_loss,
                     )
                     logger.info(
                         "Best eval checkpoint: %s (eval_loss=%.4f)",
@@ -766,6 +934,7 @@ def train_builder(config: dict, config_path: Path):
                 avg_epoch_loss,
                 checkpoint_dir,
                 filename=f"checkpoint{tag_part}-epoch{epoch+1}-step{global_step}.pt",
+                best_eval_loss=best_eval_loss,
             )
             logger.info("Epoch checkpoint: %s", path.name)
 
@@ -809,11 +978,13 @@ def main():
     # when a later step crashes (e.g. OOM during model init).
     print_storage_paths(yaml_config, args.storage_root)
 
-    # Merge resume flag from CLI if not in config
-    if args.resume and not yaml_config["training"]["resume"]:
-        yaml_config["training"]["resume"] = args.resume
+    # Merge resume flag from CLI if set. CLI can flip it ON; YAML is
+    # the only way to flip it OFF. ``--resume`` is a pure boolean —
+    # the checkpoint path is auto-discovered inside train_builder.
+    if args.resume:
+        yaml_config["training"]["resume"] = True
 
-    train_builder(yaml_config, config_path=config_path)
+    train_builder(yaml_config, config_path=config_path, cli_swanlab_id=args.swanlab_id)
 
 
 if __name__ == "__main__":
