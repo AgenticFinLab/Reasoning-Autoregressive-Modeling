@@ -42,9 +42,10 @@ weight ≈ 1.0, matching its current setting as the reference scale.
 
 Usage::
 
-    # Use default paths (require --dataset to resolve the per-dataset filename):
+    # Use default paths (require --dataset to resolve BOTH the per-dataset
+    # input filename AND the per-dataset output folder):
     #   -i: EXPERIMENT/nlcpV4/builder/<dataset>_Loss_prepare.json
-    #   -o: EXPERIMENT/nlcpV4/builder/training_prepare/
+    #   -o: EXPERIMENT/nlcpV4/builder/<dataset>_training_prepare/
     python3 examples/nlcpV4/builder_training_prepare.py --dataset GSM8K
 
     # Tune the recommendation target (median weighted contribution per comp).
@@ -58,7 +59,7 @@ Usage::
     # so this tool reads the exact JSON just written.
     # Resolved paths:
     #   -i: /Data/<proj>/EXPERIMENT/nlcpV4/builder/GSM8K_Loss_prepare.json
-    #   -o: /Data/<proj>/EXPERIMENT/nlcpV4/builder/training_prepare/
+    #   -o: /Data/<proj>/EXPERIMENT/nlcpV4/builder/GSM8K_training_prepare/
     python3 examples/nlcpV4/builder_training_prepare.py -s /Data/<proj> --dataset GSM8K
 
     # Filter to a single module subset (still reads the dataset-specific
@@ -84,7 +85,10 @@ Arguments:
                             <dataset>_Loss_prepare.json
     -o / --output-dir     Output directory for plots + CSV. Default:
                             <storage_root>/EXPERIMENT/nlcpV4/builder/
-                            training_prepare/
+                            <dataset>_training_prepare/
+                          (``--dataset`` is required when ``-o`` is
+                          omitted so GSM8K / MATH / ... outputs cannot
+                          overwrite each other.)
     --target              Target weighted-contribution per component for
                           the recommender (default: 0.8, ≈ median
                           residual raw so residual weight ≈ 1.0).
@@ -596,7 +600,9 @@ def parse_args():
         default=None,
         help=(
             "Output directory. Default: "
-            "<storage_root>/EXPERIMENT/nlcpV4/builder/training_prepare/."
+            "<storage_root>/EXPERIMENT/nlcpV4/builder/"
+            "<dataset>_training_prepare/. --dataset is required when -o "
+            "is omitted so per-dataset outputs are kept separate."
         ),
     )
     parser.add_argument(
@@ -644,8 +650,24 @@ def main():
             / f"{args.dataset}_Loss_prepare.json"
         )
         input_path = default_input
-    default_output_dir = base / "EXPERIMENT" / "nlcpV4" / "builder" / "training_prepare"
-    output_dir = Path(args.output_dir) if args.output_dir else default_output_dir
+    if args.output_dir:
+        output_dir = Path(args.output_dir)
+    else:
+        if args.dataset is None:
+            print(
+                "[ERROR] --dataset is required when -o/--output-dir is omitted, "
+                "because the default output folder is now "
+                "<dataset>_training_prepare/ (per-dataset to avoid "
+                "overwriting GSM8K / MATH / ... outputs)."
+            )
+            return 1
+        output_dir = (
+            base
+            / "EXPERIMENT"
+            / "nlcpV4"
+            / "builder"
+            / f"{args.dataset}_training_prepare"
+        )
 
     # Surface the resolved storage paths up front. No silent
     # PROJECT_ROOT fallback — the CLI default ``./`` (current working
