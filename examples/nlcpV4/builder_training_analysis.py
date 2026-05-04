@@ -2,28 +2,23 @@
 
 Usage:
     # Single experiment — reads artifacts from the project-local EXPERIMENT/ tree.
-    python3 examples/nlcpV4/builder_training_analysis.py \\
-        -m builder -d GSM8K -e Qwen2.5-0.5B_6level
+    python3 examples/nlcpV4/builder_training_analysis.py -m builder -d GSM8K -e Qwen2.5-0.5B_6level
 
     # All experiments for a module + dataset (baseline + nested variants).
-    python3 examples/nlcpV4/builder_training_analysis.py \\
-        -m builder -d GSM8K -e all
+    python3 examples/nlcpV4/builder_training_analysis.py -m builder -d GSM8K -e all
 
     # Variant subtree (e.g. AutoWeighted/). Note the path has to be
     # given to -d exactly as it appears under configs/nlcpV4/.
-    python3 examples/nlcpV4/builder_training_analysis.py \\
-        -m builder -d GSM8K/AutoWeighted -e all
+    python3 examples/nlcpV4/builder_training_analysis.py -m builder -d GSM8K/AutoWeighted -e all
 
     # Read training artifacts from a non-default storage root.
     # MUST match the -s value that train_builder.py / run_experiments.py
     # was launched with — otherwise this script looks at the wrong
     # checkpoints / log_path directories and reports [SKIP NO-DATA].
-    python3 examples/nlcpV4/builder_training_analysis.py \\
-        -m builder -d GSM8K -e all -s /Data/<proj>
+    python3 examples/nlcpV4/builder_training_analysis.py -m builder -d GSM8K -e all -s /Data/<proj>
 
     # Skip already-analyzed configs (by default existing PNGs are overwritten).
-    python3 examples/nlcpV4/builder_training_analysis.py \\
-        -m builder -d GSM8K -e all --no-overlap
+    python3 examples/nlcpV4/builder_training_analysis.py -m builder -d GSM8K -e all --no-overlap
 
 Arguments:
     -s / --storage-root   Prefix prepended to RELATIVE log paths in the

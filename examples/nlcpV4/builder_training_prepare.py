@@ -51,8 +51,7 @@ Usage::
     python3 examples/nlcpV4/builder_training_prepare.py --dataset GSM8K --target 1.0
 
     # Override -i / -o explicitly when the file lives outside the default tree.
-    python3 examples/nlcpV4/builder_training_prepare.py \\
-        -i path/to/<dataset>_Loss_prepare.json -o path/to/output_dir
+    python3 examples/nlcpV4/builder_training_prepare.py -i path/to/<dataset>_Loss_prepare.json -o path/to/output_dir
 
     # Pull the same default paths but rebased under a storage root.
     # MUST match the ``-s`` that ``loss_prepare.py`` was launched with
@@ -64,8 +63,7 @@ Usage::
 
     # Filter to a single module subset (still reads the dataset-specific
     # JSON written by loss_prepare.py).
-    python3 examples/nlcpV4/builder_training_prepare.py \\
-        --dataset GSM8K --module builder -s /Data/<proj>
+    python3 examples/nlcpV4/builder_training_prepare.py --dataset GSM8K --module builder -s /Data/<proj>
 
 Arguments:
     -s / --storage-root   Prefix used to compute the DEFAULT ``-i`` /

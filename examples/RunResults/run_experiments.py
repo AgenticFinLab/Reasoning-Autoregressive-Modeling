@@ -86,32 +86,22 @@ Simple mode (``--one-per-gpu``):
 Usage (one-per-gpu):
     # 4 GPUs, 8 experiments: 4 run immediately, 4 wait; as each
     # finishes, the next queued starts on the freed GPU.
-    python3 examples/RunResults/run_experiments.py -m builder -d GSM8K \\
-        --one-per-gpu \\
-        -e exp1.yml exp2.yml exp3.yml exp4.yml \\
-           exp5.yml exp6.yml exp7.yml exp8.yml
+    python3 examples/RunResults/run_experiments.py -m builder -d GSM8K --one-per-gpu -e exp1.yml exp2.yml exp3.yml exp4.yml exp5.yml exp6.yml exp7.yml exp8.yml
 
     # Launch two baseline experiments in parallel:
-    python3 examples/RunResults/run_experiments.py -m builder -d GSM8K \\
-        -e train_builder_Qwen2.5-0.5B_2level.yml \\
-           train_builder_Qwen2.5-0.5B_4level.yml
+    python3 examples/RunResults/run_experiments.py -m builder -d GSM8K -e train_builder_Qwen2.5-0.5B_2level.yml train_builder_Qwen2.5-0.5B_4level.yml
 
     # Mix baseline + AutoWeighted variants in one launch:
-    python3 examples/RunResults/run_experiments.py -m builder -d GSM8K \\
-        -e train_builder_Qwen2.5-0.5B_2level.yml \\
-           AutoWeighted/train_builder_Qwen2.5-0.5B_2level.yml
+    python3 examples/RunResults/run_experiments.py -m builder -d GSM8K -e train_builder_Qwen2.5-0.5B_2level.yml AutoWeighted/train_builder_Qwen2.5-0.5B_2level.yml
 
     # Keep the launcher alive and drain a large queue as GPUs free up:
-    python3 examples/RunResults/run_experiments.py -m builder -d GSM8K \\
-        -e AutoWeighted/*.yml --wait-for-gpu
+    python3 examples/RunResults/run_experiments.py -m builder -d GSM8K -e AutoWeighted/*.yml --wait-for-gpu
 
     # Preview the plan (incl. GPU assignments) without touching tmux:
-    python3 examples/RunResults/run_experiments.py -m builder -d GSM8K \\
-        -e AutoWeighted/*.yml --dry-run
+    python3 examples/RunResults/run_experiments.py -m builder -d GSM8K -e AutoWeighted/*.yml --dry-run
 
     # Restrict scheduling to GPUs 0 and 2:
-    python3 examples/RunResults/run_experiments.py -m builder -d GSM8K \\
-        -e AutoWeighted/*.yml --gpus 0,2
+    python3 examples/RunResults/run_experiments.py -m builder -d GSM8K -e AutoWeighted/*.yml --gpus 0,2
 
     # Redirect every child trainer's relative log paths under a storage
     # root. The launcher forwards ``-s /Data/<proj>`` to each spawned
@@ -119,8 +109,7 @@ Usage (one-per-gpu):
     # checkpoint_path / log_path all land under /Data/<proj>/EXPERIMENT/...
     # Use this on servers where the project-local EXPERIMENT/ tree is
     # not writable or intentionally kept small.
-    python3 examples/RunResults/run_experiments.py -m builder -d GSM8K \\
-        -e AutoWeighted/*.yml -s /Data/<proj> --one-per-gpu
+    python3 examples/RunResults/run_experiments.py -m builder -d GSM8K -e AutoWeighted/*.yml -s /Data/<proj> --one-per-gpu
 
     # Resume a batch (all -e experiments resume from their latest
     # on-disk checkpoint). ``--resume`` is a boolean flag applied to
@@ -129,11 +118,7 @@ Usage (one-per-gpu):
     # ``--swanlab-ids`` to pin specific SwanLab runs; use ``-`` as a
     # placeholder slot to defer to the child's logs/<exp>/swanlab.json.
     # ``-s`` is orthogonal and combines freely.
-    python3 examples/RunResults/run_experiments.py -m builder -d GSM8K \\
-        -e expA.yml expB.yml expC.yml \\
-        -s /Data/<proj> \\
-        --resume \\
-        --swanlab-ids abc123 - xyz789
+    python3 examples/RunResults/run_experiments.py -m builder -d GSM8K -e expA.yml expB.yml expC.yml -s /Data/<proj> --resume --swanlab-ids abc123 - xyz789
 
 Resume (SwanLab):
     Resume is a pure CLI concern at BOTH layers: the launcher's
@@ -160,18 +145,7 @@ Resume (SwanLab):
         disconnected SwanLab run that loses history continuity.
 
     Usage:
-        python3 examples/RunResults/run_experiments.py -m builder -d GSM8K \
-        -e AutoWeighted/train_builder_Qwen3-0.6B_2level.yml \
-            AutoWeighted/train_builder_Qwen2.5-3B_6level.yml \
-            AutoWeighted/train_builder_Qwen2.5-3B_4level.yml \
-            AutoWeighted/train_builder_Qwen2.5-3B_2level.yml \
-        -s /Data/ReasoningNLCP \
-        --resume \
-        --swanlab-ids sd0j2fdldk1t6hlyoj84x \
-                        fznay39wc04usqdom983t \
-                        otcg3faik7e0v10z5nc4x \
-                        wv1p7lmtnnme42ugj4uri \
-        --one-per-gpu
+        python3 examples/RunResults/run_experiments.py -m builder -d GSM8K -e AutoWeighted/train_builder_Qwen3-0.6B_2level.yml AutoWeighted/train_builder_Qwen2.5-3B_6level.yml AutoWeighted/train_builder_Qwen2.5-3B_4level.yml AutoWeighted/train_builder_Qwen2.5-3B_2level.yml -s /Data/ReasoningNLCP --resume --swanlab-ids sd0j2fdldk1t6hlyoj84x fznay39wc04usqdom983t otcg3faik7e0v10z5nc4x wv1p7lmtnnme42ugj4uri --one-per-gpu
 
 
 Storage-root behaviour (``-s``):

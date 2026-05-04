@@ -2,32 +2,23 @@
 
 Usage:
     # Basic: train with the config's own log paths (relative to project root).
-    python3 examples/nlcpV4/train_builder.py \\
-        -c configs/nlcpV4/GSM8K/train_builder_Qwen2.5-0.5B_6level.yml
+    python3 examples/nlcpV4/train_builder.py -c configs/nlcpV4/GSM8K/train_builder_Qwen2.5-0.5B_6level.yml
 
     # Nested variant (e.g. AutoWeighted/ subtree) — same CLI, path just changes.
-    python3 examples/nlcpV4/train_builder.py \\
-        -c configs/nlcpV4/GSM8K/AutoWeighted/train_builder_Qwen2.5-0.5B_6level.yml
+    python3 examples/nlcpV4/train_builder.py -c configs/nlcpV4/GSM8K/AutoWeighted/train_builder_Qwen2.5-0.5B_6level.yml
 
     # Redirect ALL relative outputs (save_folder/checkpoint_path/log_path)
     # under a storage root — typical on a shared server where the
     # project-local EXPERIMENT/ tree is not writable.
-    python3 examples/nlcpV4/train_builder.py \\
-        -c configs/nlcpV4/GSM8K/train_builder_Qwen2.5-0.5B_6level.yml \\
-        -s /Data/<proj>
+    python3 examples/nlcpV4/train_builder.py -c configs/nlcpV4/GSM8K/train_builder_Qwen2.5-0.5B_6level.yml -s /Data/<proj>
 
     # Resume: boolean flag. The checkpoint to load is auto-discovered
     # under ``log.checkpoint_path`` (the latest epoch/step file).
-    python3 examples/nlcpV4/train_builder.py \\
-        -c configs/nlcpV4/GSM8K/train_builder_Qwen2.5-0.5B_6level.yml \\
-        --resume
+    python3 examples/nlcpV4/train_builder.py -c configs/nlcpV4/GSM8K/train_builder_Qwen2.5-0.5B_6level.yml --resume
 
     # Resume AND pin the SwanLab run explicitly (rare — normally the
     # swanlab_id is auto-recovered from logs/<exp>/swanlab.json).
-    python3 examples/nlcpV4/train_builder.py \\
-        -c configs/nlcpV4/GSM8K/train_builder_Qwen2.5-0.5B_6level.yml \\
-        --resume \\
-        --swanlab-id 5hjp09vuqh402irzz9j9h
+    python3 examples/nlcpV4/train_builder.py -c configs/nlcpV4/GSM8K/train_builder_Qwen2.5-0.5B_6level.yml --resume --swanlab-id 5hjp09vuqh402irzz9j9h
 
 Arguments:
     -s / --storage-root   Prefix prepended to RELATIVE log paths in the

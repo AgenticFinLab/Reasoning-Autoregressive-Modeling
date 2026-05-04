@@ -50,14 +50,12 @@ Usage:
     # match the ``-s`` that training was launched with so downstream
     # scripts read the same file). Target path becomes:
     #   <storage_root>/EXPERIMENT/nlcpV4/<module>/<dataset>_Loss_prepare.json
-    python3 examples/RunResults/loss_prepare.py -m builder -d GSM8K -n 5 \\
-        -s /Data/<proj>
+    python3 examples/RunResults/loss_prepare.py -m builder -d GSM8K -n 5 -s /Data/<proj>
 
     # Dataset with MIXED batch sizes AND non-default storage root.
     # ``-f`` groups configs by batch_size so each group samples batches
     # once and reuses them, while ``-s`` redirects the persisted JSON.
-    python3 examples/RunResults/loss_prepare.py -m builder -d GSM8K \\
-        -n 5 -f -s /Data/<proj>
+    python3 examples/RunResults/loss_prepare.py -m builder -d GSM8K -n 5 -f -s /Data/<proj>
 
 Arguments:
     -s / --storage-root   Prefix used to compute the Loss_prepare.json
