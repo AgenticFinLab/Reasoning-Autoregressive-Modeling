@@ -65,24 +65,32 @@ FLAT 63-SLOT LAYOUT (running example)
       1     2           4            8          16           32
 
 ================================================================================
-TEACHER-FORCED SEQUENCE (training, single LLM forward pass)
+TEACHER-FORCED SEQUENCE (training, UNIFIED single forward pass)
 ================================================================================
-                       ◄──────── L_Q = 40 ────────►◄──── total_C = 63 ────►
-    position index :   [  0   1   2   ...   39  ][ 40  41  42 ... 101 102 ]
-    content        :   [ Q0  Q1  Q2   ...   Q39 ][ c0  c1  c2 ... c61 c62 ]
-    role           :   question tokens (embedded)   lifted concept slots
+One pass through the full reason_model over [Q, C_gt, S] — two readouts:
+concept slice → MSE against gt_concepts, solution slice → CE against S.
+No second forward pass.  If solution_ids is omitted, the S segment is
+absent and only the concept readout / MSE is produced.
+
+                    ◄── L_Q=40 ──►◄── total_C=63 ──►◄── L_S=30 ──►
+    position index: [  0 .. 39  ][ 40  41 .. 101 102][ 103 .. 132 ]
+    content       : [ Q_embeds  ][  lifted C slots  ][ S_embeds   ]
+    role          :  question    back_decode(C)+mark  solution toks
 
     where c_t  =  back_decode(concept_at_flat_slot_t)
                 + level_embeddings[level_id[t]]
                 + position_embeddings[intra_pos[t]]
 
-    Shape evolution:
-        question_ids       : [B=4, L_Q=40]           int64
-        Q_embeds           : [B=4, L_Q=40, D_enc=896]
+    Shape evolution (with solution supplied):
+        question_ids       : [B=4, L_Q=40]            int64
+        solution_ids       : [B=4, L_S=30]            int64
+        Q_embeds           : [B=4, L_Q=40,     D_enc=896]
         concepts_flat_D    : [B=4, total_C=63, D=896]
         concept_embeds     : [B=4, total_C=63, D_enc=896]
-        inputs_embeds      : [B=4, 103, 896]
-        hidden_states      : [B=4, 103, 896]     (LLM output)
+        S_embeds           : [B=4, L_S=30,     D_enc=896]
+        inputs_embeds      : [B=4, 133, 896]
+        hidden_states[-1]  : [B=4, 133, 896]     (last layer)
+        logits             : [B=4, 133, V]       (lm_head output)
 
 ================================================================================
 CAUSAL MASK — native LLM causal mask (nothing custom needed)
@@ -106,11 +114,12 @@ Reading rule: row i = "the tokens that position i can look at".
     1 = attend, 0 = blocked by causal mask.
 
 ================================================================================
-NEXT-SLOT READOUT ALIGNMENT
+READOUTS (two slices from one forward pass)
 ================================================================================
 In a causal LM, hidden_state at position `t` predicts the token at `t+1`.
-Therefore, to predict the 63 concept slots, we read hidden states at
-positions [L_Q - 1, L_Q, ..., L_Q + total_C - 2]:
+
+1. CONCEPT readout — hidden_states[-1] at [L_Q - 1 : L_Q - 1 + total_C],
+   projected back to concept space D with concept_head (D_enc → D):
 
     hidden[L_Q - 1]  (= hidden[39])   → predicts slot  0  (= C_0[0])
     hidden[L_Q    ]  (= hidden[40])   → predicts slot  1  (= C_1[0])
@@ -118,9 +127,22 @@ positions [L_Q - 1, L_Q, ..., L_Q + total_C - 2]:
     ...
     hidden[L_Q + 61] (= hidden[101])  → predicts slot 62  (= C_5[31])
 
-    Slice indices:  start = L_Q - 1 = 39
-                    end   = L_Q - 1 + total_C = 102
-                    length = total_C = 63
+    Slice:  start = L_Q - 1 = 39
+            end   = L_Q - 1 + total_C = 102   (length total_C = 63)
+
+2. SOLUTION readout — logits at [L_Q + total_C - 1 : L_Q + total_C + L_S - 1].
+   Already in vocab space V via lm_head; feeds cross_entropy directly.
+   NOTE: reasoning is teacher-forced on C_gt, so CE gradient updates the
+   LLM (LoRA) but NOT concept_head.  concept_head is supervised by MSE
+   alone — this is deliberate (see DESIGN CONSTRAINTS below).
+
+    logits[L_Q + total_C - 1]     (= logits[102])  → predicts S_0
+    logits[L_Q + total_C    ]     (= logits[103])  → predicts S_1
+    ...
+    logits[L_Q + total_C + L_S - 2] (= logits[131]) → predicts S_{L_S-1}
+
+    Slice:  start = L_Q + total_C - 1 = 102
+            end   = L_Q + total_C + L_S - 1 = 132   (length L_S = 30)
 
 ================================================================================
 INFERENCE — autoregressive loop (63 sequential steps, KV-cached)
@@ -140,13 +162,13 @@ INFERENCE — autoregressive loop (63 sequential steps, KV-cached)
                      split by level_lengths → per-level list
 
 ================================================================================
-LOSS PATH (integration with losses.py)
+LOSS PATH (integration with losses.py) — ONE pass, TWO losses
 ================================================================================
-The returned PredictorOutput carries:
-    predicted_concepts      list of K tensors,  [B, L_k, D]
+A single teacher-forced forward populates everything at once:
+    predicted_concepts      list of K tensors,  [B, L_k, D]   (hidden readout)
     gt_concepts             list of K tensors,  [B, L_k, D]   (pass-through)
-    reasoning_logits        [B, L_S, V]         (optional)
-    reasoning_target_ids    [B, L_S]            (optional, -100 on pad)
+    reasoning_logits        [B, L_S, V]         (None if solution_ids omitted)
+    reasoning_target_ids    [B, L_S]            (-100 on pad; None as above)
 
 `losses.py :: compute_predictor_loss` then computes
         concept_loss   = mean_k MSE(predicted_k, gt_k)
@@ -166,6 +188,18 @@ DESIGN CONSTRAINTS (why THIS design)
     embeddings, not as standalone tokens.
   - NO start_token: the LLM already knows how to "begin" — the last
     question hidden state acts as the implicit start signal.
+  - NO BOC/EOC boundary tokens between Q/C/S: total_C is FIXED (63 for K=6,
+    255 for K=8) and every concept position carries distinctive
+    (level_emb + pos_emb) markers, so concept-region entry / exit is
+    unambiguous by position + distributional shift alone.  A BOC/EOC
+    token would duplicate signal already present in the slot markers.
+  - ONE forward pass, TWO losses: concept MSE and reasoning CE share
+    [Q, C_gt, S].  Reasoning is teacher-forced on C_gt, so CE does NOT
+    flow into concept_head — this is deliberate.  It halves memory vs.
+    a second [Q, C_pred, S] pass, and matches inference where the
+    downstream decoder will be fed C_pred anyway.  If richer concept
+    supervision is ever needed, re-introduce the second pass behind
+    an opt-in flag.
 ================================================================================
 """
 
@@ -237,39 +271,38 @@ class PredictorOutput:
 class ConceptPredictor(nn.Module):
     """Stage-2 predictor — Option X: flat causal AR via the LLM backbone.
 
-    ARCHITECTURE (training, single forward pass)
-    --------------------------------------------
+    ARCHITECTURE (training, UNIFIED single pass over [Q, C_gt, S])
+    --------------------------------------------------------------
         ┌──────────────────────────────────────────────────────────────┐
-        │   question_ids                                               │
-        │         │                                                    │
-        │         ▼  (backbone.embed_tokens)                           │
-        │   Q_embeds  [B, L_Q, D_enc]                                  │
+        │   question_ids        solution_ids                           │
+        │         │                  │                                 │
+        │         ▼ embed_tokens     ▼ embed_tokens                    │
+        │   Q_embeds [B,L_Q,D_enc]   S_embeds [B,L_S,D_enc]            │
         │                                                              │
-        │   gt_concepts (list of K tensors)                            │
-        │         │                                                    │
-        │         ▼  (torch.cat dim=1)                                 │
-        │   concepts_flat  [B, total_C=63, D]                          │
-        │         │                                                    │
-        │         ▼  (back_decode + lvl_emb + pos_emb)                 │
-        │   concept_embeds  [B, 63, D_enc]                             │
+        │   gt_concepts (list of K)                                    │
+        │         ▼ cat dim=1                                          │
+        │   concepts_flat [B, total_C=63, D]                           │
+        │         ▼ back_decode + lvl_emb + pos_emb                    │
+        │   concept_embeds [B, 63, D_enc]                              │
         │                                                              │
-        │   Q_embeds      concept_embeds                               │
-        │         \\         /                                          │
-        │          torch.cat(dim=1)                                    │
-        │         [B, L_Q + 63, D_enc]                                 │
-        │                  │                                           │
-        │                  ▼  (reason_model backbone, causal mask)     │
-        │   hidden_states  [B, L_Q + 63, D_enc]                        │
-        │                  │                                           │
-        │                  ▼  slice: positions [L_Q-1 : L_Q-1+63]      │
-        │   readout        [B, 63, D_enc]                              │
-        │                  │                                           │
-        │                  ▼  (concept_head MLP: D_enc → D)            │
-        │   flat_predicted [B, 63, D]                                  │
-        │                  │                                           │
-        │                  ▼  split by level_lengths                   │
-        │   predicted_concepts = [C_0, C_1, ..., C_{K-1}]              │
+        │        torch.cat([Q_embeds, concept_embeds, S_embeds], 1)    │
+        │                       ▼                                      │
+        │              [B, L_Q + 63 + L_S, D_enc]                      │
+        │                       ▼  reason_model (FULL, causal mask,    │
+        │                          output_hidden_states=True)          │
+        │           ┌───────────┴───────────┐                          │
+        │           ▼                       ▼                          │
+        │   hidden_states[-1]             logits [B, T, V]             │
+        │   [B, T, D_enc]                     │                        │
+        │        ▼ slice [L_Q-1 : L_Q-1+63]   ▼ slice [L_Q+63-1        │
+        │   concept readout [B, 63, D_enc]           : L_Q+63+L_S-1]   │
+        │        ▼ concept_head MLP         reasoning_logits           │
+        │   flat_predicted [B, 63, D]            [B, L_S, V]           │
+        │        ▼ split by level_lengths               ▼              │
+        │   predicted_concepts = [C_0..C_{K-1}]   CE vs solution_ids   │
         └──────────────────────────────────────────────────────────────┘
+        MSE loss: per-level on predicted_concepts vs gt_concepts
+        CE  loss: on reasoning_logits vs solution_ids (-100 on pad)
 
     ARCHITECTURE (inference, K=63 cached sequential steps)
     ------------------------------------------------------
@@ -672,14 +705,17 @@ class ConceptPredictor(nn.Module):
         solution_ids: Optional[torch.Tensor] = None,
         solution_attention_mask: Optional[torch.Tensor] = None,
     ) -> PredictorOutput:
-        """Predict the concept pyramid from Q.
+        """Predict the concept pyramid from Q, optionally with reasoning CE.
 
-        Branches on `gt_concepts`:
-            * Supplied  — teacher-forced single forward pass (training).
-            * Missing   — autoregressive generation (inference).
-
-        If `solution_ids` is supplied, the reasoning fields of the
-        returned PredictorOutput are also populated.
+        Branches on ``gt_concepts``:
+            * Supplied  — UNIFIED teacher-forced single forward pass over
+                          ``[Q, C_gt, S]``.  When ``solution_ids`` is also
+                          supplied, BOTH the concept MSE readout AND the
+                          reasoning CE logits come from the SAME forward.
+            * Missing   — autoregressive generation over concept slots
+                          (inference).  ``solution_ids`` is rejected here
+                          because reasoning CE is only defined in the
+                          unified teacher-forced training path.
 
         Args:
             question_ids: Question token ids.
@@ -688,8 +724,9 @@ class ConceptPredictor(nn.Module):
                 Shape: [B, L_Q].
             gt_concepts: Ground-truth pyramid from the frozen Builder.
                 Training only.  List of K tensors, each [B, L_k, D].
-            solution_ids: Optional solution token ids — enables the
-                reasoning CE loss path.
+            solution_ids: Optional solution token ids.  When given
+                together with ``gt_concepts``, enables the unified
+                reasoning CE path in the SAME forward pass.
                 Shape: [B, L_S].
             solution_attention_mask: Required when solution_ids is set.
                 Shape: [B, L_S].
@@ -698,25 +735,24 @@ class ConceptPredictor(nn.Module):
             PredictorOutput — see class docstring.
         """
         if gt_concepts is not None:
-            out = self._forward_training(
-                question_ids, question_attention_mask, gt_concepts
-            )
-        else:
-            out = self._forward_inference(question_ids, question_attention_mask)
-
-        if solution_ids is not None:
-            if solution_attention_mask is None:
+            if solution_ids is not None and solution_attention_mask is None:
                 raise ValueError(
                     "solution_attention_mask is required when solution_ids is given."
                 )
-            self._prepare_reasoning(
-                out,
+            return self._forward_training(
                 question_ids,
                 question_attention_mask,
-                solution_ids,
-                solution_attention_mask,
+                gt_concepts,
+                solution_ids=solution_ids,
+                solution_attention_mask=solution_attention_mask,
             )
-        return out
+
+        if solution_ids is not None:
+            raise ValueError(
+                "solution_ids requires gt_concepts — reasoning CE is only "
+                "computed in the unified teacher-forced training path."
+            )
+        return self._forward_inference(question_ids, question_attention_mask)
 
     # ------------------------------------------------------------------ #
     #  training — teacher-forced single pass                             #
@@ -727,36 +763,48 @@ class ConceptPredictor(nn.Module):
         question_ids: torch.Tensor,
         question_attention_mask: Optional[torch.Tensor],
         gt_concepts: List[torch.Tensor],
+        solution_ids: Optional[torch.Tensor] = None,
+        solution_attention_mask: Optional[torch.Tensor] = None,
     ) -> PredictorOutput:
-        """Teacher-forced training forward (single LLM pass).
+        """Unified teacher-forced training pass over [Q, C_gt, S].
 
-        Pipeline (for B=4, L_Q=40, K=6, total_C=63, D=D_enc=896):
+        Runs ONE forward through the full ``reason_model`` (with lm_head,
+        ``output_hidden_states=True``) and produces BOTH readouts:
 
-            1. Concatenate GT concepts:      [4, 63, 896]
-            2. back_decode + slot markers:   [4, 63, 896]
-            3. embed questions:              [4, 40, 896]
-            4. concat [Q, concepts]:         [4, 103, 896]
-            5. attention mask concat:        [4, 103]
-            6. backbone forward:             [4, 103, 896]   (hidden_states)
-            7. slice positions [39 : 102]:   [4, 63, 896]    (readout)
-            8. concept_head:                 [4, 63, 896]    (D=896)
-            9. split by level_lengths:
-                   [4, 1, 896]
-                   [4, 2, 896]
-                   [4, 4, 896]
-                   [4, 8, 896]
-                   [4, 16, 896]
-                   [4, 32, 896]
+            * concept readout — hidden_states[-1][:, L_Q-1 : L_Q-1+total_C]
+              → concept_head MLP → [B, total_C, D] → split by level.
+            * solution readout — logits[:, L_Q+total_C-1 :
+              L_Q+total_C+L_S-1] (only when solution_ids is given).
+
+        Pipeline (B=4, L_Q=40, total_C=63, L_S=30, D=D_enc=896, V=151936):
+
+            1. Concatenate GT concepts:        [4,  63, 896]   (D)
+            2. back_decode + slot markers:     [4,  63, 896]   (D_enc)
+            3. embed questions:                [4,  40, 896]
+            4. embed solution (optional):      [4,  30, 896]
+            5. concat [Q, C, S]:               [4, 133, 896]
+            6. attention mask concat:          [4, 133]
+            7. reason_model forward         →  hidden [4, 133, 896]
+                                               logits [4, 133, V]
+            8. concept slice [39 : 102]:       [4,  63, 896]
+               concept_head                →   [4,  63, 896]   (back to D)
+               split by level_lengths      →   [4,1], [4,2], [4,4],
+                                               [4,8], [4,16], [4,32] × D
+            9. solution slice [102 : 132]  →   [4,  30, V]      (if given)
+               targets with -100 on pad    →   [4,  30]
 
         Args:
             question_ids: [B, L_Q].
             question_attention_mask: [B, L_Q] or None.
             gt_concepts: List of K tensors, each [B, L_k, D].
+            solution_ids: Optional [B, L_S]; enables reasoning CE readout.
+            solution_attention_mask: Required when solution_ids is given.
+                Shape: [B, L_S].
 
         Returns:
-            PredictorOutput with predicted_concepts and gt_concepts set;
-            reasoning_* fields left as None until _prepare_reasoning is
-            called by the caller.
+            PredictorOutput with predicted_concepts + gt_concepts always
+            populated; reasoning_logits / reasoning_target_ids /
+            reasoning_texts populated only when solution_ids is given.
         """
         if len(gt_concepts) != self._num_levels:
             raise ValueError(
@@ -764,70 +812,88 @@ class ConceptPredictor(nn.Module):
                 f"expected {self._num_levels}."
             )
 
+        want_reasoning = solution_ids is not None
+        if want_reasoning and solution_attention_mask is None:
+            raise ValueError(
+                "solution_attention_mask is required when solution_ids is given."
+            )
+
         B = question_ids.shape[0]
         device = question_ids.device
 
         # Step 1: flatten GT concepts to [B, total_C, D].
-        # Principle: level-major ordering matches the flat-slot layout
-        # diagrammed in the module docstring.
+        # Level-major ordering matches the flat-slot layout.
         concepts_flat = torch.cat(gt_concepts, dim=1)
 
-        # Step 2: lift to D_enc + attach slot markers.
+        # Step 2: lift to D_enc + attach (level, intra-pos) markers.
         # Shape: [B, total_C, D_enc].
         concept_embeds = self._build_concept_input_embeds(concepts_flat, start_slot=0)
         total_C = concept_embeds.shape[1]
 
-        # Step 3: question embeddings via backbone.embed_tokens.
+        # Step 3: question embeddings via the shared embed_tokens layer.
         # Shape: [B, L_Q, D_enc].
         Q_embeds = self._embed_questions(question_ids)
         L_Q = Q_embeds.shape[1]
 
-        # Dtype alignment across the two branches (autocast robustness).
         if concept_embeds.dtype != Q_embeds.dtype:
             concept_embeds = concept_embeds.to(Q_embeds.dtype)
 
-        # Step 4: concatenate for a single standard causal pass.
-        # Shape: [B, L_Q + total_C, D_enc].
-        inputs_embeds = torch.cat([Q_embeds, concept_embeds], dim=1)
+        # Step 4: optionally embed solution tokens with the SAME
+        # embed_tokens so Q and S share one token-embedding basis.
+        if want_reasoning:
+            embed_layer = self._get_backbone().get_input_embeddings()
+            S_embeds = embed_layer(solution_ids)
+            L_S = S_embeds.shape[1]
+            if S_embeds.dtype != Q_embeds.dtype:
+                S_embeds = S_embeds.to(Q_embeds.dtype)
+        else:
+            S_embeds = None
+            L_S = 0
 
-        # Step 5: attention mask — real Q mask plus ones(total_C)
-        # because concepts have no padding.
+        # Step 5: concatenate [Q, C, S] (or [Q, C] if no solution).
+        # Shape: [B, L_Q + total_C + L_S, D_enc].
+        if want_reasoning:
+            inputs_embeds = torch.cat([Q_embeds, concept_embeds, S_embeds], dim=1)
+        else:
+            inputs_embeds = torch.cat([Q_embeds, concept_embeds], dim=1)
+
+        # Step 6: attention mask.  Concepts have no padding → ones().
         if question_attention_mask is not None:
             concept_mask = torch.ones(
                 B, total_C, device=device, dtype=question_attention_mask.dtype
             )
-            attention_mask = torch.cat([question_attention_mask, concept_mask], dim=1)
+            if want_reasoning:
+                attention_mask = torch.cat(
+                    [question_attention_mask, concept_mask, solution_attention_mask],
+                    dim=1,
+                )
+            else:
+                attention_mask = torch.cat(
+                    [question_attention_mask, concept_mask], dim=1
+                )
         else:
             attention_mask = None
 
-        # Step 6: backbone forward (LLM causal mask is applied internally).
-        # Shape: [B, L_Q + total_C, D_enc].
-        backbone = self._get_backbone()
-        backbone_out = backbone(
+        # Step 7: forward through the FULL reason_model.  Request hidden
+        # states so the concept readout can use the last-layer hidden
+        # representation while still getting logits for reasoning CE.
+        # A single code path (regardless of `want_reasoning`) avoids
+        # branch drift; the extra lm_head matmul when reasoning is
+        # disabled is negligible next to the backbone cost.
+        model_out = self.reason_model(
             inputs_embeds=inputs_embeds,
             attention_mask=attention_mask,
-            output_hidden_states=False,
+            output_hidden_states=True,
         )
-        if hasattr(backbone_out, "last_hidden_state"):
-            hidden = backbone_out.last_hidden_state
-        else:
-            hidden = backbone_out[0]
+        hidden = model_out.hidden_states[-1]  # [B, T, D_enc]
 
-        # Step 7: next-slot readout slice.
-        # Principle: in a causal LM, hidden[t] predicts the token at t+1.
-        # Position (L_Q - 1) predicts slot 0; position (L_Q + total_C - 2)
-        # predicts slot (total_C - 1).  Therefore slice length total_C
-        # starting at (L_Q - 1).
-        #
-        # Shape: [B, total_C, D_enc].
+        # Step 8: concept readout.  Position (L_Q - 1) predicts slot 0;
+        # position (L_Q + total_C - 2) predicts slot (total_C - 1).
         start = L_Q - 1
-        readout = hidden[:, start : start + total_C, :]
+        readout = hidden[:, start : start + total_C, :]  # [B, total_C, D_enc]
+        flat_predicted = self.concept_head(readout)  # [B, total_C, D]
 
-        # Step 8: map from D_enc back to concept space D.
-        # Shape: [B, total_C, D].
-        flat_predicted = self.concept_head(readout)
-
-        # Step 9: split the flat prediction back into per-level tensors.
+        # Split the flat prediction back into per-level tensors.
         # For K=6 and level_lengths=[1,2,4,8,16,32], offsets are
         # [0, 1, 3, 7, 15, 31, 63].
         predicted_concepts: List[torch.Tensor] = []
@@ -836,12 +902,39 @@ class ConceptPredictor(nn.Module):
             predicted_concepts.append(flat_predicted[:, offset : offset + Lk, :])
             offset += Lk
 
-        return PredictorOutput(
+        output = PredictorOutput(
             predicted_concepts=predicted_concepts,
             gt_concepts=gt_concepts,
             num_levels=self._num_levels,
             level_lengths=list(self._level_lengths),
         )
+
+        # Step 9: solution readout (only if solution_ids was supplied).
+        # logits[:, L_Q + total_C - 1 : L_Q + total_C + L_S - 1] predict
+        # S_0 .. S_{L_S-1} under the causal LM "t predicts t+1" rule.
+        # CE gradient flows into reason_model / LoRA but NOT through
+        # concept_head (reasoning is teacher-forced on C_gt).
+        if want_reasoning:
+            logits = model_out.logits  # [B, T, V]
+            sol_start = L_Q + total_C - 1
+            sol_end = L_Q + total_C + L_S - 1
+            solution_logits = logits[:, sol_start:sol_end, :]  # [B, L_S, V]
+
+            # Targets with -100 on pad so CE(ignore_index=-100) skips them.
+            targets = solution_ids.clone()
+            targets[solution_attention_mask == 0] = -100
+
+            output.reasoning_logits = solution_logits
+            output.reasoning_target_ids = targets
+
+            # Argmax decode for qualitative inspection.
+            with torch.no_grad():
+                predicted_ids = solution_logits.argmax(dim=-1)
+                output.reasoning_texts = self.tokenizer.batch_decode(
+                    predicted_ids, skip_special_tokens=True
+                )
+
+        return output
 
     # ------------------------------------------------------------------ #
     #  inference — autoregressive generation with KV-cache               #
@@ -967,114 +1060,3 @@ class ConceptPredictor(nn.Module):
             num_levels=self._num_levels,
             level_lengths=list(self._level_lengths),
         )
-
-    # ------------------------------------------------------------------ #
-    #  optional reasoning CE loss path                                   #
-    # ------------------------------------------------------------------ #
-
-    def _prepare_reasoning(
-        self,
-        output: PredictorOutput,
-        question_ids: torch.Tensor,
-        question_attention_mask: Optional[torch.Tensor],
-        solution_ids: torch.Tensor,
-        solution_attention_mask: torch.Tensor,
-    ) -> None:
-        """Populate output.reasoning_* via teacher-forced NTP.
-
-        Sequence layout fed to reason_model (B=4, L_Q=40, total_C=63,
-        L_S=30):
-
-            ◄──── L_Q = 40 ────►◄──── total_C = 63 ────►◄── L_S = 30 ──►
-            [  Q_embeds         ][ back_decode(predicted) ][  S_embeds  ]
-              40 positions         63 positions              30 positions
-                                                         total T = 133
-
-        Causal logit alignment:
-            logits[:, L_Q + total_C - 1,           :] predicts S_0
-            logits[:, L_Q + total_C,               :] predicts S_1
-            ...
-            logits[:, L_Q + total_C + L_S - 2,     :] predicts S_{L_S-1}
-
-            slice: [:, L_Q+total_C-1 : L_Q+total_C+L_S-1, :]
-                   = [:, 102 : 132, :]  (length 30)
-            shape: [B, L_S, V]
-
-        Loss: CE(reasoning_logits, targets_with_-100_on_pad).
-        Gradient path:   predicted_concepts → back_decode → reason_model → CE.
-        This trains the predictor to emit concepts that actually support
-        solution decoding.
-
-        Note: we intentionally do NOT add slot markers here so this
-        exactly matches the Builder convention and the two reasoning
-        losses (Stage-1 and Stage-2) are numerically comparable.
-
-        Args:
-            output: PredictorOutput to mutate in-place.
-            question_ids: [B, L_Q].
-            question_attention_mask: [B, L_Q] (required).
-            solution_ids: [B, L_S].
-            solution_attention_mask: [B, L_S].
-        """
-        if question_attention_mask is None:
-            raise ValueError("question_attention_mask is required for reasoning loss.")
-
-        device = question_ids.device
-        B = question_ids.shape[0]
-
-        # Step 1: concatenate predicted concepts — [B, total_C, D].
-        concepts = torch.cat(output.predicted_concepts, dim=1)
-        total_C = concepts.shape[1]
-
-        # Step 2: back_decode to D_enc — [B, total_C, D_enc].
-        concept_embeds = self.back_decode(concepts)
-
-        # Step 3: embed Q and S token ids.
-        embed_layer = self._get_backbone().get_input_embeddings()
-        Q_embeds = embed_layer(question_ids)
-        L_Q = Q_embeds.shape[1]
-        S_embeds = embed_layer(solution_ids)
-        L_S = S_embeds.shape[1]
-
-        if concept_embeds.dtype != Q_embeds.dtype:
-            concept_embeds = concept_embeds.to(Q_embeds.dtype)
-
-        # Step 4: concatenate — [B, L_Q + total_C + L_S, D_enc].
-        decoder_input_embeds = torch.cat([Q_embeds, concept_embeds, S_embeds], dim=1)
-
-        # Step 5: attention mask — [B, L_Q + total_C + L_S].
-        concept_mask = torch.ones(
-            B, total_C, device=device, dtype=question_attention_mask.dtype
-        )
-        decoder_attention_mask = torch.cat(
-            [question_attention_mask, concept_mask, solution_attention_mask], dim=1
-        )
-
-        # Step 6: forward through the full reason_model (with lm_head).
-        # Shape: [B, T, V] where T = L_Q + total_C + L_S.
-        model_out = self.reason_model(
-            inputs_embeds=decoder_input_embeds,
-            attention_mask=decoder_attention_mask,
-        )
-        logits = model_out.logits
-
-        # Step 7: slice out positions that predict S tokens.
-        # Shape: [B, L_S, V].
-        sol_start = L_Q + total_C - 1
-        sol_end = L_Q + total_C + L_S - 1
-        solution_logits = logits[:, sol_start:sol_end, :]
-
-        # Step 8: build targets with -100 on pad positions so
-        # cross_entropy (ignore_index=-100) skips them automatically.
-        targets = solution_ids.clone()
-        targets[solution_attention_mask == 0] = -100
-
-        output.reasoning_logits = solution_logits
-        output.reasoning_target_ids = targets
-
-        # Step 9: argmax decode for qualitative inspection.
-        with torch.no_grad():
-            predicted_ids = solution_logits.argmax(dim=-1)
-            output.reasoning_texts = self.tokenizer.batch_decode(
-                predicted_ids, skip_special_tokens=True
-            )

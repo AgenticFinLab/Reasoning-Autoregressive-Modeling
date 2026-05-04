@@ -1,0 +1,146 @@
+# =============================================================================
+# NLCP V4 Concept Predictor Training Configuration - SHARED (frozen) variant
+# =============================================================================
+# Purpose: Train ConceptPredictor on GSM8K with Qwen/Qwen2.5-1.5B, K=4.
+# Variant: use_shared_model = TRUE
+#   - reason_model   : alias of Builder's reason_model (fully frozen)
+#   - back_proj      : alias of Builder's back_proj      (fully frozen)
+#   - Trainable heads: level_embeddings, position_embeddings, concept_head
+#
+# Pairs with: train_predictor_Qwen2.5-1.5B_4level_independent.yml for a
+# direct A/B comparison on whether letting Stage-2 adapt the backbone
+# (via LoRA + an independent reason_model) buys anything over just
+# training the predictor-specific heads.
+#
+# Rationale for freezing in SHARED mode:
+#   If we LoRA-trained the shared reason_model, the Builder's own
+#   forward pass (producing gt_concepts each batch) would go through
+#   the SAME LoRA-contaminated weights and stop reproducing the
+#   Stage-1 distribution.  MSE would then chase moving targets.
+#   Therefore: SHARED -> FROZEN, always.
+#
+# Usage:
+#   python examples/nlcpV4/train_predictor.py \
+#       -c configs/nlcpV4/GSM8K/train_predictor_Qwen2.5-1.5B_4level_shared.yml
+# =============================================================================
+
+# Data configuration (identical to the paired Builder config)
+# -----------------------------------------------------------------------------
+data:
+  data_name: GSM8K
+  data_path: EXPERIMENT/data/GSM8K
+  split: train
+  subset: ''
+  shuffle: true
+  drop_last: true
+
+# Environment configuration
+# -----------------------------------------------------------------------------
+environment:
+  dotenv_path: .env
+  seed: 42
+  dataloader_num_workers: 0
+  device_map:
+    model:
+      device: auto
+      priority: 1
+
+# Model configuration
+# -----------------------------------------------------------------------------
+# builder   : Stage-1 handoff.  The predictor imports a FROZEN Builder
+#             to (a) produce gt_concepts on the fly for the MSE target,
+#             and (b) weight-share reason_model + back_proj when
+#             use_shared_model=true (see below).
+#   config_path     : builder config used to construct the Builder
+#                     module graph AND to inherit the pyramid geometry
+#                     (num_levels, level_lengths, hidden_dim, num_heads,
+#                     max_seq_len).  The predictor config itself does
+#                     NOT re-declare `model.pyramid`: the trainer reads
+#                     it from this file to avoid drift.
+#   checkpoint_path : trained Builder checkpoint.  `best_eval` is
+#                     preferred for Stage-2; fall back to `best` only
+#                     if eval was disabled in Stage 1.
+#   strict_load     : fail-fast if any Builder weight is missing.
+#
+# predictor : ConceptPredictor-specific knobs.
+#   use_shared_model : TRUE in this variant.
+#                      => reason_model + back_proj are tied to Builder.
+#                      => predictor_model_name / predictor_num_layers
+#                         are ignored.
+#                      => training.predictor.lora MUST be null.
+#   dropout          : Applied inside concept_head.
+# -----------------------------------------------------------------------------
+model:
+  builder:
+    config_path: configs/nlcpV4/GSM8K/AutoWeighted/train_builder_Qwen2.5-1.5B_4level.yml
+    checkpoint_path: EXPERIMENT/nlcpV4/builder/GSM8K_Qwen2.5-1.5B_4level_AutoWeighted/checkpoints/checkpoint_best_eval.pt
+    strict_load: true
+
+  predictor:
+    use_shared_model: true
+    # Fields below are ignored when use_shared_model=true, kept null for
+    # clarity and to fail-fast if SHARED mode is flipped off without
+    # filling them in.
+    predictor_model_name: null
+    predictor_num_layers: null
+    dropout: 0.0
+
+# Training configuration
+# -----------------------------------------------------------------------------
+# In SHARED mode, only three predictor-owned modules train:
+#     level_embeddings
+#     position_embeddings
+#     concept_head
+# All Builder-tied weights stay frozen (reason_model, back_proj,
+# pyramid components).
+#
+# predictor:
+#   freeze : IGNORED in SHARED mode (reason_model is frozen unconditionally).
+#            Kept here for schema parity with the independent variant.
+#   lora   : MUST be null in SHARED mode.  Attaching LoRA to the shared
+#            reason_model would corrupt the Builder's forward pass.
+#            The predictor __init__ will fail-fast if this is non-null.
+#
+# loss_weights:
+#   concept_loss_weight  : MSE between predicted and gt concepts.
+#   reasoning_loss_weight: Next-token CE on solution tokens, computed
+#                          in the same unified forward as concept MSE.
+# -----------------------------------------------------------------------------
+training:
+  batch_size: 4
+  num_epochs: 10
+  learning_rate: 0.0001
+  weight_decay: 0.01
+  warmup_ratio: 0.1
+  gradient_clip: 1.0
+
+  predictor:
+    freeze: true
+    lora: null
+
+  loss_weights:
+    concept_loss_weight: 1.0
+    reasoning_loss_weight: 1.0
+
+# Logging configuration
+# -----------------------------------------------------------------------------
+log:
+  save_folder: EXPERIMENT/nlcpV4/predictor/GSM8K_Qwen2.5-1.5B_4level_shared
+  checkpoint_path: EXPERIMENT/nlcpV4/predictor/GSM8K_Qwen2.5-1.5B_4level_shared/checkpoints
+  log_path: EXPERIMENT/nlcpV4/predictor/GSM8K_Qwen2.5-1.5B_4level_shared/logs
+  log_level: INFO
+  log_step_interval: 10
+  checkpoint_step_interval: 1000
+  checkpoint_clean: true
+
+# Evaluation configuration
+# -----------------------------------------------------------------------------
+evaluation:
+  eval_step_interval: 500   # -1 = disabled
+  data:
+    data_name: GSM8K
+    data_path: EXPERIMENT/data/GSM8K
+    split: test
+    subset: ''
+    log_num_samples: 40      # samples for log_step_interval eval; (0,1] = proportion, >1 = count
+    eval_num_samples: 1.0    # samples for eval_step_interval eval; (0,1] = proportion, >1 = count
