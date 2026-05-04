@@ -42,28 +42,28 @@ weight ≈ 1.0, matching its current setting as the reference scale.
 
 Usage::
 
-    # Use default paths (Loss_prepare.json at project root):
-    #   -i: EXPERIMENT/nlcpV4/builder/Loss_prepare.json
+    # Use default paths (require --dataset to resolve the per-dataset filename):
+    #   -i: EXPERIMENT/nlcpV4/builder/<dataset>_Loss_prepare.json
     #   -o: EXPERIMENT/nlcpV4/builder/training_prepare/
-    python3 examples/nlcpV4/builder_training_prepare.py
+    python3 examples/nlcpV4/builder_training_prepare.py --dataset GSM8K
 
     # Tune the recommendation target (median weighted contribution per comp).
-    python3 examples/nlcpV4/builder_training_prepare.py --target 1.0
+    python3 examples/nlcpV4/builder_training_prepare.py --dataset GSM8K --target 1.0
 
     # Override -i / -o explicitly when the file lives outside the default tree.
     python3 examples/nlcpV4/builder_training_prepare.py \\
-        -i path/to/Loss_prepare.json -o path/to/output_dir
+        -i path/to/<dataset>_Loss_prepare.json -o path/to/output_dir
 
     # Pull the same default paths but rebased under a storage root.
     # MUST match the ``-s`` that ``loss_prepare.py`` was launched with
-    # so this tool reads the exact Loss_prepare.json just written.
+    # so this tool reads the exact JSON just written.
     # Resolved paths:
-    #   -i: /Data/<proj>/EXPERIMENT/nlcpV4/builder/Loss_prepare.json
+    #   -i: /Data/<proj>/EXPERIMENT/nlcpV4/builder/GSM8K_Loss_prepare.json
     #   -o: /Data/<proj>/EXPERIMENT/nlcpV4/builder/training_prepare/
-    python3 examples/nlcpV4/builder_training_prepare.py -s /Data/<proj>
+    python3 examples/nlcpV4/builder_training_prepare.py -s /Data/<proj> --dataset GSM8K
 
-    # Filter to a single dataset / module subset (still reads the global
-    # Loss_prepare.json; keys are filtered in-memory).
+    # Filter to a single module subset (still reads the dataset-specific
+    # JSON written by loss_prepare.py).
     python3 examples/nlcpV4/builder_training_prepare.py \\
         --dataset GSM8K --module builder -s /Data/<proj>
 
@@ -79,10 +79,11 @@ Arguments:
                           match the ``-s`` used when running
                           ``loss_prepare.py`` so this tool reads the
                           JSON just written by it.
-    -i / --input          Path to Loss_prepare.json. When omitted the
-                          default is computed from ``-s``:
+    -i / --input          Path to <dataset>_Loss_prepare.json. When
+                          omitted the default is computed from ``-s``
+                          and ``--dataset``:
                             <storage_root>/EXPERIMENT/nlcpV4/builder/
-                            Loss_prepare.json
+                            <dataset>_Loss_prepare.json
     -o / --output-dir     Output directory for plots + CSV. Default:
                             <storage_root>/EXPERIMENT/nlcpV4/builder/
                             training_prepare/
@@ -585,9 +586,10 @@ def parse_args():
         "--input",
         default=None,
         help=(
-            "Path to Loss_prepare.json. Default: "
-            "<storage_root>/EXPERIMENT/nlcpV4/builder/Loss_prepare.json, "
-            "where <storage_root> is the value of -s."
+            "Path to <dataset>_Loss_prepare.json. Default: "
+            "<storage_root>/EXPERIMENT/nlcpV4/builder/"
+            "<dataset>_Loss_prepare.json, where <storage_root> is -s "
+            "and <dataset> is --dataset (required when -i is omitted)."
         ),
     )
     parser.add_argument(
@@ -626,9 +628,25 @@ def main():
     args = parse_args()
     storage_root: str = args.storage_root
     base = Path(storage_root)
-    default_input = base / "EXPERIMENT" / "nlcpV4" / "builder" / "Loss_prepare.json"
+    if args.input:
+        input_path = Path(args.input)
+    else:
+        if args.dataset is None:
+            print(
+                "[ERROR] --dataset is required when -i/--input is omitted, "
+                "because the default Loss_prepare.json filename is now "
+                "<dataset>_Loss_prepare.json."
+            )
+            return 1
+        default_input = (
+            base
+            / "EXPERIMENT"
+            / "nlcpV4"
+            / "builder"
+            / f"{args.dataset}_Loss_prepare.json"
+        )
+        input_path = default_input
     default_output_dir = base / "EXPERIMENT" / "nlcpV4" / "builder" / "training_prepare"
-    input_path = Path(args.input) if args.input else default_input
     output_dir = Path(args.output_dir) if args.output_dir else default_output_dir
 
     # Surface the resolved storage paths up front. No silent

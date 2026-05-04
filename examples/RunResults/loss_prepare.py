@@ -9,8 +9,8 @@ Purpose:
 Behaviour:
     1. Select configs whose filename starts with `train_{module}_`, where
        module is supplied via `-m builder` or `-m predictor`.
-    2. Check EXPERIMENT/nlcpV4/{module}/Loss_prepare.json for the config key
-       "{dataset}/{config_stem}". If present -> [SKIP].
+    2. Check EXPERIMENT/nlcpV4/{module}/{dataset}_Loss_prepare.json for the
+       config key "{dataset}/{config_stem}". If present -> [SKIP].
     3. Otherwise build the model, reuse the group-shared batches, run a
        forward pass with torch.no_grad() for each batch, record per-batch
        raw + weighted + total losses plus mean/std/min/max aggregates,
@@ -28,8 +28,8 @@ Re-run tip (IMPORTANT):
     A single invocation may not succeed for every config — e.g., a
     shared-cluster GPU race causes a transient OOM, or all GPUs are
     momentarily tight. Successfully-finished configs are persisted to
-    `Loss_prepare.json` right away, and already-present keys are
-    `[SKIP]`-ed on subsequent runs. So if some configs failed, JUST
+    `<dataset>_Loss_prepare.json` right away, and already-present keys
+    are `[SKIP]`-ed on subsequent runs. So if some configs failed, JUST
     RE-RUN THE SAME COMMAND one or more times — each pass will pick up
     where the last one stopped and only retry the configs that are
     still missing from the result file, until every config has been
@@ -49,7 +49,7 @@ Usage:
     # Persist Loss_prepare.json under a non-default storage root (must
     # match the ``-s`` that training was launched with so downstream
     # scripts read the same file). Target path becomes:
-    #   <storage_root>/EXPERIMENT/nlcpV4/<module>/Loss_prepare.json
+    #   <storage_root>/EXPERIMENT/nlcpV4/<module>/<dataset>_Loss_prepare.json
     python3 examples/RunResults/loss_prepare.py -m builder -d GSM8K -n 5 \\
         -s /Data/<proj>
 
@@ -62,9 +62,9 @@ Usage:
 Arguments:
     -s / --storage-root   Prefix used to compute the Loss_prepare.json
                           path: ``<storage_root>/EXPERIMENT/nlcpV4/
-                          <module>/Loss_prepare.json``. Listed FIRST
-                          because it controls every output path this
-                          script writes. Default is ``./`` (current
+                          <module>/<dataset>_Loss_prepare.json``. Listed
+                          FIRST because it controls every output path
+                          this script writes. Default is ``./`` (current
                           working directory) — NEVER a silent
                           project-root fallback. The resolved absolute
                           path is printed as a ``[STORAGE]`` block at
@@ -118,7 +118,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("loss_prepare")
 
-OUT_FILENAME = "Loss_prepare.json"
+OUT_FILENAME_TEMPLATE = "{dataset}_Loss_prepare.json"
 VALID_MODULES = ("builder", "predictor")
 
 
@@ -135,11 +135,12 @@ def parse_args():
         help=(
             "Prefix used to compute the default Loss_prepare.json "
             "location: <storage_root>/EXPERIMENT/nlcpV4/<module>/"
-            "Loss_prepare.json. Default is './' (current working "
-            "directory) — NO silent project-root fallback. The resolved "
-            "absolute path is printed at startup. Use a matching -s "
-            "across loss_prepare.py, builder_training_prepare.py, and "
-            "training so every tool reads the same file."
+            "<dataset>_Loss_prepare.json. Default is './' (current "
+            "working directory) — NO silent project-root fallback. "
+            "The resolved absolute path is printed at startup. Use "
+            "a matching -s across loss_prepare.py, "
+            "builder_training_prepare.py, and training so every tool "
+            "reads the same file."
         ),
     )
     parser.add_argument(
@@ -178,20 +179,23 @@ def parse_args():
     return parser.parse_args()
 
 
-def loss_prepare_path(module: str, storage_root: str) -> Path:
-    """Return the absolute path of ``Loss_prepare.json`` for a given module.
+def loss_prepare_path(module: str, dataset: str, storage_root: str) -> Path:
+    """Return the absolute path of the dataset-scoped Loss_prepare.json.
 
-    ``storage_root`` mirrors the trainer's ``-s`` flag: the output file
-    lives under ``<storage_root>/EXPERIMENT/nlcpV4/<module>/``. There is
-    NO implicit project-root fallback — the CLI default is ``./``
-    (current working directory) and is always made visible at startup
-    via ``print_loss_prepare_path``.
+    ``storage_root`` mirrors the trainer's ``-s`` flag. The output file
+    lives under ``<storage_root>/EXPERIMENT/nlcpV4/<module>/`` with the
+    filename ``<dataset>_Loss_prepare.json`` so different ``-d`` runs
+    NEVER share one file (eliminates cross-dataset overwrite races).
+    There is NO implicit project-root fallback — the CLI default is
+    ``./`` (current working directory) and is always made visible at
+    startup via ``print_loss_prepare_path``.
     """
     base = Path(storage_root)
-    return base / "EXPERIMENT" / "nlcpV4" / module / OUT_FILENAME
+    filename = OUT_FILENAME_TEMPLATE.format(dataset=dataset)
+    return base / "EXPERIMENT" / "nlcpV4" / module / filename
 
 
-def print_loss_prepare_path(module: str, storage_root: str) -> None:
+def print_loss_prepare_path(module: str, dataset: str, storage_root: str) -> None:
     """Print a ``[STORAGE]`` block showing the resolved Loss_prepare.json path.
 
     Mirrors the format used by ``ram.utils.print_storage_paths`` but
@@ -199,27 +203,27 @@ def print_loss_prepare_path(module: str, storage_root: str) -> None:
     startup so the user can verify WHERE the JSON will be read from
     and written to before any compute happens.
     """
-    rel = loss_prepare_path(module, storage_root)
+    rel = loss_prepare_path(module, dataset, storage_root)
     abs_path = rel.expanduser()
     if not abs_path.is_absolute():
         abs_path = (Path.cwd() / abs_path).resolve()
     print(f"[STORAGE] storage_root = {storage_root!r} (cwd={Path.cwd().resolve()})")
-    print(f"[STORAGE]   Loss_prepare.json = {rel}")
+    print(f"[STORAGE]   {rel.name} = {rel}")
     print(f"[STORAGE]                       (absolute: {abs_path})")
 
 
-def load_loss_prepare(module: str, storage_root: str) -> dict:
-    """Load the persisted Loss_prepare.json store for ``module`` (empty if absent)."""
-    path = loss_prepare_path(module, storage_root)
+def load_loss_prepare(module: str, dataset: str, storage_root: str) -> dict:
+    """Load the persisted dataset-scoped Loss_prepare.json (empty if absent)."""
+    path = loss_prepare_path(module, dataset, storage_root)
     if path.exists():
         with open(path, "r", encoding="utf-8") as f:
             return json.load(f)
     return {}
 
 
-def save_loss_prepare(module: str, data: dict, storage_root: str) -> None:
-    """Persist the Loss_prepare.json store for ``module`` (creates parents)."""
-    path = loss_prepare_path(module, storage_root)
+def save_loss_prepare(module: str, dataset: str, data: dict, storage_root: str) -> None:
+    """Persist the dataset-scoped Loss_prepare.json (creates parents)."""
+    path = loss_prepare_path(module, dataset, storage_root)
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2, default=str)
@@ -488,7 +492,7 @@ def main():
 
     # Surface the exact Loss_prepare.json location BEFORE any compute
     # so a misconfigured ``-s`` is caught immediately (no hidden default).
-    print_loss_prepare_path(module, storage_root)
+    print_loss_prepare_path(module, dataset, storage_root)
 
     configs_dir = PROJECT_ROOT / "configs" / "nlcpV4" / dataset
     if not configs_dir.is_dir():
@@ -586,7 +590,7 @@ def main():
 
         for config_path, config in group:
             key = f"{dataset}/{config_path.stem}"
-            store = load_loss_prepare(module, storage_root)
+            store = load_loss_prepare(module, dataset, storage_root)
 
             if key in store:
                 logger.info("[SKIP] %s (key already present)", key)
@@ -687,9 +691,9 @@ def main():
                 continue
 
             # Re-read store right before write to preserve concurrent edits.
-            store = load_loss_prepare(module, storage_root)
+            store = load_loss_prepare(module, dataset, storage_root)
             store[key] = result
-            save_loss_prepare(module, store, storage_root)
+            save_loss_prepare(module, dataset, store, storage_root)
 
             total_stats = result["stats"]["total_weighted"]
             weighted_summary = ", ".join(
