@@ -1,7 +1,13 @@
-"""Compute per-(model, level) Builder loss weights from Loss_prepare.json.
+"""Compute per-(model, level) Builder loss weights from ``<dataset>_Loss_prepare.json``.
 
 Usage:
-    python3 examples/nlcpV4/loss_weight_compute.py -f EXPERIMENT/nlcpV4/builder/Loss_prepare.json
+    python3 examples/nlcpV4/loss_weight_compute.py -f EXPERIMENT/nlcpV4/builder/{dataset}_Loss_prepare.json
+
+The CSV sidecar is named from the input stem, so the dataset prefix
+is preserved automatically:
+
+    -f .../GSM8K_Loss_prepare.json  →  .../GSM8K_Loss_prepare_weights.csv
+    -f .../MATH_Loss_prepare.json   →  .../MATH_Loss_prepare_weights.csv
 
 Weighting rules (applied to the raw per-component mean of each config):
 
@@ -24,9 +30,20 @@ Output:
      by model size and pyramid level, followed by copy-ready YAML
      weight blocks.
   2. A ``<stem>_weights.csv`` file written next to the input JSON
-     (e.g. ``Loss_prepare.json`` → ``Loss_prepare_weights.csv``)
+     (e.g. ``GSM8K_Loss_prepare.json`` → ``GSM8K_Loss_prepare_weights.csv``)
      containing one flat row per config with raw / weight / weighted
      values for direct downstream analysis.
+  3. A dataset-aware analytical summary block, dispatched from the
+     ``dataset`` field encoded in each JSON key (``{dataset}/train_...``)
+     so the report matches the per-dataset design documents:
+       - GSM8K → `loss-weights-analysis-gsm8k.md` §9.6 (per-level
+         ordering closed form) + §9.7 (per-model recon closed form;
+         valid because within-model level spread < 20%).
+       - MATH  → `loss-weights-analysis-math.md` §9.6 (per-level
+         ordering closed form) + §9.7 (full 6×6 per-(model, level)
+         recon weight grid; the per-model closed form breaks down
+         on MATH due to the L=8 recon spike, up to 4.9× for
+         Qwen2.5-3B).
 
 Access is strict fail-fast: missing keys raise KeyError at parse
 time rather than being silently defaulted.
@@ -310,6 +327,150 @@ def print_weight_blocks(rows: list[dict]) -> None:
         print()
 
 
+def _per_level_ordering_summary(rows: list[dict]) -> list[tuple[int, float, float]]:
+    """Return ``(L, mu_ord(L), w_ord*(L))`` triples, sorted by L.
+
+    This implements the §9.6 closed form used in both
+    ``loss-weights-analysis-gsm8k.md`` and ``loss-weights-analysis-math.md``:
+    ordering is nearly model-invariant, so the per-level raw mean
+    across models is averaged and passed through the cap rule once.
+    """
+    levels = sorted({r["level"] for r in rows})
+    out: list[tuple[int, float, float]] = []
+    for L in levels:
+        cell = [r["r_ord"] for r in rows if r["level"] == L]
+        if not cell:
+            continue
+        mu = sum(cell) / len(cell)
+        out.append((L, mu, cap_weight(mu, ORDERING_CAP)))
+    return out
+
+
+def _per_model_recon_summary(rows: list[dict]) -> list[tuple[str, float, float]]:
+    """Return ``(model, mu_recon(m), w_recon*(m))`` triples, sorted by size.
+
+    This implements the GSM8K §9.7 closed form: recon is nearly
+    level-invariant within a model (within-model spread < 20% on
+    GSM8K), so the per-model raw mean across levels is averaged and
+    passed through the cap rule once.
+    """
+    models = sorted(
+        {r["model"] for r in rows},
+        key=lambda m: MODEL_SIZE_ORDER.get(m, 99),
+    )
+    out: list[tuple[str, float, float]] = []
+    for m in models:
+        cell = [r["r_recon"] for r in rows if r["model"] == m]
+        if not cell:
+            continue
+        mu = sum(cell) / len(cell)
+        out.append((m, mu, cap_weight(mu, RECON_CAP)))
+    return out
+
+
+def report_gsm8k_summary(rows: list[dict]) -> None:
+    """Emit the GSM8K closed-form summary (loss-weights-analysis-gsm8k.md).
+
+    Prints:
+      1. §9.6 per-level ordering weights (model-invariant closed form).
+      2. §9.7 per-model recon weights    (level-invariant closed form).
+
+    Both reductions are valid for GSM8K because ordering CoV across
+    models is ~1.2% and recon within-model spread is <20%. On MATH the
+    recon reduction fails; see :func:`report_math_summary`.
+    """
+    print()
+    print("=" * 70)
+    print("GSM8K §9.6 — per-level ordering weights (model-invariant)")
+    print("=" * 70)
+    print(f"  {'L':>2}  {'mu_ord(L)':>10}  {'w_ord*(L)':>10}")
+    print(f"  {'-' * 2:>2}  {'-' * 10:>10}  {'-' * 10:>10}")
+    for L, mu, w in _per_level_ordering_summary(rows):
+        print(f"  {L:>2}  {mu:>10.4f}  {w:>10.4f}")
+
+    print()
+    print("=" * 70)
+    print("GSM8K §9.7 — per-model recon weights (level-invariant)")
+    print("=" * 70)
+    print(f"  {'model':<14}  {'mu_recon(m)':>12}  {'w_recon*(m)':>12}")
+    print(f"  {'-' * 14:<14}  {'-' * 12:>12}  {'-' * 12:>12}")
+    for m, mu, w in _per_model_recon_summary(rows):
+        print(f"  {m:<14}  {mu:>12.4f}  {w:>12.4f}")
+
+
+def report_math_summary(rows: list[dict]) -> None:
+    """Emit the MATH summary (loss-weights-analysis-math.md).
+
+    Prints:
+      1. §9.6 per-level ordering weights (model-invariant closed form;
+         numerically identical to GSM8K within ±0.01).
+      2. §9.7 per-(model, level) recon weight grid (no closed form).
+
+    The GSM8K per-model reduction does NOT hold on MATH because the
+    L=8 recon spike blows up the within-model spread to 4.9× for
+    Qwen2.5-3B; every cell therefore carries its own weight.
+    """
+    print()
+    print("=" * 70)
+    print("MATH §9.6 — per-level ordering weights (model-invariant)")
+    print("=" * 70)
+    print(f"  {'L':>2}  {'mu_ord(L)':>10}  {'w_ord*(L)':>10}")
+    print(f"  {'-' * 2:>2}  {'-' * 10:>10}  {'-' * 10:>10}")
+    for L, mu, w in _per_level_ordering_summary(rows):
+        print(f"  {L:>2}  {mu:>10.4f}  {w:>10.4f}")
+
+    print()
+    print("=" * 70)
+    print("MATH §9.7 — per-(model, level) recon weights (full grid)")
+    print("=" * 70)
+    levels = sorted({r["level"] for r in rows})
+    models = sorted(
+        {r["model"] for r in rows},
+        key=lambda m: MODEL_SIZE_ORDER.get(m, 99),
+    )
+    lookup = {(r["model"], r["level"]): r["w_recon"] for r in rows}
+    header = f"  {'model':<14}" + "".join(f"  {'L=' + str(L):>8}" for L in levels)
+    print(header)
+    print(f"  {'-' * 14:<14}" + "".join(f"  {'-' * 8:>8}" for _ in levels))
+    for m in models:
+        parts = [f"  {m:<14}"]
+        for L in levels:
+            w = lookup.get((m, L))
+            parts.append(f"  {'—':>8}" if w is None else f"  {w:>8.4f}")
+        print("".join(parts))
+
+
+# Dataset-aware dispatch table: maps the ``dataset`` field parsed from
+# each Loss_prepare JSON key to the summary-emission function that
+# matches the per-dataset design document.
+DATASET_REPORTERS: dict[str, callable] = {
+    "GSM8K": report_gsm8k_summary,
+    "MATH": report_math_summary,
+}
+
+
+def dispatch_dataset_summary(rows: list[dict]) -> None:
+    """Group rows by dataset and invoke the matching reporter for each.
+
+    In practice a single ``<dataset>_Loss_prepare.json`` contains one
+    dataset, so this produces exactly one summary block. The grouping
+    makes the code robust to future mixed files without special-casing.
+    """
+    by_ds: dict[str, list[dict]] = {}
+    for r in rows:
+        by_ds.setdefault(r["dataset"], []).append(r)
+    for ds, ds_rows in by_ds.items():
+        reporter = DATASET_REPORTERS.get(ds)
+        if reporter is None:
+            print()
+            print(
+                f"[INFO] No dataset-specific summary defined for '{ds}'. "
+                f"Supported: {sorted(DATASET_REPORTERS)}."
+            )
+            continue
+        reporter(ds_rows)
+
+
 def main() -> int:
     """CLI entry point: recompute loss weights from Loss_prepare.json."""
     args = parse_args()
@@ -339,6 +500,9 @@ def main() -> int:
     print_header(args.file, len(rows))
     print_table(rows)
     print_weight_blocks(rows)
+    # Dataset-aware analytical summary (GSM8K §9.6/§9.7 closed forms,
+    # or MATH §9.6 closed form + §9.7 per-(model, level) grid).
+    dispatch_dataset_summary(rows)
 
     # Emit a CSV sidecar next to the input JSON. Name: <stem>_weights.csv
     csv_path = args.file.with_name(args.file.stem + "_weights.csv")

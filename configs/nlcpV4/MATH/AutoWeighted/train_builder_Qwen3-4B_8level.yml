@@ -1,0 +1,183 @@
+# =============================================================================
+# AutoWeighted variant (auto-generated from MATH_Loss_prepare_weights.csv)
+# =============================================================================
+# Generator : examples/nlcpV4/loss_weight_compute.py
+# Source    : EXPERIMENT/nlcpV4/builder/MATH_Loss_prepare.json
+# Capping rules:
+#   recon_loss_weight    = 10 / raw_recon    if raw_recon    > 10, else 1.0
+#   ordering_loss_weight =  6 / raw_ordering if raw_ordering >  6, else 1.0
+#   residual_loss_weight = 1.0  (always)
+#   reasoning_loss_weight = 1.0 (always)
+# Measured raw means (Qwen3-4B, L=8, 10-batch warm-up):
+#   raw: recon=15.539  ordering=35.679  residual=1.307  reasoning=5.061
+# After weighting:
+#   wt : recon=10.000  ordering=6.000  residual=1.307  reasoning=5.061
+# =============================================================================
+
+# =============================================================================
+# NLCP V4 Concept Pyramid Builder Training Configuration
+# =============================================================================
+# Purpose: Train ConceptPyramidBuilder on MATH with Qwen/Qwen3-4B
+# Pyramid Levels: 8 (ablation study)
+# Usage:
+#   python examples/nlcpV4/train_builder.py -c configs/nlcpV4/MATH/AutoWeighted/train_builder_Qwen3-4B_8level.yml
+# =============================================================================
+
+# Data configuration
+# -----------------------------------------------------------------------------
+# data_name    : Dataset identifier (MATH for competition-level math reasoning).
+# data_path    : Root directory for dataset storage.
+# split        : Which data split to use for training.
+# subset       : Optional subset filter (empty string = use all data).
+# shuffle      : Whether to shuffle training batches each epoch.
+# drop_last    : Drop incomplete final batch to ensure consistent tensor shapes.
+# -----------------------------------------------------------------------------
+data:
+  data_name: math
+  data_path: EXPERIMENT/data/MATH
+  split: train
+  subset: ''
+  shuffle: true
+  drop_last: true
+
+# Environment configuration
+# -----------------------------------------------------------------------------
+# dotenv_path  : Path to .env file for environment variables (e.g., HF_TOKEN).
+# seed         : Random seed for reproducibility across runs.
+# dataloader_num_workers : Number of data-loading worker processes (0 = main process only).
+# device_map   : Device placement strategy for model and auxiliary modules.
+#   model.device   : Device allocation (auto = automatic selection).
+#   model.priority : Priority rank for device assignment.
+# -----------------------------------------------------------------------------
+environment:
+  dotenv_path: .env
+  seed: 42
+  dataloader_num_workers: 0
+  device_map:
+    model:
+      device: auto
+      priority: 1
+
+# Model configuration
+# -----------------------------------------------------------------------------
+# reason_model : Pre-trained causal language model used as the reasoning backbone.
+#   reason_model_name      : HuggingFace model identifier.
+#   reason_model_num_layers: Number of backbone layers to use (-1 = all layers).
+#   torch_dtype            : Backbone weight precision. **DEFAULT = float32.**
+#                            Low-precision options are DANGEROUS because Builder
+#                            modules (LayerNorm, attention softmax, ordering /
+#                            recon MSE) are numerically fragile at bf16/fp16 and
+#                            can NaN within a few hundred steps on MATH.
+#                              - "float32"  (safe, recommended)
+#                              - "bfloat16" ⚠ DANGER: saves memory but may NaN
+#                              - "float16"  ⚠ DANGER: even more fragile than bf16
+#   reason_model_lora      : LoRA configuration (null = disabled).
+#
+# pyramid      : Concept pyramid architecture parameters.
+#   hidden_dim  : Dimension of concept embeddings (must equal encoder hidden_size).
+#   num_heads   : Number of attention heads for intra-level ordering.
+#   num_levels  : Number of pyramid levels (geometric abstraction hierarchy).
+#   level_lengths: Number of concepts per level (geometric progression).
+#   max_seq_len : Maximum sequence length for CoT encoding.
+#
+# builder      : ConceptPyramidBuilder-specific parameters.
+#   use_positional_query_init : Initialize queries with DLCM positional priors.
+#   positional_init_alpha     : Strength of positional initialization signal (alpha).
+# -----------------------------------------------------------------------------
+model:
+  reason_model:
+    reason_model_name: Qwen/Qwen3-4B
+    reason_model_num_layers: -1
+    torch_dtype: float32
+    # torch_dtype: bfloat16   # ⚠ DANGER: bf16 LayerNorm/softmax/MSE can NaN
+    # torch_dtype: float16    # ⚠ DANGER: fp16 even more fragile than bf16
+  pyramid:
+    hidden_dim: 2560
+    # Must equal encoder hidden_size to avoid lossy projection (VAR-faithful)
+    num_heads: 8
+    num_levels: 8
+    level_lengths:
+    - 1
+    - 2
+    - 4
+    - 8
+    - 16
+    - 32
+    - 64
+    - 128
+    max_seq_len: 512
+  builder:
+    use_positional_query_init: true
+    positional_init_alpha: 0.5
+
+# Training configuration
+# -----------------------------------------------------------------------------
+# batch_size              : Training batch size (reduce for larger models/GPUs).
+# num_epochs              : Total training epochs.
+# learning_rate           : Peak learning rate for AdamW optimizer.
+# weight_decay            : L2 regularization coefficient.
+# warmup_ratio            : Fraction of total steps for linear LR warmup.
+# gradient_clip           : Maximum gradient norm for clipping (prevents explosion).
+#
+# loss_weights:
+#   reasoning_loss_weight       : Weight for next-token-prediction reasoning loss.
+#   ordering_loss_weight   : Weight for intra-level concept ordering loss.
+#   recon_loss_weight     : Weight for CoT hidden-state reconstruction loss.
+#   ordering_margin       : Margin for ordering constraint in concept_loss.
+#   residual_loss_weight  : Weight for residual decomposition regularization.
+#
+# ordering_loss_type      : Ordering loss variant (margin = hinge-based).
+# -----------------------------------------------------------------------------
+training:
+  batch_size: 4
+  num_epochs: 10
+  learning_rate: 0.00005
+  weight_decay: 0.01
+  warmup_ratio: 0.1
+  gradient_clip: 1.0
+  reason_model:
+    freeze: true
+    lora: null
+  loss_weights:
+    reasoning_loss_weight: 1.0000
+    ordering_loss_weight: 0.1682
+    recon_loss_weight: 0.6435
+    ordering_margin: 1.0
+    residual_loss_weight: 1.0000
+  ordering_loss_type: margin
+
+# Logging configuration
+# -----------------------------------------------------------------------------
+# save_folder    : Root directory for all experiment outputs.
+# checkpoint_path: Directory for model checkpoints.
+# log_path       : Directory for training logs and metrics.
+# log_level      : Console/logging verbosity (DEBUG/INFO/WARNING/ERROR).
+# -----------------------------------------------------------------------------
+log:
+  save_folder: EXPERIMENT/nlcpV4/builder/MATH_Qwen3-4B_8level_AutoWeighted
+  checkpoint_path: EXPERIMENT/nlcpV4/builder/MATH_Qwen3-4B_8level_AutoWeighted/checkpoints
+  log_path: EXPERIMENT/nlcpV4/builder/MATH_Qwen3-4B_8level_AutoWeighted/logs
+  log_level: INFO
+  # Step intervals (all values are training steps)
+  log_step_interval: 10
+  checkpoint_step_interval: 1000
+  # checkpoint_clean:
+  #   true  -> save only the epoch-start checkpoint of every epoch,
+  #            plus one final epoch-end checkpoint after the LAST epoch.
+  #            Ignores checkpoint_step_interval. Useful to save disk space.
+  #   false -> save per checkpoint_step_interval (legacy behaviour).
+  # checkpoint_best-*.pt and checkpoint_best_eval-*.pt are always tracked
+  # (previous best files are removed when a new best is found).
+  checkpoint_clean: true
+
+# Evaluation configuration
+# -----------------------------------------------------------------------------
+evaluation:
+  eval_step_interval: 500   # -1 = disabled
+  data:
+    data_name: math
+    data_path: EXPERIMENT/data/MATH
+    split: test
+    subset: ''
+    log_num_samples: 40      # samples for log_step_interval eval; (0,1] = proportion, >1 = count
+    eval_num_samples: 1.0    # samples for eval_step_interval eval; (0,1] = proportion, >1 = count
