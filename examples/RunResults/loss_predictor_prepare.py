@@ -540,6 +540,32 @@ def main() -> int:
     setup_environment({"seed": first_seed, "device": "auto"})
     initial_device = str(get_device("auto"))
 
+    # ── Surface resolved builder-checkpoint paths in [STORAGE] block ──
+    # Each predictor config carries a *relative* builder checkpoint
+    # (model.builder.checkpoint_path) that must be resolved against
+    # storage_root — the same convention train_predictor.py uses.
+    # Printing every unique (raw → resolved) mapping at startup lets
+    # the operator verify that ``-s`` is pointing at the right Stage-1
+    # artefacts BEFORE any model loading happens.
+    _seen_ckpt: set[str] = set()
+    for _, cfg, _ in loaded:
+        raw_ckpt = cfg["model"]["builder"]["checkpoint_path"]
+        if raw_ckpt in _seen_ckpt:
+            continue
+        _seen_ckpt.add(raw_ckpt)
+        resolved = _resolve_builder_checkpoint_path(raw_ckpt, storage_root)
+        abs_ckpt = (
+            resolved.resolve()
+            if resolved.is_absolute()
+            else (Path.cwd() / resolved).resolve()
+        )
+        exists_tag = "EXISTS" if abs_ckpt.is_file() else "MISSING"
+        print(f"[STORAGE]   builder_checkpoint = {raw_ckpt}")
+        print(
+            f"[STORAGE]                        (absolute: {abs_ckpt})  [{exists_tag}]"
+        )
+    del _seen_ckpt
+
     # Per-mode config counts (visibility for the operator).
     per_mode_count = {m: sum(1 for _, _, mm in loaded if mm == m) for m in target_modes}
     logger.info(
@@ -614,8 +640,13 @@ def main() -> int:
                     last_exc = e
                     break
 
+                resolved_ckpt = _resolve_builder_checkpoint_path(
+                    config["model"]["builder"]["checkpoint_path"],
+                    storage_root,
+                ).resolve()
                 logger.info(
-                    "[RUN ] %s (mode=%s, device=%s, attempt=%d/%d, bs=%d, n=%d)",
+                    "[RUN ] %s (mode=%s, device=%s, attempt=%d/%d, bs=%d, n=%d, "
+                    "builder_ckpt=%s)",
                     key,
                     mode,
                     current_device,
@@ -623,6 +654,7 @@ def main() -> int:
                     max_attempts,
                     bs,
                     len(shared_batches),
+                    resolved_ckpt,
                 )
 
                 seed = int(config["environment"]["seed"])
