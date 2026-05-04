@@ -62,6 +62,7 @@ import json
 import logging
 import math
 import random
+import re
 import sys
 from pathlib import Path
 
@@ -180,7 +181,8 @@ def _fail_fast_shared_sanity(config: dict) -> None:
 
 
 def _resolve_builder_checkpoint_path(raw: str, storage_root: str) -> Path:
-    """Mirror ``apply_storage_root`` semantics for the builder checkpoint.
+    """Mirror ``apply_storage_root`` semantics for the builder checkpoint,
+    with prefix-based glob fallback.
 
     ``apply_storage_root`` only rewrites paths under ``config['log']``.
     The builder checkpoint (``model.builder.checkpoint_path``) lives
@@ -189,11 +191,56 @@ def _resolve_builder_checkpoint_path(raw: str, storage_root: str) -> Path:
     Stage-2 run launched with ``-s /Data/<proj>`` can locate Stage-1
     artefacts written by the paired Stage-1 run (also launched with
     the same ``-s``).
+
+    Glob fallback:
+        Builder training saves best checkpoints with epoch/step suffixes,
+        e.g. ``checkpoint_best_eval-epoch9-step18500.pt``.  The YAML
+        config carries only the *stem prefix* for brevity:
+            ``checkpoint_best_eval.pt``
+        If the literal path does not exist, this function strips the
+        ``.pt`` suffix, globs ``<stem>*.pt`` in the parent directory,
+        and returns the match with the highest step number.  This lets
+        the config remain stable across training runs (no manual
+        epoch/step editing after each Stage-1 completion).
     """
     p = Path(raw)
     if p.is_absolute():
-        return p
-    return Path(storage_root) / p
+        resolved = p
+    else:
+        resolved = Path(storage_root) / p
+
+    # Fast path: exact file exists.
+    if resolved.is_file():
+        return resolved
+
+    # Glob fallback: treat filename as a prefix.
+    parent = resolved.parent
+    stem_prefix = resolved.stem  # e.g. "checkpoint_best_eval"
+    if parent.is_dir():
+        # Match files like checkpoint_best_eval-epoch9-step18500.pt
+        candidates = sorted(
+            parent.glob(f"{stem_prefix}*.pt"),
+            key=lambda f: _extract_step(f.name),
+            reverse=True,
+        )
+        if candidates:
+            return candidates[0]
+
+    # No match — return the literal path so downstream FileNotFoundError
+    # still reports the expected location.
+    return resolved
+
+
+def _extract_step(filename: str) -> int:
+    """Extract the step number from a checkpoint filename for sorting.
+
+    Handles patterns like:
+        checkpoint_best_eval-epoch9-step18500.pt  → 18500
+        checkpoint_best-epoch5-step10000.pt       → 10000
+    Falls back to 0 if no step found.
+    """
+    m = re.search(r"-step(\d+)", filename)
+    return int(m.group(1)) if m else 0
 
 
 # =============================================================================

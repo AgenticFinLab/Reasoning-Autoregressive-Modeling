@@ -211,6 +211,13 @@ import torch.nn as nn
 from peft import LoraConfig, get_peft_model
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+from nlcpV4.utils import (
+    build_solution_targets,
+    gather_concept_readout,
+    gather_solution_logits,
+    pack_qcs_sequences,
+)
+
 # =========================================================================
 # Output Dataclass — same interface losses.py consumes
 # =========================================================================
@@ -771,35 +778,53 @@ class ConceptPredictor(nn.Module):
         Runs ONE forward through the full ``reason_model`` (with lm_head,
         ``output_hidden_states=True``) and produces BOTH readouts:
 
-            * concept readout — hidden_states[-1][:, L_Q-1 : L_Q-1+total_C]
-              → concept_head MLP → [B, total_C, D] → split by level.
-            * solution readout — logits[:, L_Q+total_C-1 :
-              L_Q+total_C+L_S-1] (only when solution_ids is given).
+            * concept readout  — per-row gather at positions
+              ``q_len[i]-1 .. q_len[i]-1+total_C-1`` of the packed
+              sequence → concept_head MLP → [B, total_C, D].
+            * solution readout — per-row gather at positions
+              ``q_len[i]+total_C-1 .. q_len[i]+total_C-1+L_S_pad-1`` of
+              the packed sequence, with targets -100 on pad (only when
+              ``solution_ids`` is given).
 
-        Pipeline (B=4, L_Q=40, total_C=63, L_S=30, D=D_enc=896, V=151936):
+        PADDING-GEOMETRY FIX (vs legacy concat-then-slice):
+            The legacy path concatenated right-padded Q with the concept
+            block and right-padded S, then sliced readouts at a single
+            batch-uniform offset.  Under variable Q length, that offset
+            pointed INTO the Q pad region for short rows — the concept
+            readout became the hidden at a PAD TOKEN, and the RoPE
+            distance from the solution block to the last real Q token
+            varied across the batch.  This path packs per row via
+            :func:`nlcpV4.utils.pack_qcs_sequences`, so every
+            row has no internal padding and per-row offsets mark the
+            concept and solution blocks.
 
-            1. Concatenate GT concepts:        [4,  63, 896]   (D)
+        Pipeline (B=4, q_len in {38,40}, total_C=63, L_S_pad=30, D=D_enc=896, V=151936):
+
+            1. flatten GT concepts:            [4,  63, 896]   (D)
             2. back_decode + slot markers:     [4,  63, 896]   (D_enc)
             3. embed questions:                [4,  40, 896]
             4. embed solution (optional):      [4,  30, 896]
-            5. concat [Q, C, S]:               [4, 133, 896]
-            6. attention mask concat:          [4, 133]
-            7. reason_model forward         →  hidden [4, 133, 896]
-                                               logits [4, 133, V]
-            8. concept slice [39 : 102]:       [4,  63, 896]
-               concept_head                →   [4,  63, 896]   (back to D)
-               split by level_lengths      →   [4,1], [4,2], [4,4],
-                                               [4,8], [4,16], [4,32] × D
-            9. solution slice [102 : 132]  →   [4,  30, V]      (if given)
-               targets with -100 on pad    →   [4,  30]
+            5. pack per row (no internal pad): [4,   T, 896]
+               where T = max(q_len[i] + 63 + s_len[i])
+            6. reason_model forward         →  hidden [4, T, 896]
+                                               logits [4, T, V]
+            7. concept readout (per-row gather) → [4,  63, 896]
+               concept_head →                    [4,  63, D]
+               split by level_lengths      →     [4,1], [4,2], [4,4],
+                                                   [4,8], [4,16], [4,32] × D
+            8. solution readout (per-row gather) → [4, 30, V]   (if given)
+               targets with -100 on pad    →       [4, 30]
 
         Args:
-            question_ids: [B, L_Q].
-            question_attention_mask: [B, L_Q] or None.
+            question_ids: [B, L_Q_pad].  Padding side is fine either way
+                — the packer strips pads via ``q_mask``.
+            question_attention_mask: [B, L_Q_pad] or None.  Required for
+                mixed-length batches.  None triggers the legacy
+                "all-real" fast path with a synthesized all-ones mask.
             gt_concepts: List of K tensors, each [B, L_k, D].
-            solution_ids: Optional [B, L_S]; enables reasoning CE readout.
+            solution_ids: Optional [B, L_S_pad]; right-padded.
             solution_attention_mask: Required when solution_ids is given.
-                Shape: [B, L_S].
+                Shape: [B, L_S_pad].
 
         Returns:
             PredictorOutput with predicted_concepts + gt_concepts always
@@ -828,12 +853,10 @@ class ConceptPredictor(nn.Module):
         # Step 2: lift to D_enc + attach (level, intra-pos) markers.
         # Shape: [B, total_C, D_enc].
         concept_embeds = self._build_concept_input_embeds(concepts_flat, start_slot=0)
-        total_C = concept_embeds.shape[1]
 
         # Step 3: question embeddings via the shared embed_tokens layer.
-        # Shape: [B, L_Q, D_enc].
+        # Shape: [B, L_Q_pad, D_enc].
         Q_embeds = self._embed_questions(question_ids)
-        L_Q = Q_embeds.shape[1]
 
         if concept_embeds.dtype != Q_embeds.dtype:
             concept_embeds = concept_embeds.to(Q_embeds.dtype)
@@ -843,54 +866,50 @@ class ConceptPredictor(nn.Module):
         if want_reasoning:
             embed_layer = self._get_backbone().get_input_embeddings()
             S_embeds = embed_layer(solution_ids)
-            L_S = S_embeds.shape[1]
             if S_embeds.dtype != Q_embeds.dtype:
                 S_embeds = S_embeds.to(Q_embeds.dtype)
         else:
             S_embeds = None
-            L_S = 0
 
-        # Step 5: concatenate [Q, C, S] (or [Q, C] if no solution).
-        # Shape: [B, L_Q + total_C + L_S, D_enc].
-        if want_reasoning:
-            inputs_embeds = torch.cat([Q_embeds, concept_embeds, S_embeds], dim=1)
-        else:
-            inputs_embeds = torch.cat([Q_embeds, concept_embeds], dim=1)
-
-        # Step 6: attention mask.  Concepts have no padding → ones().
-        if question_attention_mask is not None:
-            concept_mask = torch.ones(
-                B, total_C, device=device, dtype=question_attention_mask.dtype
+        # Step 5: pack per row — NO internal padding, tail-padded only.
+        # Callers MUST pass a question_attention_mask.  If it is None we
+        # synthesize an all-ones mask so the packer treats every row as
+        # having full real length (matches the pre-existing fallback).
+        if question_attention_mask is None:
+            q_mask = torch.ones(
+                B, question_ids.shape[1], device=device, dtype=torch.long
             )
-            if want_reasoning:
-                attention_mask = torch.cat(
-                    [question_attention_mask, concept_mask, solution_attention_mask],
-                    dim=1,
-                )
-            else:
-                attention_mask = torch.cat(
-                    [question_attention_mask, concept_mask], dim=1
-                )
         else:
-            attention_mask = None
+            q_mask = question_attention_mask
 
-        # Step 7: forward through the FULL reason_model.  Request hidden
+        pack = pack_qcs_sequences(
+            Q_embeds=Q_embeds,
+            q_mask=q_mask,
+            concept_embeds=concept_embeds,
+            S_embeds=S_embeds,
+            s_mask=solution_attention_mask if want_reasoning else None,
+        )
+
+        # Step 6: forward through the FULL reason_model.  Request hidden
         # states so the concept readout can use the last-layer hidden
         # representation while still getting logits for reasoning CE.
         # A single code path (regardless of `want_reasoning`) avoids
         # branch drift; the extra lm_head matmul when reasoning is
         # disabled is negligible next to the backbone cost.
         model_out = self.reason_model(
-            inputs_embeds=inputs_embeds,
-            attention_mask=attention_mask,
+            inputs_embeds=pack.packed_embeds,
+            attention_mask=pack.packed_mask,
             output_hidden_states=True,
         )
         hidden = model_out.hidden_states[-1]  # [B, T, D_enc]
 
-        # Step 8: concept readout.  Position (L_Q - 1) predicts slot 0;
-        # position (L_Q + total_C - 2) predicts slot (total_C - 1).
-        start = L_Q - 1
-        readout = hidden[:, start : start + total_C, :]  # [B, total_C, D_enc]
+        # Step 7: concept readout — per-row gather.  Row i reads
+        # hidden[i, q_len[i]-1 : q_len[i]-1+total_C].  Under the causal
+        # "t predicts t+1" rule, position q_len[i]-1 is the last real Q
+        # hidden which predicts slot 0; positions q_len[i]..q_len[i]+
+        # total_C-2 are the hiddens after consuming C_0..C_{total_C-2}
+        # which predict C_1..C_{total_C-1}.
+        readout = gather_concept_readout(hidden, pack)  # [B, total_C, D_enc]
         flat_predicted = self.concept_head(readout)  # [B, total_C, D]
 
         # Split the flat prediction back into per-level tensors.
@@ -909,20 +928,20 @@ class ConceptPredictor(nn.Module):
             level_lengths=list(self._level_lengths),
         )
 
-        # Step 9: solution readout (only if solution_ids was supplied).
-        # logits[:, L_Q + total_C - 1 : L_Q + total_C + L_S - 1] predict
-        # S_0 .. S_{L_S-1} under the causal LM "t predicts t+1" rule.
+        # Step 8: solution readout (only if solution_ids was supplied).
+        # Row i reads logits[i, q_len[i]+total_C-1+j] for j=0..L_S_pad-1
+        # which predicts solution_ids[i, j] under the causal rule.
         # CE gradient flows into reason_model / LoRA but NOT through
         # concept_head (reasoning is teacher-forced on C_gt).
         if want_reasoning:
             logits = model_out.logits  # [B, T, V]
-            sol_start = L_Q + total_C - 1
-            sol_end = L_Q + total_C + L_S - 1
-            solution_logits = logits[:, sol_start:sol_end, :]  # [B, L_S, V]
+            solution_logits = gather_solution_logits(logits, pack)
+            # Shape preserved as [B, L_S_pad, V] so downstream CE is unchanged.
 
             # Targets with -100 on pad so CE(ignore_index=-100) skips them.
-            targets = solution_ids.clone()
-            targets[solution_attention_mask == 0] = -100
+            targets = build_solution_targets(
+                solution_ids, solution_attention_mask, pack
+            )
 
             output.reasoning_logits = solution_logits
             output.reasoning_target_ids = targets
@@ -948,45 +967,70 @@ class ConceptPredictor(nn.Module):
     ) -> PredictorOutput:
         """Autoregressive greedy generation (total_C = 63 sequential steps).
 
+        PADDING-GEOMETRY FIX (vs legacy ``hidden[:, -1:, :]``):
+            The legacy code read the last packed position of Q to obtain
+            the "last real Q hidden" that produces slot 0.  Under
+            right-padded Q with variable lengths, position -1 is a PAD
+            token for short rows, so slot 0 was read from a pad-token
+            hidden.  This path gathers the last real Q hidden per row via
+            a side-agnostic index ``(q_mask * arange).argmax(-1)``, which
+            works for both left- and right-padded Q.
+
+        For subsequent AR steps we pass explicit ``position_ids`` so that
+        each new concept token has RoPE position ``q_len[i] + (t - 1)``
+        — distance from the new concept slot to the last real Q token is
+        uniformly ``t`` across the batch, regardless of padding side.
+
         State maintained across steps:
             pkv           — HuggingFace past_key_values (KV cache).
             running_mask  — full attention mask covering everything in
                             the cache so far.
 
-        Loop diagram (B=4, L_Q=40, total_C=63, D_enc=896):
+        Loop diagram (B=4, L_Q_pad=40, total_C=63, D_enc=896):
 
             step 0 (consume question):
-                x = Q_embeds                   [4,  40, 896]
-                running_mask                   [4,  40]
+                x = Q_embeds                             [4, 40, 896]
+                running_mask                             [4, 40]
                 backbone(x, use_cache=True)
                     → pkv (covers 40 positions)
-                    → hidden.last_hidden_state [4,  40, 896]
-                hidden_last = hidden[:, -1:, :] [4,  1,  896]
-                slot 0 = concept_head(hidden_last)  [4, 1, D]
+                    → hidden_full [4, 40, 896]
+                last_real_idx = (q_mask * arange).argmax(-1)   [4]
+                hidden_last = hidden_full[row, last_real_idx]  [4, 1, 896]
+                slot 0 = concept_head(hidden_last)             [4, 1, D]
 
             step t ∈ [1, 62] (consume prev slot):
-                prev = slot_{t-1}              [4,  1,   D]
-                x = back_decode(prev)+lvl+pos  [4,  1,   896]
-                running_mask ← concat +1       [4, 40+t]
-                backbone(x, pkv, use_cache)
+                prev = slot_{t-1}                        [4, 1, D]
+                x = back_decode(prev)+lvl+pos            [4, 1, 896]
+                position_ids = q_len + t - 1             [4, 1]
+                running_mask ← concat +1                 [4, 40+t]
+                backbone(x, pkv, position_ids, use_cache)
                     → pkv (covers 40+t+1 positions)
-                    → hidden.last_hidden_state [4,  1,   896]
-                slot t = concept_head(hidden.last_hidden_state[:, -1:, :])
+                    → hidden_last [4, 1, 896]
+                slot t = concept_head(hidden_last)
 
             After 63 steps:
-                flat_predicted = cat(slots, dim=1)   [4, 63, D]
+                flat_predicted = cat(slots, dim=1)       [4, 63, D]
                 split by level_lengths → per-level list.
 
         Args:
-            question_ids: [B, L_Q].
-            question_attention_mask: [B, L_Q] or None.
+            question_ids: [B, L_Q_pad].
+            question_attention_mask: [B, L_Q_pad] or None.  None means
+                every question is full-length (no padding).
 
         Returns:
             PredictorOutput with predicted_concepts; gt_concepts=None.
         """
         B = question_ids.shape[0]
+        L_Q_pad = question_ids.shape[1]
         device = question_ids.device
         backbone = self._get_backbone()
+
+        # Synthesize an all-ones mask if caller omitted one, so the
+        # per-row last-real-idx gather logic has something to operate on.
+        if question_attention_mask is None:
+            q_mask = torch.ones(B, L_Q_pad, device=device, dtype=torch.long)
+        else:
+            q_mask = question_attention_mask
 
         # ================================================================
         # Step 0: consume the question and emit the first concept slot.
@@ -994,22 +1038,29 @@ class ConceptPredictor(nn.Module):
         Q_embeds = self._embed_questions(question_ids)
         out = backbone(
             inputs_embeds=Q_embeds,
-            attention_mask=question_attention_mask,
+            attention_mask=q_mask,
             use_cache=True,
         )
         pkv = out.past_key_values
-        hidden_last = out.last_hidden_state[:, -1:, :]
+        hidden_full = out.last_hidden_state  # [B, L_Q_pad, D_enc]
+
+        # Per-row last-real-Q position — side-agnostic.
+        # For right-pad q_mask=[1,1,1,1,1,0,0,0]:
+        #   arange=[0..7], q_mask*arange=[0,1,2,3,4,0,0,0], argmax=4.  ✓
+        # For left-pad  q_mask=[0,0,0,1,1,1,1,1]:
+        #   q_mask*arange=[0,0,0,3,4,5,6,7], argmax=7.                 ✓
+        arange_Lq = torch.arange(L_Q_pad, device=device, dtype=torch.long)
+        last_real_idx = (q_mask.long() * arange_Lq.unsqueeze(0)).argmax(dim=-1)  # [B]
+        q_len = q_mask.sum(dim=1).to(torch.long)  # [B]
+        row_idx = torch.arange(B, device=device, dtype=torch.long)
+        hidden_last = hidden_full[row_idx, last_real_idx].unsqueeze(1)  # [B, 1, D_enc]
+
         C_0 = self.concept_head(hidden_last)
         flat_slots: List[torch.Tensor] = [C_0]
 
         # Running full attention mask so the backbone knows how many
         # positions the cache covers (needed for RoPE / ALiBi).
-        if question_attention_mask is not None:
-            running_mask = question_attention_mask
-        else:
-            running_mask = torch.ones(
-                B, Q_embeds.shape[1], device=device, dtype=torch.long
-            )
+        running_mask = q_mask
 
         # ================================================================
         # Steps 1..total_C-1: each step feeds one lifted concept and
@@ -1034,9 +1085,19 @@ class ConceptPredictor(nn.Module):
                 ],
                 dim=1,
             )
+
+            # Explicit per-row RoPE position for the new concept token.
+            # Concept slot (t - 1) sits immediately after the real Q tail,
+            # so its real position is q_len[i] + (t - 1).  Without this,
+            # HF would assign position L_Q_pad + t - 1 — correct only for
+            # full-length rows, too-far for short rows with right-padded
+            # Q, too-close for rows with left-padded Q.
+            position_ids = (q_len + (t - 1)).unsqueeze(1)  # [B, 1]
+
             out = backbone(
                 inputs_embeds=x,
                 attention_mask=running_mask,
+                position_ids=position_ids,
                 past_key_values=pkv,
                 use_cache=True,
             )
