@@ -168,7 +168,6 @@ import torch.nn as nn
 from peft import LoraConfig, get_peft_model
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-
 # =========================================================================
 # Output Dataclass (identical to Option X)
 # =========================================================================
@@ -392,10 +391,7 @@ class ConceptPredictorParallel(nn.Module):
         #     level_queries[5] : [32, 896]
         # Total: 63 * 896 ≈ 56k extra params.
         self.level_queries = nn.ParameterList(
-            [
-                nn.Parameter(torch.randn(Lk, D_enc))
-                for Lk in level_lengths
-            ]
+            [nn.Parameter(torch.randn(Lk, D_enc)) for Lk in level_lengths]
         )
 
         # ================================================================
@@ -571,15 +567,9 @@ class ConceptPredictorParallel(nn.Module):
         B, N, _ = concepts_flat.shape
         emb = self.back_decode(concepts_flat)
 
-        slot_ids = torch.arange(
-            start_slot, start_slot + N, device=emb.device
-        )
-        lvl = self.level_embeddings(
-            self._level_ids_flat.to(emb.device)[slot_ids]
-        )
-        pos = self.position_embeddings(
-            self._pos_ids_flat.to(emb.device)[slot_ids]
-        )
+        slot_ids = torch.arange(start_slot, start_slot + N, device=emb.device)
+        lvl = self.level_embeddings(self._level_ids_flat.to(emb.device)[slot_ids])
+        pos = self.position_embeddings(self._pos_ids_flat.to(emb.device)[slot_ids])
         markers = (lvl + pos).unsqueeze(0).expand(B, -1, -1)
         if markers.dtype != emb.dtype:
             markers = markers.to(emb.dtype)
@@ -641,9 +631,7 @@ class ConceptPredictorParallel(nn.Module):
         q_n = self.query_norm(queries)
         c_n = self.context_norm(context)
 
-        attn_out, _ = self.cross_attn(
-            query=q_n, key=c_n, value=c_n, need_weights=False
-        )
+        attn_out, _ = self.cross_attn(query=q_n, key=c_n, value=c_n, need_weights=False)
 
         # Residual ensures a non-degenerate signal even if the attention
         # head is nearly zero at initialisation.
@@ -689,9 +677,7 @@ class ConceptPredictorParallel(nn.Module):
                 question_ids, question_attention_mask, gt_concepts
             )
         else:
-            out = self._forward_inference(
-                question_ids, question_attention_mask
-            )
+            out = self._forward_inference(question_ids, question_attention_mask)
 
         if solution_ids is not None:
             if solution_attention_mask is None:
@@ -760,9 +746,7 @@ class ConceptPredictorParallel(nn.Module):
 
         # -------- Stage 1 — build LLM input and get hidden H --------
         concepts_flat = torch.cat(gt_concepts, dim=1)
-        concept_embeds = self._build_concept_input_embeds(
-            concepts_flat, start_slot=0
-        )
+        concept_embeds = self._build_concept_input_embeds(concepts_flat, start_slot=0)
 
         Q_embeds = self._embed_questions(question_ids)
         L_Q = Q_embeds.shape[1]
@@ -777,9 +761,7 @@ class ConceptPredictorParallel(nn.Module):
             concept_mask = torch.ones(
                 B, total_C, device=device, dtype=question_attention_mask.dtype
             )
-            attention_mask = torch.cat(
-                [question_attention_mask, concept_mask], dim=1
-            )
+            attention_mask = torch.cat([question_attention_mask, concept_mask], dim=1)
         else:
             attention_mask = None
 
@@ -972,9 +954,7 @@ class ConceptPredictorParallel(nn.Module):
             solution_attention_mask: [B, L_S].
         """
         if question_attention_mask is None:
-            raise ValueError(
-                "question_attention_mask is required for reasoning loss."
-            )
+            raise ValueError("question_attention_mask is required for reasoning loss.")
 
         device = question_ids.device
         B = question_ids.shape[0]
@@ -992,9 +972,7 @@ class ConceptPredictorParallel(nn.Module):
         if concept_embeds.dtype != Q_embeds.dtype:
             concept_embeds = concept_embeds.to(Q_embeds.dtype)
 
-        decoder_input_embeds = torch.cat(
-            [Q_embeds, concept_embeds, S_embeds], dim=1
-        )
+        decoder_input_embeds = torch.cat([Q_embeds, concept_embeds, S_embeds], dim=1)
         concept_mask = torch.ones(
             B, total_C, device=device, dtype=question_attention_mask.dtype
         )

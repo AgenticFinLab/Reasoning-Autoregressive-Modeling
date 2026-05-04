@@ -177,7 +177,6 @@ import torch.nn as nn
 from peft import LoraConfig, get_peft_model
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-
 # =========================================================================
 # Output Dataclass — same interface losses.py consumes
 # =========================================================================
@@ -648,12 +647,8 @@ class ConceptPredictor(nn.Module):
         emb = self.back_decode(concepts_flat)
 
         slot_ids = torch.arange(start_slot, end_slot, device=emb.device)
-        lvl = self.level_embeddings(
-            self._level_ids_flat.to(emb.device)[slot_ids]
-        )
-        pos = self.position_embeddings(
-            self._pos_ids_flat.to(emb.device)[slot_ids]
-        )
+        lvl = self.level_embeddings(self._level_ids_flat.to(emb.device)[slot_ids])
+        pos = self.position_embeddings(self._pos_ids_flat.to(emb.device)[slot_ids])
 
         # Expand [N, D_enc] markers to [B, N, D_enc] via broadcasting.
         markers = (lvl + pos).unsqueeze(0).expand(B, -1, -1)
@@ -707,9 +702,7 @@ class ConceptPredictor(nn.Module):
                 question_ids, question_attention_mask, gt_concepts
             )
         else:
-            out = self._forward_inference(
-                question_ids, question_attention_mask
-            )
+            out = self._forward_inference(question_ids, question_attention_mask)
 
         if solution_ids is not None:
             if solution_attention_mask is None:
@@ -781,9 +774,7 @@ class ConceptPredictor(nn.Module):
 
         # Step 2: lift to D_enc + attach slot markers.
         # Shape: [B, total_C, D_enc].
-        concept_embeds = self._build_concept_input_embeds(
-            concepts_flat, start_slot=0
-        )
+        concept_embeds = self._build_concept_input_embeds(concepts_flat, start_slot=0)
         total_C = concept_embeds.shape[1]
 
         # Step 3: question embeddings via backbone.embed_tokens.
@@ -805,9 +796,7 @@ class ConceptPredictor(nn.Module):
             concept_mask = torch.ones(
                 B, total_C, device=device, dtype=question_attention_mask.dtype
             )
-            attention_mask = torch.cat(
-                [question_attention_mask, concept_mask], dim=1
-            )
+            attention_mask = torch.cat([question_attention_mask, concept_mask], dim=1)
         else:
             attention_mask = None
 
@@ -1028,9 +1017,7 @@ class ConceptPredictor(nn.Module):
             solution_attention_mask: [B, L_S].
         """
         if question_attention_mask is None:
-            raise ValueError(
-                "question_attention_mask is required for reasoning loss."
-            )
+            raise ValueError("question_attention_mask is required for reasoning loss.")
 
         device = question_ids.device
         B = question_ids.shape[0]
@@ -1053,9 +1040,7 @@ class ConceptPredictor(nn.Module):
             concept_embeds = concept_embeds.to(Q_embeds.dtype)
 
         # Step 4: concatenate — [B, L_Q + total_C + L_S, D_enc].
-        decoder_input_embeds = torch.cat(
-            [Q_embeds, concept_embeds, S_embeds], dim=1
-        )
+        decoder_input_embeds = torch.cat([Q_embeds, concept_embeds, S_embeds], dim=1)
 
         # Step 5: attention mask — [B, L_Q + total_C + L_S].
         concept_mask = torch.ones(
