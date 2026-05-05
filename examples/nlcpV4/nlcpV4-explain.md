@@ -8,12 +8,12 @@ We use a two-level subscript **C_{k,j}** to unambiguously distinguish inter-leve
 
 | Symbol      | Meaning                                                       | Example                            |
 |-------------|---------------------------------------------------------------|------------------------------------|
-| **K**       | Total number of levels                                        | K=6 (levels 0 to 5)                |
-| **k**       | Level index (inter-level)                                     | k ∈ {0, 1, ..., K-1}               |
-| **j**       | Concept slot within level k (intra-level)                     | j ∈ {0, 1, ..., L_k-1}             |
 | **C_{k,j}** | The j-th concept at level k                                   | C_{5,17} = 18th concept at level 5 |
-| **L_k**     | Number of concept slots at level k                            | L_k = 2^k for k < K                |
 | **C_k**     | All concepts at level k: [C_{k,0}, C_{k,1}, ..., C_{k,L_k-1}] | C_5 has shape [B, 32, D]           |
+| **j**       | Concept slot within level k (intra-level)                     | j ∈ {0, 1, ..., L_k-1}             |
+| **k**       | Level index (inter-level)                                     | k ∈ {0, 1, ..., K-1}               |
+| **K**       | Total number of levels                                        | K=6 (levels 0 to 5)                |
+| **L_k**     | Number of concept slots at level k                            | L_k = 2^k for k < K                |
 
 Level configuration (K=6): L_0=1, L_1=2, L_2=4, L_3=8, L_4=16, L_5=32 (total: 63 concepts)
 

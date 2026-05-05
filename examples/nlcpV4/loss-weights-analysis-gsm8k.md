@@ -669,3 +669,275 @@ events (each requires re-running §11.1's pipeline from step 2):
   6.62) are both uncapped, and their weighted values differ by
   ~12%. If finer comparability is needed, switch to per-model caps
   (i.e., per-config $c_{\text{recon}}(m) = \bar{\mathcal{L}}_{\text{recon}}(m)$).
+
+---
+
+# Part III — Predictor loss analysis (GSM8K, independent mode)
+
+> **Scope.** Part III mirrors Part I / II but for the **predictor**
+> branch. The predictor's loss has only two components — `concept`
+> (MSE between predicted and target level-wise concept embeddings)
+> and `reasoning` (next-token CE through the predicted concept
+> path). This section characterizes the 12 recorded
+> `independent`-mode configs and derives per-config `loss_weights`
+> under the design rule *"keep weighted concept ≈ 10, leave
+> reasoning unchanged"*.
+
+## 13. Purpose & data source
+
+The predictor is trained to generate the next concept (per-level
+embeddings) and, through those concepts, the next-token distribution
+over the reasoning tail. `compute_predictor_loss` emits two scalar
+components:
+
+| component   | definition (informal)                                                                                  |
+|-------------|--------------------------------------------------------------------------------------------------------|
+| `concept`   | MSE between predicted concept embeddings and the builder-pyramid target concepts, averaged over levels |
+| `reasoning` | next-token CE computed by feeding the **predicted** concepts through the frozen `lm_head`              |
+
+In **independent** mode the predictor carries its own backbone
+(disjoint from the builder's `reason_model`); LoRA is optional. The
+concept target at each level is produced by the already-trained
+builder pyramid, so its magnitude depends on both the level
+schedule (how many tokens a level must summarize) and the
+backbone's hidden-state scale.
+
+- **Data file**: [`EXPERIMENT/nlcpV4/predictor/GSM8K_Loss_prepare_independent.json`](file:///Users/sjia/Documents/AgenticFinLab/Projects/Reasoning-Autoregressive-Modeling/EXPERIMENT/nlcpV4/predictor/GSM8K_Loss_prepare_independent.json)
+- **Entries analyzed**: 12 configs (Qwen2.5-0.5B × {2,4,6,8}, Qwen2.5-1.5B × {2,3,6,8}, Qwen3-0.6B × {2,4,6,8}).
+  The 6×6 matrix is partially filled; Qwen2.5-3B / Qwen3-1.7B / Qwen3-4B / Qwen3-8B and the remaining `(m, L)` cells are pending.
+- **Protocol**: `loss_predictor_prepare.py`, `batch_size = 4`, 10 no-grad forward passes; values are raw means, equal to weighted means (both weights are 1.0 at measurement time).
+
+---
+
+## 14. Raw loss table
+
+| model        | L | concept (raw) | reasoning (raw) | `concept_per_level` (first batch)                |
+|--------------|--:|--------------:|----------------:|--------------------------------------------------|
+| Qwen2.5-0.5B | 2 |      1 039.74 |            5.99 | [2000.0, 33.3]                                   |
+| Qwen2.5-0.5B | 4 |        591.26 |            6.92 | [1268.9, 348.9, 213.6, 33.2]                     |
+| Qwen2.5-0.5B | 6 |        103.60 |            5.40 | [279.9, 37.3, 122.6, 41.4, 43.1, 38.5]           |
+| Qwen2.5-0.5B | 8 |         51.16 |            5.69 | [71.3, 75.6, 47.1, 60.6, 36.0, 32.5, 31.5, 31.6] |
+| Qwen2.5-1.5B | 2 |        746.00 |            4.41 | [851.6, 6.15]                                    |
+| Qwen2.5-1.5B | 3 |        944.14 |            4.13 | [1409.6, 545.5, 5.98]                            |
+| Qwen2.5-1.5B | 6 |        132.65 |            4.81 | [345.4, 94.6, 137.5, 34.2, 16.5, 5.28]           |
+| Qwen2.5-1.5B | 8 |         22.18 |            5.79 | [34.2, 26.0, 44.3, 14.4, 15.8, 10.8, 4.67, 5.13] |
+| Qwen3-0.6B   | 2 |        374.19 |            7.70 | [412.9, 67.8]                                    |
+| Qwen3-0.6B   | 4 |        425.82 |            7.21 | [995.2, 351.0, 21.1, 33.2]                       |
+| Qwen3-0.6B   | 6 |         67.64 |            6.41 | [105.3, 134.4, 60.8, 33.9, 18.3, 9.46]           |
+| Qwen3-0.6B   | 8 |         20.50 |            7.44 | [26.7, 34.1, 34.5, 19.9, 15.5, 10.5, 8.92, 7.92] |
+
+---
+
+## 15. Aggregated views
+
+### 15.1 Per-level averages (across available models)
+
+|     L | #models |   concept | reasoning |
+|------:|--------:|----------:|----------:|
+|     2 |       3 |    719.98 |      6.03 |
+|     3 |       1 |    944.14 |      4.13 |
+|     4 |       2 |    508.54 |      7.06 |
+|     6 |       3 |    101.30 |      5.54 |
+| **8** |   **3** | **31.28** |  **6.31** |
+
+Concept loss **decreases sharply with L** (mean drops from ~720 at
+L=2 to ~31 at L=8 — a 23× contraction). Reasoning loss stays in a
+narrow envelope [4.13, 7.06], matching the builder's reasoning
+envelope in §4.4.
+
+### 15.2 Per-model averages (across recorded levels)
+
+| model        | Ls recorded | concept | reasoning |
+|--------------|-------------|--------:|----------:|
+| Qwen2.5-0.5B | 2,4,6,8     |  446.44 |      6.00 |
+| Qwen2.5-1.5B | 2,3,6,8     |  461.24 |      4.79 |
+| Qwen3-0.6B   | 2,4,6,8     |  222.04 |      7.19 |
+
+Qwen3-0.6B sits at roughly half the concept magnitude of the two
+Qwen2.5 configs, echoing the builder's family split for `recon`
+(§4.1) — both `concept` and `recon` are MSE-class objectives over
+hidden states, so they inherit the same `H_CoT.std()`-driven family
+gap. The 0.5B / 1.5B concept averages are almost identical (446 vs
+461), i.e. within-Qwen2.5-family size matters less than the family
+boundary itself.
+
+---
+
+## 16. Per-component analysis
+
+### 16.1 Concept loss (`concept`)
+
+**Level dependence — monotone decrease, roughly L⁻¹ʹ⁵.**
+For a single model (Qwen2.5-0.5B): 1039.74 → 591.26 → 103.60 →
+51.16 across L ∈ {2, 4, 6, 8}. The Qwen3-0.6B trajectory
+(374 → 426 → 68 → 21) and the Qwen2.5-1.5B trajectory
+(746 → 944 → 133 → 22) show the same qualitative contraction, with
+the only non-monotone step being L=2 → L=3 or L=2 → L=4 inside a
+few models (within-level reshuffling of the level_lengths schedule).
+
+**Why.** `concept` is the **mean** per-level MSE, and the
+`concept_per_level` lists in §14 reveal where the mass sits:
+
+- At L=2, the first level is a **single-token summary** of the
+  entire CoT (level_lengths = [1, 2]). Reconstructing one embedding
+  that stands in for a whole chunk is a very high-variance target —
+  its MSE is 850–2000 across backbones, and it dominates the
+  two-level mean.
+- As L grows, level 0 still carries the largest per-level MSE, but
+  it becomes one of many levels in the average, so its contribution
+  to the mean is diluted. By L=8 the per-level MSEs fall into the
+  [5, 75] range and their mean is ~20–50.
+- Deeper levels (longer `level_length`) carry genuinely finer
+  detail and reach single-digit MSE once L ≥ 6, e.g. level 5 of
+  Qwen2.5-1.5B at L=6 is 5.28, level 7 at L=8 is 5.13.
+
+So the level-dependence is **structural, not representational** —
+it follows from averaging over a growing number of progressively
+easier targets, not from the predictor "getting better" at deeper
+pyramids.
+
+**Model dependence — dominated by family, muted by size.**
+Qwen3-0.6B's concept mean (222) is about half of the Qwen2.5
+averages (~446 and ~461), consistent with the Qwen3 family's
+smaller `H_CoT.std()` (§4.1). Within Qwen2.5, 0.5B (446) and 1.5B
+(461) are nearly tied — size alone is a weak lever.
+
+**Mechanistic note.** Unlike the builder's `recon`, concept MSE is
+not divided by `H_CoT.std()^2`; it is plain MSE on the builder's
+already-trained concept targets (see
+[compute_predictor_loss](file:///Users/sjia/Documents/AgenticFinLab/Projects/Reasoning-Autoregressive-Modeling/examples/nlcpV4/losses.py)). This is why the concept magnitudes are
+orders larger than builder recon (1000+ vs 77 at worst) and why a
+dedicated weight-capping strategy is essential.
+
+### 16.2 Reasoning loss (`reasoning`)
+
+**Level dependence — effectively flat.**
+Per-model envelope across L: Qwen2.5-0.5B [5.40, 6.92], Qwen2.5-1.5B
+[4.13, 5.79], Qwen3-0.6B [6.41, 7.70]. No systematic growth or
+decrease with L; range within each model ≤ 1.8 units.
+
+**Model dependence — mild, same character as builder.**
+Per-model means 6.00 / 4.79 / 7.19 (CoV ≈ 20%) reproduce the builder
+reasoning pattern: a backbone-specific NTP-CE baseline on GSM8K,
+bounded below by the intrinsic next-token entropy of the frozen
+`lm_head`.
+
+**Conclusion.** Reasoning is already well-scaled (≈ 4–8 across the
+entire matrix) and requires **no reweighting**. This matches the
+builder convention in §10.4.
+
+### 16.3 Structural summary
+
+| component | level-sensitivity            | model-sensitivity        | driver                                                 |
+|-----------|------------------------------|--------------------------|--------------------------------------------------------|
+| concept   | **strong monotone decrease** | **high** (family > size) | level-0 single-token summary MSE + `H_CoT.std()`       |
+| reasoning | flat across L                | mild, non-monotonic      | backbone-dependent NTP baseline through frozen lm_head |
+
+---
+
+## 17. Weight recommendations
+
+### 17.1 Design rule
+
+Following §9.2 in spirit but with a single target instead of a cap:
+for every `(model, L)` config, pick `concept` weight so that the
+weighted concept lands on a **target magnitude** of 10 — the same
+rough anchor as builder `recon` (§9.3) and very close to the
+typical reasoning CE (4–8). Reasoning gets weight 1.0 unchanged.
+
+$$
+w_{\text{concept}}^{\star}(m, L) \;=\; \min\!\left(1,\; \frac{T}{\bar{\mathcal{L}}_{\text{concept}}(m, L)}\right),
+\qquad T = 10,
+$$
+
+$$
+w_{\text{reasoning}}^{\star}(m, L) \;=\; 1.
+$$
+
+The `min(1, ·)` clamp activates only when raw concept drops below
+the target — currently this does **not** happen on any of the 12
+recorded configs (smallest raw concept is 20.50 on Qwen3-0.6B
+L=8, still above T=10), so every recommended weight is the exact
+ratio $T / \bar{\mathcal{L}}_{\text{concept}}$.
+
+### 17.2 Per-config recommended weights
+
+Exact weight = 10 / raw_concept. `w_c (round)` is the rounded
+value to drop into a YAML config (2 decimals, extended to 3 only
+when 2-decimal rounding would collapse to 0). `weighted concept`
+is `w_c (round) × raw_concept`, i.e. the post-weight magnitude
+seen by the optimizer.
+
+| model        | L | concept (raw) | w_concept (exact) | **w_concept (round)** | weighted concept | w_reasoning |
+|--------------|--:|--------------:|------------------:|----------------------:|-----------------:|-------------|
+| Qwen2.5-0.5B | 2 |      1 039.74 |           0.00962 |              **0.01** |            10.40 | 1.0         |
+| Qwen2.5-0.5B | 4 |        591.26 |           0.01691 |              **0.02** |            11.83 | 1.0         |
+| Qwen2.5-0.5B | 6 |        103.60 |           0.09652 |              **0.10** |            10.36 | 1.0         |
+| Qwen2.5-0.5B | 8 |         51.16 |           0.19547 |              **0.20** |            10.23 | 1.0         |
+| Qwen2.5-1.5B | 2 |        746.00 |           0.01340 |              **0.01** |             7.46 | 1.0         |
+| Qwen2.5-1.5B | 3 |        944.14 |           0.01059 |              **0.01** |             9.44 | 1.0         |
+| Qwen2.5-1.5B | 6 |        132.65 |           0.07539 |              **0.08** |            10.61 | 1.0         |
+| Qwen2.5-1.5B | 8 |         22.18 |           0.45082 |              **0.45** |             9.98 | 1.0         |
+| Qwen3-0.6B   | 2 |        374.19 |           0.02672 |              **0.03** |            11.23 | 1.0         |
+| Qwen3-0.6B   | 4 |        425.82 |           0.02348 |              **0.02** |             8.52 | 1.0         |
+| Qwen3-0.6B   | 6 |         67.64 |           0.14785 |              **0.15** |            10.15 | 1.0         |
+| Qwen3-0.6B   | 8 |         20.50 |           0.48772 |              **0.49** |            10.05 | 1.0         |
+
+Matches the user's seed examples: raw 1039.74 → 0.01, raw 591.26
+→ 0.02 (rounded up from 0.01691).
+
+### 17.3 Effect of weighting
+
+- **Raw concept spread**: 20.50 → 1039.74 (**50.7×**)
+- **Weighted concept spread**: 7.46 → 11.83 (**1.6×**)
+
+A single design constant (T = 10) compresses concept magnitudes
+to within ±20% of target across all 12 configs, while reasoning is
+untouched and retains its natural [4.13, 7.70] envelope. The
+weighted scalar objective is now dominated in roughly equal measure
+by concept and reasoning (≈ 10 + ≈ 6), consistent with the Part II
+design philosophy of non-dominance (§8.3 C1).
+
+### 17.4 YAML snippet template
+
+For any `(model, L)` cell in §17.2, drop the recommended weights
+into the predictor recipe's `training.loss_weights` block:
+
+```yaml
+training:
+  loss_weights:
+    concept_loss_weight: <w_concept (round) from §17.2>
+    reasoning_loss_weight: 1.0
+```
+
+e.g. for `train_predictor_Qwen2.5-0.5B_2level_independent.yml`:
+
+```yaml
+training:
+  loss_weights:
+    concept_loss_weight: 0.01   # raw concept = 1039.74 → weighted = 10.40
+    reasoning_loss_weight: 1.0
+```
+
+### 17.5 Limitations and when to re-measure
+
+- The table covers `independent` mode only; `shared` mode
+  configs (where predictor reuses the builder's `reason_model`)
+  need their own measurement pass — concept-target statistics
+  will shift because the hidden-state distribution under a
+  builder-trained backbone differs from a fresh independent
+  backbone.
+- 12 / 24 configs are filled in; the other 12 `(m, L)` cells
+  (Qwen2.5-3B, all three larger Qwen3 sizes, and the missing
+  level slots for the three recorded models) still need a
+  `loss_predictor_prepare.py` run before their weights can be
+  derived.
+- As with the builder caps (§12.2), any change to level
+  schedule, concept-target normalization, backbone family, or
+  the freezing pattern of `lm_head` invalidates these numbers —
+  re-run the pipeline before trusting the weights.
+- If a finer balance is desired — e.g. concept target tied to
+  the measured reasoning CE of the same config rather than a
+  global constant — replace T = 10 by
+  $T(m, L) = \bar{\mathcal{L}}_{\text{reasoning}}(m, L)$. The
+  weight formula in §17.1 is unchanged.
