@@ -85,54 +85,189 @@ Level 5 = [C_{5,0},  C_{5,1},  ...,  C_{5,31}]
 
 This section provides a high-level overview of how the hybrid design achieves the research goal: **compressing CoT into a hierarchical concept pyramid for efficient reasoning**.
 
-#### 1.4.1 The Two-Phase Pipeline
+#### 1.4.1 The Two-Stage Pipeline
+
+NLCP V4 is organised as **two sequential training stages** and a single
+autoregressive inference path. The two stages share a common notion of a
+"concept pyramid" C = [C_0, C_1, ..., C_{K-1}], but train disjoint modules
+with disjoint objectives.
+
+**Bird's-eye view of the whole pipeline**
 
 ```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                         TRAINING PHASE                                       │
-├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                              │
-│  Input: (Q, CoT, Solution)                                                   │
-│         │   │       │                                                        │
-│         │   │       └── Used to validate pyramid's reasoning capability      │
-│         │   └── Core source for building concept pyramid                     │
-│         └── Prior/context (not part of pyramid)                              │
-│                                                                              │
-│  Step 1: ConceptPyramidBuilder                                               │
-│          ├── Encodes CoT → H_CoT                                            │
-│          ├── Applies soft attention with learnable queries (1→2→4→8→16→32)   │
-│          ├── Uses residual reconstruction for coarse-to-fine decomposition   │
-│          └── Outputs: Groundtruth [C_0, C_1, ..., C_{K-1}]  (K=6 levels)    │
-│                                                                              │
-│  Step 2: ConceptPredictor (Decoder-only Transformer)                         │
-│          ├── Input sequence: [Q, C_0, C_1, ..., C_{K-1}, Solution]          │
-│          ├── Training: Teacher forcing with causal masking                   │
-│          ├── Learns: Given Q and previous concepts, predict next level       │
-│          └── Output: Predicted concepts matching Builder's groundtruth       │
-│                                                                              │
-│  Loss: L_recon + L_ordering + L_residual + L_reasoning (Builder)          │
-│        L_prediction (Predictor, MSE vs frozen Builder GT)                │
-│                                                                              │
-└─────────────────────────────────────────────────────────────────────────────┘
-                                    ↓
-                                    ↓ Trained models
-                                    ↓
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                        INFERENCE PHASE                                       │
-├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                              │
-│  Input: Q only (no CoT, no Solution)                                         │
-│                                                                              │
-│  Step 1: ConceptPredictor autoregressively generates                         │
-│          Q → Ĉ_0 → Ĉ_1 → Ĉ_2 → Ĉ_3 → Ĉ_4 → Ĉ_5                              │
-│                                                                              │
-│  Step 2: Solution Decoder                                                    │
-│          [Q, Ĉ_0, Ĉ_1, Ĉ_2, Ĉ_3, Ĉ_4, Ĉ_5] → Solution                       │
-│                                                                              │
-│  Output: Solution (without explicit CoT generation)                          │
-│                                                                              │
-└─────────────────────────────────────────────────────────────────────────────┘
+═══════════════════════════════════════════════════════════════════════════════
+                    STAGE 1 — ConceptPyramidBuilder (TRAIN)
+═══════════════════════════════════════════════════════════════════════════════
+
+   Input: (Q, CoT, S)                                   [CoT is visible here]
+                 │
+                 ▼
+    ┌────────────────────────────────────────────────────────┐
+    │ frozen reason_model.embed(CoT)  →  H_CoT   [B, L, D_e] │
+    │ encode: LayerNorm(Linear) → H_proj         [B, L, D]   │
+    └────────────────────────────────────────────────────────┘
+                 │
+                 ▼                       ┌─────────────── residual ledger ──────────────┐
+    ┌─────────────────────────────┐      │ H_hat_0 = 0        H_rest_0 = H_proj          │
+    │ K = 6 levels, L_k = 1..32   │      │ H_hat_{k+1} = H_hat_k + R_k                    │
+    │ for k in 0..K-1:            │◄─────┤ H_rest_{k+1}= H_rest_k − R_k                   │
+    │   A_k = softmax(Q_k·H_restᵀ) │      │ R_k = A_kᵀ · C_k          (rank ≤ L_k)         │
+    │   C_k = level_proj(A_k·H_rest)│     └────────────────────────────────────────────────┘
+    └─────────────────────────────┘
+                 │ produces pyramid: [C_0, C_1, ..., C_{K-1}]  ← groundtruth for Stage 2
+                 │
+     ┌───────────┴───────────┬────────────────────┬─────────────────────────┐
+     ▼                       ▼                    ▼                         ▼
+  L_recon               L_ordering            L_residual              L_reasoning
+  ‖back_proj(H_hat_K)   exp_pos[C_{k,j}]      ‖H_rest_K‖₁         CE on S via
+    − H_CoT‖²            < exp_pos[C_{k,j+1}]                     frozen reason_model
+                                                                   fed [Q; C; S]
+
+═══════════════════════════════════════════════════════════════════════════════
+                    STAGE 2 — ConceptPredictor (TRAIN)
+═══════════════════════════════════════════════════════════════════════════════
+
+          (Builder frozen) ──► groundtruth pyramid C_gt = [C_0, ..., C_{K-1}]
+                                          │ detach()
+          Input: (Q, C_gt, S)   [Q and C_gt are teacher-forced; no CoT used]
+                 │                        │                       │
+                 ▼                        ▼                       ▼
+    ┌─────────────────────────────────────────────────────────────────────┐
+    │  back_proj(C_gt)  +  level_emb  +  position_emb        (slot markers)│
+    │                                                                     │
+    │  pack_qcs_sequences → one contiguous row per sample:                │
+    │                                                                     │
+    │  ┌──────────────┬───────────────────────────────────┬────────────┐  │
+    │  │   Q tokens   │ C_0 C_1,C_1 C_2,C_2,C_2,C_2 ... │  S tokens  │  │
+    │  │  (real Q_len)│         Σ L_k slots              │ (solution) │  │
+    │  └──────────────┴───────────────────────────────────┴────────────┘  │
+    │                                                                     │
+    │  reason_model (causal LM, SHARED or INDEPENDENT) — one pass         │
+    │                                                                     │
+    │     hidden states H [B, T, D_enc]                                   │
+    │              ├── gather concept positions → concept_head → Ĉ_k      │
+    │              └── gather solution positions → lm_head → logits_S     │
+    └─────────────────────────────────────────────────────────────────────┘
+                 │                                       │
+                 ▼                                       ▼
+          L_concept  = (1/K) Σ_k MSE(Ĉ_k, C_k)   L_reasoning = CE(logits_S, S)
+
+═══════════════════════════════════════════════════════════════════════════════
+                    INFERENCE — AR generation from Q only
+═══════════════════════════════════════════════════════════════════════════════
+
+                          Input: Q      (no CoT, no S)
+                                │
+                                ▼
+    ┌────── Step 0: prime KV cache ──────────────────────────────┐
+    │ h = reason_model(embed(Q))                                 │
+    │ Ĉ_0 = concept_head(h[last_real_Q])                          │
+    │ cache = past_kv                                             │
+    └────────────────────────────────────────────────────────────┘
+                                │
+           ┌────────────────────┴──── loop t = 1..Σ L_k − 1 ────────────┐
+           ▼                                                            │
+    ┌────── Step t: one concept per step ─────────────────────────┐     │
+    │ x = back_proj(Ĉ_{t-1}) + level_emb[t-1] + position_emb[t-1] │     │
+    │ h = reason_model(x, past_kv=cache, position_ids=q_len+t-1)  │─────┘
+    │ Ĉ_t = concept_head(h[-1]);   cache ← updated KV             │
+    └─────────────────────────────────────────────────────────────┘
+                                │
+                                ▼
+                 Output: [Ĉ_0, Ĉ_1, ..., Ĉ_{K-1}]
+              (downstream decoding of S not part of this document)
 ```
+
+The three boxes above correspond to the three operating modes of the codebase:
+`train_builder.py` (top), `train_predictor.py` (middle), and
+`predictor._forward_inference` (bottom). The arrows that cross stage
+boundaries are the **only** places where gradients do NOT flow:
+`C_gt` is `detach()`ed and the Builder is frozen during Stage 2.
+
+**Stage 1 — ConceptPyramidBuilder** (`examples/nlcpV4/concept_builder.py`)
+
+```
+Input : (Q, CoT, S)                         # Q = question, S = solution
+Forward :
+    H_CoT   = reason_model.embed(CoT)       # frozen embedding lookup
+    H_proj  = LayerNorm(Linear(H_CoT))      # encode CoT into concept space
+    for k in 0..K-1:                        # K = num_levels (6 for GSM8K)
+        A_k = softmax(Q_k @ H_rest_k / √D / τ)
+        C_k = level_proj_k(A_k @ H_rest_k)
+        R_k = A_kᵀ @ C_k
+        H_hat_{k+1} = H_hat_k + R_k
+        H_rest_{k+1} = H_rest_k - R_k
+    H_recon = back_proj(H_hat_K)            # map back to encoder space
+    # Reasoning probe: run frozen reason_model on [Q; concepts; S]
+Outputs : PyramidOutput {
+    concepts = [C_0, ..., C_{K-1}],         # the groundtruth pyramid
+    H_recon,                                # for reconstruction loss
+    final_residual = H_rest_K,              # for residual loss
+    exp_positions,                          # for ordering loss
+    reasoning_logits / reasoning_target_ids # for NTP reasoning loss
+}
+Loss    : L_builder = w_recon·L_recon + w_order·L_order
+                    + w_residual·L_residual + w_reasoning·L_reasoning
+```
+
+Only the encode/attend/residual modules and `back_proj` are trainable. The
+backbone `reason_model` is **frozen** throughout Stage 1 (optionally LoRA-adapted).
+
+**Stage 2 — ConceptPredictor** (`examples/nlcpV4/concept_predictor.py`)
+
+```
+Input : (Q, C_gt = [C_0, ..., C_{K-1}], S)  # C_gt comes from frozen Builder
+Forward (teacher-forced, ONE backbone pass):
+    # 1. back-decode groundtruth concepts to encoder space
+    X_cat   = back_proj(concat(C_0, ..., C_{K-1}))           # (B, Σ L_k, D_enc)
+    # 2. add slot markers
+    X_cat  += level_embeddings(_level_ids_flat)
+    X_cat  += position_embeddings(_pos_ids_flat)
+    # 3. pack [Q_b; X_cat_b; S_b] row-by-row (no internal padding)
+    packed, masks, positions = pack_qcs_sequences(...)
+    # 4. run the (shared or independent) backbone ONCE
+    H = reason_model(inputs_embeds=packed,
+                     attention_mask=masks.attention_mask,
+                     output_hidden_states=True).hidden_states[-1]
+    # 5. two readouts from the SAME hidden states
+    Ĉ_k  = concept_head(gather_concept_readout(H, masks, k))  # for k=0..K-1
+    logits_S = lm_head(gather_solution_logits(H, masks))
+Outputs : PredictorOutput {
+    predicted_concepts = [Ĉ_0, ..., Ĉ_{K-1}],   # continuous regression targets
+    gt_concepts        = [C_0, ..., C_{K-1}],
+    reasoning_logits   = logits_S,
+    reasoning_target_ids                         # S shifted by 1, pad = -100
+}
+Loss    : L_predictor = w_concept·L_concept + w_reason·L_reasoning
+```
+
+`concept_head` is a small `Linear(D_enc) → GELU → Linear(D)` MLP; the
+backbone can be **SHARED** with the Builder (aliased `reason_model` /
+`back_proj`, LoRA forbidden) or **INDEPENDENT** (own copy with optional LoRA).
+
+**Inference** (autoregressive, Q-only)
+
+```
+Input : Q
+Step 0 : run reason_model on embed(Q) → hidden h_last → Ĉ_0
+         cache KV, remember q_len
+Step t :                          # for t = 1 .. Σ L_k − 1
+    x = back_proj(Ĉ_{t-1}) + level_emb[lvl(t-1)] + pos_emb[pos(t-1)]
+    h = reason_model(inputs_embeds=x,
+                     past_key_values=cache,
+                     position_ids=[q_len + t − 1])          # explicit RoPE id
+    Ĉ_t = concept_head(h[-1])
+    cache = updated KV
+Output : [Ĉ_0, Ĉ_1, ..., Ĉ_{K-1}]    # no explicit CoT is ever generated
+```
+
+End-to-end flow (what actually changes between stages):
+
+| Stage                   | Trainable params                                          | Backbone         | Sees CoT?   | Loss                                         |
+|-------------------------|-----------------------------------------------------------|------------------|-------------|----------------------------------------------|
+| Builder                 | encode / queries / level_proj / back_proj (+ LoRA)        | frozen (+LoRA)   | Yes         | L_recon + L_order + L_residual + L_reasoning |
+| Predictor — SHARED      | level_emb, position_emb, concept_head                     | aliased, frozen  | No (Q only) | L_concept + L_reasoning                      |
+| Predictor — INDEPENDENT | back_proj, level_emb, position_emb, concept_head (+ LoRA) | own copy (+LoRA) | No (Q only) | L_concept + L_reasoning                      |
 
 #### 1.4.2 Key Design Principles
 
@@ -848,54 +983,222 @@ L_builder = L_recon + λ_order × L_ordering + λ_residual × L_residual + λ_re
 
 ### 4.2 ConceptPredictor (Phase 2: Generation)
 
-The Predictor learns to autoregressively generate the concept pyramid from Q alone, mimicking the Builder's output.
+The Predictor learns to autoregressively generate the concept pyramid
+from `Q` alone, mimicking the Builder's output. It **reuses a causal
+decoder-only LLM (`reason_model`) as its backbone** rather than introducing
+a separate Transformer; the entire concept pyramid is materialised inside
+the same sequence that the LLM already natively consumes.
 
-**Architecture**: Concept Transformer with scale-level causal masking.
-The backbone model can be configured to either:
-- Reuse the Builder's `reason_model` (shared weights, `use_shared_model: true`)
-- Load its own separate model (`use_shared_model: false`)
+#### 4.2.1 Components (`ConceptPredictor.__init__`)
 
-**Components**:
-- `q_proj + q_proj_norm`: Project question hidden states to concept space
-- `level_embeddings`: Learnable per-level embeddings [K, D] (analogous to VAR's `lvl_emb`)
-- `position_embeddings`: Within-level positional encoding
-- `concept_transformer`: Transformer blocks with scale-level causal mask
-- `concept_head`: 2-layer MLP predicting concept vectors
-- `start_token`: Learnable [1, D] token injected with question context
+| Component             | Shape / Type                                     | Role                                                                                     |
+|-----------------------|--------------------------------------------------|------------------------------------------------------------------------------------------|
+| `reason_model`        | HuggingFace causal LM                            | Shared backbone; processes `[Q; back-decoded concepts; S]` as ordinary `inputs_embeds`.  |
+| `back_proj`           | `Linear(D, D_enc, bias=False)`                   | Maps concept-space D to encoder/embedding-space D_enc so concepts can be fed to the LLM. |
+| `level_embeddings`    | `nn.Embedding(K, D_enc)`                         | Per-level marker k added to each concept slot; analogous to VAR's `lvl_emb`.             |
+| `position_embeddings` | `nn.Embedding(max_k L_k, D_enc)`                 | Within-level slot marker j; lets the backbone distinguish `C_{k,0}` from `C_{k,1}`.      |
+| `concept_head`        | `Linear(D_enc, D_enc) → GELU → Linear(D_enc, D)` | Maps backbone hidden state back to concept space to produce Ĉ.                           |
+| `_level_ids_flat`     | buffer `int64 [Σ L_k]`                           | Precomputed flat level ids `[0, 1,1, 2,2,2,2, ...]` for slot marker lookup.              |
+| `_pos_ids_flat`       | buffer `int64 [Σ L_k]`                           | Precomputed flat within-level ids `[0, 0,1, 0,1,2,3, ...]`.                              |
 
-**Training** (Teacher Forcing):
+There is **no** `q_proj`, no `q_proj_norm`, no separate `concept_transformer`,
+and no `start_token`; the question is injected simply by running its token
+embeddings through `reason_model` as the first part of the packed sequence.
+
+#### 4.2.2 Backbone modes: SHARED vs INDEPENDENT (`use_shared_model`)
+
+The Predictor supports two mutually exclusive backbone configurations,
+selected via `model.predictor.use_shared_model` in the YAML config:
+
+| Aspect                  | SHARED (`use_shared_model: true`)                                     | INDEPENDENT (`use_shared_model: false`)                                               |
+|-------------------------|-----------------------------------------------------------------------|---------------------------------------------------------------------------------------|
+| `reason_model`          | **Aliased** to `builder.reason_model` (no new weights)                | **Own copy**, loaded from `predictor_model_name`                                      |
+| `back_proj`             | **Aliased** to `builder.back_proj`                                    | **Own copy** (fresh, trainable)                                                       |
+| `tokenizer`             | **Aliased** to `builder.tokenizer`                                    | **Own instance** (from `predictor_model_name`)                                        |
+| LoRA on `reason_model`  | **Forbidden** (fail-fast: raises at init)                             | **Allowed** (default target_modules `[q_proj, v_proj]`, r=16, α=32)                   |
+| Extra trainable weights | `level_embeddings`, `position_embeddings`, `concept_head` only        | `back_proj`, `level_embeddings`, `position_embeddings`, `concept_head`, LoRA adapters |
+| Config example          | `configs/nlcpV4/GSM8K/train_predictor_Qwen2.5-0.5B_2level_shared.yml` | `configs/nlcpV4/GSM8K/train_predictor_Qwen2.5-0.5B_2level_independent.yml`            |
+
+**Design intent.** SHARED mode tests whether the *same* LLM that built the
+pyramid can also predict it, using only a small MLP head on top. INDEPENDENT
+mode decouples Builder and Predictor capacities: the Predictor may use a
+larger backbone and/or LoRA to compensate for the absence of CoT.
+
+**Visual: what is shared vs what is owned**
+
 ```
-Input:  [start_token + Q_context, C_0_gt, C_1_gt, ..., C_{K-2}_gt]
-Target: [C_0_gt, C_1_gt, ..., C_{K-1}_gt]
+           SHARED MODE (use_shared_model=True)                INDEPENDENT MODE (use_shared_model=False)
+  ┌───────────────────────────────────────┐       ┌─────────────────────────────────────┐
+  │          ConceptPyramidBuilder         │       │          ConceptPyramidBuilder         │
+  │  reason_model (frozen) ●────────────┐ │       │  reason_model (frozen)                │
+  │  back_proj            ●──────────┐│ │       │  back_proj                            │
+  │  concept_queries, level_proj, ...      ││ │       │  concept_queries, level_proj, ...      │
+  └────────────────────────────────────────┘│ │       └─────────────────────────────────────┘
+                            alias◄──────┘│ │
+                            alias◄────────┘ │       (no alias; Predictor owns its copy)
+                                                 │
+  ┌────────────────────────────────────────┘       ┌─────────────────────────────────────┐
+  │         ConceptPredictor               │       │         ConceptPredictor               │
+  │  reason_model   ◁── aliased (same obj)   │       │  reason_model    (NEW instance)        │
+  │  back_proj      ◁── aliased               │       │  back_proj       (NEW instance)        │
+  │  tokenizer      ◁── aliased               │       │  tokenizer       (NEW instance)        │
+  │                                         │       │                                         │
+  │  level_embeddings    ◆ trainable         │       │  level_embeddings    ◆ trainable         │
+  │  position_embeddings ◆ trainable         │       │  position_embeddings ◆ trainable         │
+  │  concept_head        ◆ trainable         │       │  concept_head        ◆ trainable         │
+  │                                         │       │  back_proj           ◆ trainable         │
+  │  LoRA                ✖ FORBIDDEN         │       │  LoRA on q_proj/v_proj ◆ optional adapters│
+  └────────────────────────────────────────┘       └─────────────────────────────────────┘
 
-start_token output → predicts C_0
-C_0 output positions → predicts C_1
-C_1 output positions → predicts C_2
-...
-C_{K-2} output positions → predicts C_{K-1}
+                   ●  shared object (Python alias, literally the same tensor)
+                   ◆  owned & trainable by Predictor
+                   ✖  construction fails fast if configured
 ```
 
-**Scale-Level Causal Masking** (VAR.md Section 5.3.1):
-- Start token: visible to all (like VAR's class embedding)
-- Within a level: full visibility (parallel prediction)
-- Across levels: strict causality — level k attends to levels < k only
-- `mask[i,j] = 1 if level[i] >= level[j] else 0`
+#### 4.2.3 Training forward pass (`_forward_training`, unified single pass)
 
-**Loss**:
-```
-L_predictor = (1/K) × Σ_{k=0}^{K-1} MSE(Ĉ_k, C_k.detach())
+Given a batch of `(Q, C_gt = [C_0, ..., C_{K-1}], S)`, the Predictor does
+**one** teacher-forced pass through `reason_model`:
 
-Where C_k are groundtruth concepts from frozen Builder
+```
+# 1. Back-decode groundtruth concepts to encoder space and add slot markers
+C_flat   = concat_along_slots([C_0, ..., C_{K-1}])          # (B, Σ L_k, D)
+X_concept= back_proj(C_flat)                                 # (B, Σ L_k, D_enc)
+X_concept+= level_embeddings(_level_ids_flat)                # broadcast over batch
+X_concept+= position_embeddings(_pos_ids_flat)
+
+# 2. Per-row packing: remove any internal padding between Q, C, S
+packed, masks, positions = pack_qcs_sequences(
+    q_embeds=embed_tokens(Q),        q_mask,
+    c_embeds=X_concept,              c_mask,
+    s_embeds=embed_tokens(S),        s_mask,
+)
+# masks carries per-row slot indices so we can gather later
+
+# 3. ONE pass through the (shared or independent) backbone
+out = reason_model(
+    inputs_embeds=packed,
+    attention_mask=masks.attention_mask,
+    position_ids=positions,
+    output_hidden_states=True,
+)
+H = out.hidden_states[-1]                                     # (B, T, D_enc)
+
+# 4. Two independent readouts from the SAME H
+#    — concept readout: positions that correspond to concept slots
+H_concepts = gather_concept_readout(H, masks)                 # (B, Σ L_k, D_enc)
+predicted  = concept_head(H_concepts)                         # (B, Σ L_k, D)
+[Ĉ_0, ..., Ĉ_{K-1}] = split_levels(predicted, level_lengths)
+
+#    — reasoning readout: positions that correspond to solution tokens
+reasoning_logits = gather_solution_logits(H, masks, lm_head=reason_model.lm_head)
+reasoning_target_ids = build_solution_targets(S_ids, s_mask, pad_id=-100)
 ```
 
-**Inference** (Autoregressive Generation):
+Key properties of this forward path:
+
+**Visual: the packed sequence and its two readouts**
+
+For a single row `b` in the batch (K=3, L = [1, 2, 4] for illustration):
+
 ```
-Step 0: [start + Q_context] → Ĉ_0
-Step 1: [start + Q_context, Ĉ_0] → Ĉ_1
-Step 2: [start + Q_context, Ĉ_0, Ĉ_1] → Ĉ_2
-...
-Step K-1: [start + Q_context, Ĉ_0, ..., Ĉ_{K-2}] → Ĉ_{K-1}
+ position : 0 1 2 ... q_len-1 | q_len      ...  q_len+6 | q_len+7 ... q_len+7+L_S-1
+ slot kind: Q Q Q ...    Q    | C_{0,0} C_{1,0} C_{1,1} C_{2,0} C_{2,1} C_{2,2} C_{2,3} | S S ...
+ level k  : · · · ...    ·    |   0       1       1       2       2       2       2    | · · ...
+ pos   j  : · · · ...    ·    |   0       0       1       0       1       2       3    | · · ...
+                                    │         │       │
+                                    │         │       └─ position_embeddings(j=1)
+                                    │         └───── level_embeddings(k=1)
+                                    └───────── back_proj(C_{0,0}) + …
+
+                                          CAUSAL MASK (from the backbone)
+                                   every position sees only itself + all earlier
+
+ READOUT A (concept head)                     READOUT B (lm_head)
+  positions ↑ predict the NEXT concept         positions ↑ predict NEXT solution token
+  (take q_len−1 → predicts C_{0,0}; then        (take last_C → predicts S_0; then
+   each concept’s hidden predicts the next)     each S_t → predicts S_{t+1})
+
+                           ↓ both readouts come from the SAME
+                             hidden states H produced by ONE pass
 ```
+
+Under the causal mask the dependency structure is:
+
+```
+       Q ────────────────────────────────────────────────────┐
+                                                                       ▼
+       Q,C_{0,0} ─────────────────────────────────────────────► C_{1,0}
+       Q,C_{0,0},C_{1,0} ──────────────────────────────────► C_{1,1}
+       Q,C_{0,0},C_{1,0},C_{1,1} ───────────────────────► C_{2,0}
+       …
+       Q,C_{0,0},…,C_{2,3} ────────────────────────────────────► S_0
+       …
+```
+
+So **inter-level causality (k depends on < k) and intra-level right-to-left
+ordering (j depends on < j at the same level) both fall out of the backbone's
+natural causal mask** — no custom "scale-level mask" is built anywhere in the
+code.
+
+- **One backbone pass powers two losses.** The same `H` produces both the
+  concept MSE (via `concept_head`) and the reasoning CE (via the frozen
+  `lm_head`). No separate forward is needed.
+- **No internal padding inside a row.** `pack_qcs_sequences` concatenates
+  `[Q_b; C_b; S_b]` for each row `b`, yielding a contiguous sequence that
+  the LLM sees as a single natural utterance. Padding, if any, is pushed to
+  the right edge of the batch.
+- **Teacher forcing at the concept slots.** Because `X_concept` is built
+  from **groundtruth** `C_gt` (detached from Builder), every concept slot
+  sees only past slots plus `Q`, exactly like NTP on text tokens.
+- **Slot identity via additive markers.** Inside a level, slots share the
+  same causal context; the only way the backbone can distinguish
+  `C_{k,0}` from `C_{k,1}` is through `position_embeddings`. Level identity
+  across K levels is provided analogously by `level_embeddings`.
+- **Causality is natural, not specialised.** We do **not** build a
+  scale-level causal mask by hand. The backbone's own causal mask, applied
+  to the packed `[Q; C; S]` sequence, yields the correct dependency
+  pattern: every concept slot sees `Q` plus earlier concept slots only; the
+  solution tokens see `Q` plus all concept slots.
+
+#### 4.2.4 Inference forward pass (`_forward_inference`, autoregressive with KV cache)
+
+At test time the Builder is not used; the Predictor generates
+`[Ĉ_0, ..., Ĉ_{K-1}]` from `Q` alone:
+
+```
+# Step 0 — prime the KV cache with Q
+h_Q, past_kv = reason_model(inputs_embeds=embed_tokens(Q),
+                             attention_mask=q_mask,
+                             use_cache=True,
+                             output_hidden_states=True)
+q_len        = q_mask.sum(dim=-1)                              # per-row real length
+last_real_idx= (q_mask * arange_like(q_mask)).argmax(-1)       # side-agnostic
+Ĉ_0         = concept_head(h_Q[:, last_real_idx, :])          # first concept
+
+# Step t = 1 .. Σ L_k - 1 — feed one concept at a time
+for t in range(1, total_slots):
+    x = back_proj(Ĉ_{t-1}) \
+        + level_embeddings(level_ids[t-1]) \
+        + position_embeddings(pos_ids[t-1])
+    out = reason_model(
+        inputs_embeds=x,
+        past_key_values=past_kv,
+        position_ids=torch.tensor([q_len + t - 1]),            # explicit RoPE id
+        use_cache=True,
+        output_hidden_states=True,
+    )
+    past_kv = out.past_key_values
+    Ĉ_t     = concept_head(out.hidden_states[-1][:, -1, :])
+```
+
+- **KV-cache reuse:** after priming on `Q`, every new concept costs only
+  `O(1)` transformer steps. The cache is updated in place.
+- **Explicit `position_ids = q_len + t − 1`:** required for RoPE
+  consistency; without this, the model would re-interpret step `t` as
+  position `0`, desynchronising the positional encoding.
+- **Side-agnostic length via argmax:** `last_real_idx` works for both
+  left-padded and right-padded Q batches.
 
 ### 4.3 Why This Separation?
 
@@ -981,18 +1284,66 @@ L_builder = L_recon + λ_order × L_order + λ_residual × L_residual + λ_reaso
 
 ### 5.2 ConceptPredictor Loss
 
-The Predictor's loss ensures accurate autoregressive generation of concepts.
+The Predictor optimises **two** losses drawn from the same forward pass:
+a concept regression loss (Ĉ_k vs frozen groundtruth C_k) and a reasoning
+cross-entropy loss (NTP over solution tokens). See
+[`losses.py`](file:///Users/sjia/Documents/AgenticFinLab/Projects/Reasoning-Autoregressive-Modeling/examples/nlcpV4/losses.py)
+`compute_predictor_loss` for the authoritative implementation.
+
+#### 5.2.1 Concept Loss (per-level, averaged over K)
 
 ```
-L_predictor = (1/K) × Σ_{k=0}^{K-1} MSE(Ĉ_k, C_k.detach())
+L_concept = (1/K) · Σ_{k=0}^{K-1} loss_fn(Ĉ_k, C_k.detach())
 
-Where:
-- Ĉ_k: Predicted concepts at level k
-- C_k: Groundtruth concepts from frozen Builder (detached)
+loss_fn ∈ { mse, cosine }       # selected by loss.concept_loss_type
+  mse    : F.mse_loss(Ĉ_k, C_k)
+  cosine : 1 - F.cosine_similarity(Ĉ_k, C_k, dim=-1).mean()
 ```
 
-**Training**: Teacher forcing with groundtruth concepts from frozen Builder
-**Inference**: Autoregressive generation level by level
+Properties:
+
+- **Per-level averaging** prevents fine-grained levels (which have more slots,
+  e.g. L_5 = 32) from dominating coarse levels (L_0 = 1) simply by sample count.
+- **Groundtruth is detached** from the Builder graph; the Predictor never
+  back-propagates into Builder weights.
+- `compute_predictor_concept_loss` also returns a `per_level` dict
+  `{level_0_loss: ..., level_5_loss: ...}` for diagnostic logging.
+
+#### 5.2.2 Reasoning Loss (NTP on solution tokens)
+
+```
+L_reasoning = F.cross_entropy(
+    reasoning_logits.reshape(-1, V),      # (B·T_S, V)
+    reasoning_target_ids.reshape(-1),     # shifted S tokens; pad = -100
+    ignore_index=-100,
+)
+```
+
+This is computed on **solution-position logits** extracted via
+`gather_solution_logits` from the same packed hidden states `H` used for
+`L_concept` — i.e. **one** backbone forward powers both losses. The
+logits come from `reason_model.lm_head`, whose parameters are frozen.
+Non-solution positions and padding are masked out via `-100` in the target.
+
+`L_reasoning` plays two roles:
+
+1. It validates that the Predictor's generated pyramid, embedded in context,
+   still carries the information needed to produce the correct solution.
+2. It provides a text-space training signal that is typically less noisy
+   than the concept regression signal, stabilising training (see
+   [loss-desien-analysis.md](file:///Users/sjia/Documents/AgenticFinLab/Projects/Reasoning-Autoregressive-Modeling/examples/nlcpV4/loss-desien-analysis.md) §6.2).
+
+#### 5.2.3 Total Predictor Loss
+
+```
+L_predictor = w_concept · L_concept + w_reasoning · L_reasoning
+```
+
+Weights come from `training.loss_weights` in the YAML config. Defaults used
+by the provided configs are `w_concept = 1.0`, `w_reasoning = 1.0`.
+
+Note that the four Builder losses (recon / ordering / residual / reasoning)
+are **not** part of `L_predictor`; the Builder is frozen during Stage 2.
 
 ### 5.3 Interaction Between Builder and Predictor
 
@@ -1102,17 +1453,18 @@ Note: The Predictor may also benefit from level embeddings initialized from the 
 
 VAR explicitly separates extraction (VQ-VAE) from generation (Transformer). We follow the same principle:
 
-| VAR Component                | Our Equivalent             | Role                                            |
-|------------------------------|----------------------------|-------------------------------------------------|
-| **Phase 1: VQ-VAE**          | **ConceptPyramidBuilder**  | Extract groundtruth from full information (CoT) |
-| Encoder                      | Encoder(CoT)               | Encode CoT to hidden states                     |
-| Multi-scale quantizer        | Soft attention + residual  | Extract hierarchical concepts                   |
-| Codebook                     | concept_queries            | Learnable "vocabulary" of concept patterns      |
-| f_hat / f_rest               | H_hat / H_rest             | Residual decomposition                          |
-| **Phase 2: VAR Transformer** | **ConceptPredictor**       | Generate autoregressively from condition        |
-| Decoder-only Transformer     | Decoder-only Transformer   | Predict next level given previous               |
-| Scale embeddings             | Level queries / embeddings | Mark current generation level                   |
-| VAE Decoder                  | Solution Decoder           | Decode final output from concepts               |
+| VAR Component                | Our Equivalent                             | Role                                            |
+|------------------------------|--------------------------------------------|-------------------------------------------------|
+| **Phase 1: VQ-VAE**          | **ConceptPyramidBuilder**                  | Extract groundtruth from full information (CoT) |
+| Encoder                      | `reason_model.embed` + encode MLP          | Encode CoT to hidden states                     |
+| Multi-scale quantizer        | Soft attention + residual                  | Extract hierarchical concepts                   |
+| Codebook                     | `concept_queries`                          | Learnable "vocabulary" of concept patterns      |
+| f_hat / f_rest               | H_hat / H_rest                             | Residual decomposition                          |
+| **Phase 2: VAR Transformer** | **ConceptPredictor**                       | Generate autoregressively from condition        |
+| Decoder-only Transformer     | `reason_model` (shared or independent LLM) | Predict next concept slot given previous        |
+| Scale embeddings             | `level_embeddings` + `position_embeddings` | Mark level k and within-level slot j            |
+| Prediction head              | `concept_head` MLP                         | Project backbone hidden state to concept space  |
+| VAE Decoder                  | `reason_model.lm_head` reused on solution  | Decode final output tokens from concepts        |
 
 ### 7.2 Key Differences
 
@@ -1160,11 +1512,14 @@ VAR explicitly separates extraction (VQ-VAE) from generation (Transformer). We f
 
 ### 8.2 What Is Guaranteed by Construction (Predictor)
 
-| Guarantee                 | Mechanism                     | Strength                  |
-|---------------------------|-------------------------------|---------------------------|
-| Level-level causality     | Causal masking in Transformer | **Hard** (architectural)  |
-| Intra-level parallelism   | Level-wise attention mask     | **Hard** (architectural)  |
-| Teacher forcing alignment | Groundtruth from Builder      | **Hard** (training setup) |
+| Guarantee                                             | Mechanism                                                                                 | Strength                  |
+|-------------------------------------------------------|-------------------------------------------------------------------------------------------|---------------------------|
+| Inter-level causality (level k depends on levels < k) | Packed `[Q; C; S]` sequence + backbone's native causal mask                               | **Hard** (architectural)  |
+| Intra-level slot identity (C_{k,0} ≠ C_{k,1})         | `position_embeddings` added to every slot                                                 | **Hard** (architectural)  |
+| Backbone reuse without new Transformer                | `reason_model` processes concepts as `inputs_embeds`; `concept_head` is the only new head | **Hard** (architectural)  |
+| Teacher forcing alignment                             | Groundtruth `C_gt` from frozen Builder, detached                                          | **Hard** (training setup) |
+| SHARED-mode weight integrity                          | Predictor aliases Builder's `reason_model` / `back_proj`; LoRA forbidden (fail-fast)      | **Hard** (architectural)  |
+| Inference-time RoPE consistency                       | Explicit `position_ids = q_len + t − 1` passed on every AR step                           | **Hard** (architectural)  |
 
 ### 8.3 What Is Encouraged but Not Guaranteed
 
@@ -1194,7 +1549,7 @@ VAR explicitly separates extraction (VQ-VAE) from generation (Transformer). We f
 
 ## 9. Conclusion
 
-The Concept Pyramid design is architecturally sound. The ConceptPyramidBuilder uses soft attention (soft boundaries) with learnable query expansion to extract hierarchical concepts from CoT via purely residual decomposition — no cross-scale conditioning, following VAR's VQ-VAE Stage 1 principle. The ConceptPredictor learns to autoregressively generate these concepts from Q alone using scale-level causal attention, following VAR's Transformer Stage 2 principle. The rank bottleneck provides a hard guarantee of coarse-to-fine hierarchy. The combination of softmax competition, residual flow, and ordering loss creates sufficient inductive bias for DLCM-style segment-concept correspondence without requiring hard segmentation.
+The Concept Pyramid design is architecturally sound. The ConceptPyramidBuilder uses soft attention (soft boundaries) with learnable query expansion to extract hierarchical concepts from CoT via purely residual decomposition — no cross-scale conditioning, following VAR's VQ-VAE Stage 1 principle. The ConceptPredictor learns to autoregressively generate these concepts from `Q` alone by reusing a causal decoder-only LLM (`reason_model`) as its backbone: concepts are back-projected into the embedding space, tagged with `level_embeddings` + `position_embeddings`, packed into `[Q; C; S]`, and consumed by the LLM's native causal attention. A lightweight `concept_head` MLP reads Ĉ_k out of the backbone hidden states; the same forward pass also produces solution logits for the reasoning CE loss. This yields VAR's two-phase separation and level-by-level causality without introducing a second Transformer. The rank bottleneck in the Builder provides a hard guarantee of coarse-to-fine hierarchy. The combination of softmax competition, residual flow, and ordering loss creates sufficient inductive bias for DLCM-style segment-concept correspondence without requiring hard segmentation.
 
 The main limitations — soft segment locality, potential extraction imbalance, and Q-only generalization — are inherent trade-offs of the soft attention approach. They are acceptable for our research goals because:
 1. The soft approach is strictly more expressive than hard segmentation
