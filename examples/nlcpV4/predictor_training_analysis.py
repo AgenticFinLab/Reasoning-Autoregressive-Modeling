@@ -304,6 +304,7 @@ def run_checkpoint_eval(config: dict) -> dict | None:
     from nlcpV4.concept_predictor import ConceptPredictor
     from nlcpV4.data_loader import NLCPV4DataLoader
     from nlcpV4.eval_builder import evaluate_predictor
+
     checkpoint_dir = Path(config["log"]["checkpoint_path"]).expanduser()
 
     ckpt_path = None
@@ -925,15 +926,15 @@ def _run_predictor_analysis(
     plt.rcParams.update(
         {
             "font.weight": "bold",
-            "axes.titlesize": 20,
+            "axes.titlesize": 24,
             "axes.titleweight": "bold",
-            "axes.labelsize": 16,
+            "axes.labelsize": 18,
             "axes.labelweight": "bold",
-            "figure.titlesize": 22,
+            "figure.titlesize": 26,
             "figure.titleweight": "bold",
-            "legend.fontsize": 14,
-            "xtick.labelsize": 14,
-            "ytick.labelsize": 14,
+            "legend.fontsize": 18,
+            "xtick.labelsize": 16,
+            "ytick.labelsize": 16,
             "axes.spines.top": False,
             "axes.spines.right": False,
         }
