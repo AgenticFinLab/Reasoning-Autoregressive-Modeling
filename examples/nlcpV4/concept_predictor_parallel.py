@@ -168,6 +168,8 @@ import torch.nn as nn
 from peft import LoraConfig, get_peft_model
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+from nlcpV4.utils import pack_qcs_sequences
+
 # =========================================================================
 # Output Dataclass (identical to Option X)
 # =========================================================================
@@ -208,6 +210,7 @@ class PredictorOutput:
     reasoning_logits: Optional[torch.Tensor] = None
     reasoning_target_ids: Optional[torch.Tensor] = None
     reasoning_texts: Optional[List[str]] = None
+    generation_texts: Optional[List[str]] = None
 
 
 # =========================================================================
@@ -917,6 +920,81 @@ class ConceptPredictorParallel(nn.Module):
             num_levels=self._num_levels,
             level_lengths=list(self._level_lengths),
         )
+
+    # ------------------------------------------------------------------ #
+    #  generate_solution — free autoregressive text generation            #
+    # ------------------------------------------------------------------ #
+
+    @torch.no_grad()
+    def generate_solution(
+        self,
+        predicted_concepts: List[torch.Tensor],
+        question_ids: torch.Tensor,
+        question_attention_mask: Optional[torch.Tensor],
+        max_new_tokens: int = 256,
+    ) -> List[str]:
+        """Free autoregressive generation of solution from [Q, Concepts].
+
+        Uses the HuggingFace .generate() API with inputs_embeds.
+        Identical interface to ConceptPredictor.generate_solution.
+
+        Args:
+            predicted_concepts: List of K tensors, each [B, L_k, D].
+            question_ids: Token IDs for the question [B, L_Q].
+            question_attention_mask: Attention mask for question [B, L_Q].
+            max_new_tokens: Maximum tokens to generate per sample.
+
+        Returns:
+            List of B generated strings.
+        """
+        B = question_ids.shape[0]
+        device = question_ids.device
+
+        # Step 1: Flatten concepts to [B, total_C, D]
+        concepts_flat = torch.cat(predicted_concepts, dim=1)
+
+        # Step 2: Lift to D_enc + attach slot markers
+        concept_embeds = self._build_concept_input_embeds(concepts_flat, start_slot=0)
+
+        # Step 3: Question embeddings
+        Q_embeds = self._embed_questions(question_ids)
+        if concept_embeds.dtype != Q_embeds.dtype:
+            concept_embeds = concept_embeds.to(Q_embeds.dtype)
+
+        # Step 4: Pack [real_Q | Concepts] per row — removes Q padding.
+        if question_attention_mask is None:
+            q_mask = torch.ones(
+                B, question_ids.shape[1], device=device, dtype=torch.long
+            )
+        else:
+            q_mask = question_attention_mask
+
+        pack = pack_qcs_sequences(
+            Q_embeds=Q_embeds,
+            q_mask=q_mask,
+            concept_embeds=concept_embeds,
+            S_embeds=None,
+            s_mask=None,
+        )
+
+        # Step 5: Free autoregressive generation on packed input
+        generated_ids = self.reason_model.generate(
+            inputs_embeds=pack.packed_embeds,
+            attention_mask=pack.packed_mask,
+            max_new_tokens=max_new_tokens,
+            eos_token_id=self.tokenizer.eos_token_id,
+            pad_token_id=self.tokenizer.pad_token_id,
+            do_sample=False,
+        )
+
+        # Step 6: Decode only the NEW tokens
+        input_len = pack.packed_embeds.shape[1]
+        if generated_ids.shape[1] > input_len:
+            new_ids = generated_ids[:, input_len:]
+        else:
+            new_ids = generated_ids
+
+        return self.tokenizer.batch_decode(new_ids, skip_special_tokens=True)
 
     # ------------------------------------------------------------------ #
     #  optional reasoning CE loss path                                   #

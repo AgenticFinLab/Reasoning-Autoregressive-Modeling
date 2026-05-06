@@ -127,6 +127,7 @@ from peft import LoraConfig, get_peft_model
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from nlcpV4.data_loader import BuilderInput
+from nlcpV4.utils import pack_qcs_sequences
 
 # =========================================================================
 # Output Dataclasses — structured outputs for each Builder stage
@@ -283,6 +284,7 @@ class PyramidOutput:
     reasoning_logits: Optional[torch.Tensor] = None
     reasoning_target_ids: Optional[torch.Tensor] = None
     reasoning_texts: Optional[List[str]] = None
+    generation_texts: Optional[List[str]] = None
 
     @property
     def total_concepts(self) -> int:
@@ -972,6 +974,85 @@ class ConceptPyramidBuilder(nn.Module):
         pyramid.reasoning_texts = self.tokenizer.batch_decode(
             predicted_ids, skip_special_tokens=True
         )
+
+    @torch.no_grad()
+    def generate_solution(
+        self,
+        pyramid: PyramidOutput,
+        question_ids: torch.Tensor,
+        question_attention_mask: torch.Tensor,
+        max_new_tokens: int = 256,
+    ) -> List[str]:
+        """Free autoregressive generation of solution from [Q, Concepts].
+
+        Unlike _prepare_reasoning (teacher-forced), this method generates
+        tokens autoregressively — each predicted token is fed back as input
+        for the next step.  This reveals the model's TRUE generation
+        capability without exposure to ground-truth solution tokens.
+
+        Data flow:
+            1. cat_concepts() -> [B, total_C, D]
+            2. back_decode -> [B, total_C, D_enc]
+            3. embed Q -> [B, L_Q, D_enc]
+            4. inputs_embeds = [Q_embeds, concept_embeds]  (NO solution!)
+            5. reason_model.generate(inputs_embeds=..., max_new_tokens=...)
+            6. Decode generated token ids -> List[str]
+
+        Args:
+            pyramid: PyramidOutput from forward().
+            question_ids: Token IDs for the question [B, L_Q].
+            question_attention_mask: Attention mask for question [B, L_Q].
+            max_new_tokens: Maximum tokens to generate per sample.
+
+        Returns:
+            List of B generated strings.
+        """
+        assert self.back_proj is not None, "back_proj is None"
+
+        device = question_ids.device
+
+        # Step 1: Concatenate all concept levels: [B, total_C, D]
+        concepts = pyramid.cat_concepts()
+
+        # Step 2: Back-project concepts to encoder dimension: [B, total_C, D_enc]
+        concept_embeds = self.back_decode(concepts)
+
+        # Step 3: Get token embeddings for question
+        backbone = self._get_backbone()
+        embed_layer = backbone.get_input_embeddings()
+        Q_embeds = embed_layer(question_ids)
+
+        # Step 4: Pack [real_Q | Concepts] per row — removes Q padding.
+        # Uses pack_qcs_sequences with S_embeds=None so the packed layout
+        # is [real_Q_i | Concepts | tail_pad] with no internal padding.
+        pack = pack_qcs_sequences(
+            Q_embeds=Q_embeds,
+            q_mask=question_attention_mask,
+            concept_embeds=concept_embeds,
+            S_embeds=None,
+            s_mask=None,
+        )
+
+        # Step 5: Free autoregressive generation on packed input
+        generated_ids = self.reason_model.generate(
+            inputs_embeds=pack.packed_embeds,
+            attention_mask=pack.packed_mask,
+            max_new_tokens=max_new_tokens,
+            eos_token_id=self.tokenizer.eos_token_id,
+            pad_token_id=self.tokenizer.pad_token_id,
+            do_sample=False,  # greedy for reproducibility
+        )
+
+        # Step 6: Decode only the NEW tokens (after the input prefix)
+        # generate() with inputs_embeds may return only new tokens or
+        # include the input prefix depending on model version.
+        input_len = pack.packed_embeds.shape[1]
+        if generated_ids.shape[1] > input_len:
+            new_ids = generated_ids[:, input_len:]
+        else:
+            new_ids = generated_ids
+
+        return self.tokenizer.batch_decode(new_ids, skip_special_tokens=True)
 
     def back_decode(self, concept_space_tensor: torch.Tensor) -> torch.Tensor:
         """Decode a tensor from concept space (D) back to encoder space (D_encoder).

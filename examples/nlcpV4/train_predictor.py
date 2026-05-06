@@ -85,7 +85,13 @@ from nlcpV4 import _resume_io
 from nlcpV4.concept_builder import ConceptPyramidBuilder
 from nlcpV4.concept_predictor import ConceptPredictor
 from nlcpV4.data_loader import BuilderInput, NLCPV4DataLoader
-from nlcpV4.eval_builder import log_terminal_entry
+from nlcpV4.eval_builder import (
+    _strip_solutions,
+    _tokenize_qs,
+    evaluate_predictor,
+    log_eval_results_predictor,
+    log_terminal_entry,
+)
 from nlcpV4.losses import compute_predictor_loss
 from ram.utils import apply_storage_root, load_config, print_storage_paths
 
@@ -550,275 +556,6 @@ def load_checkpoint(
 
 
 # =============================================================================
-# One training-step forward (builder → tokens → predictor)
-# =============================================================================
-
-
-def _strip_solutions(batch: BuilderInput) -> BuilderInput:
-    """Return a clone of ``batch`` with ``solutions=[]`` so the Builder
-    forward skips its own ``_prepare_reasoning`` path.
-
-    The predictor computes reasoning CE itself inside the unified
-    teacher-forced forward — letting the Builder run its reasoning
-    step too would double the reason_model forwards (wasteful in both
-    modes, and in SHARED mode specifically runs the SAME module tree
-    twice).
-    """
-    return BuilderInput(
-        questions=list(batch.questions),
-        cot_answers=list(batch.cot_answers),
-        solutions=[],
-        main_ids=list(batch.main_ids),
-    )
-
-
-def _tokenize_qs(
-    builder: ConceptPyramidBuilder,
-    batch: BuilderInput,
-    max_length: int,
-    device: str,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Tokenize questions and solutions with the Builder's tokenizer.
-
-    Using the Builder's tokenizer guarantees that Q/S token ids live in
-    the SAME vocabulary the Builder's reason_model (and, in shared
-    mode, the Predictor's reason_model) expects.
-    """
-    tokenizer = builder.tokenizer
-    q = tokenizer(
-        batch.questions,
-        return_tensors="pt",
-        padding=True,
-        truncation=True,
-        max_length=max_length,
-    )
-    s = tokenizer(
-        batch.solutions,
-        return_tensors="pt",
-        padding=True,
-        truncation=True,
-        max_length=max_length,
-    )
-    return (
-        q["input_ids"].to(device),
-        q["attention_mask"].to(device),
-        s["input_ids"].to(device),
-        s["attention_mask"].to(device),
-    )
-
-
-def _run_predictor_step(
-    predictor: ConceptPredictor,
-    builder: ConceptPyramidBuilder,
-    batch: BuilderInput,
-    max_length: int,
-    device: str,
-):
-    """Build gt_concepts (frozen builder), tokenize, call predictor.
-
-    Returns the full PredictorOutput; the caller computes the loss.
-    """
-    with torch.no_grad():
-        pyramid = builder(_strip_solutions(batch))
-        gt_concepts = [c.detach() for c in pyramid.concepts]
-
-    q_ids, q_mask, s_ids, s_mask = _tokenize_qs(builder, batch, max_length, device)
-
-    output = predictor(
-        question_ids=q_ids,
-        question_attention_mask=q_mask,
-        gt_concepts=gt_concepts,
-        solution_ids=s_ids,
-        solution_attention_mask=s_mask,
-    )
-    return output
-
-
-# =============================================================================
-# Evaluation
-# =============================================================================
-
-
-@torch.no_grad()
-def evaluate_predictor(
-    predictor: ConceptPredictor,
-    builder: ConceptPyramidBuilder,
-    eval_dataloader: NLCPV4DataLoader,
-    loss_weights: dict,
-    max_length: int,
-    device: str,
-    max_batches: int,
-) -> tuple[dict, list[str], list[dict]]:
-    """Run eval on ``max_batches`` of test data; return averaged losses.
-
-    Returns:
-        (averaged_loss_dict, reasoning_texts, samples)
-          - averaged_loss_dict keys: total, concept, reasoning (optional),
-            concept_per_level (list[float], averaged elementwise).
-          - reasoning_texts: teacher-forced argmax decodes.
-          - samples: per-row metadata for eval_sample_history.json.
-    """
-    predictor.eval()
-    all_losses: list[dict] = []
-    all_texts: list[str] = []
-    all_samples: list[dict] = []
-
-    for i, batch in enumerate(eval_dataloader):
-        if max_batches > 0 and i >= max_batches:
-            break
-
-        output = _run_predictor_step(predictor, builder, batch, max_length, device)
-        _, loss_dict = compute_predictor_loss(
-            output, loss_weights, concept_loss_type="mse"
-        )
-        all_losses.append(loss_dict)
-
-        if output.reasoning_texts is not None:
-            all_texts.extend(output.reasoning_texts)
-
-        for j in range(batch.batch_size):
-            all_samples.append(
-                {
-                    "batch_idx": i,
-                    "pos_in_batch": j,
-                    "main_id": batch.main_ids[j],
-                    "question": batch.questions[j],
-                    "solution": batch.solutions[j] if batch.has_solution else None,
-                }
-            )
-
-    predictor.train()
-    # Keep the shared reason_model (if any) and the (in independent
-    # mode) frozen reason_model base in eval — dropout on a frozen
-    # backbone is a no-op for gradients but can still add noise to
-    # activations flowing into LoRA / concept_head.
-    if hasattr(predictor, "reason_model"):
-        predictor.reason_model.eval()
-
-    if not all_losses:
-        return ({"total": 0.0, "concept": 0.0}, [], [])
-
-    # Average scalar keys across batches.  ``concept_per_level`` is a
-    # list and needs elementwise averaging.
-    scalar_keys = [k for k in all_losses[0].keys() if k != "concept_per_level"]
-    avg = {k: sum(d[k] for d in all_losses) / len(all_losses) for k in scalar_keys}
-
-    if "concept_per_level" in all_losses[0]:
-        per_level = list(zip(*[d["concept_per_level"] for d in all_losses]))
-        avg["concept_per_level"] = [sum(col) / len(col) for col in per_level]
-
-    return avg, all_texts, all_samples
-
-
-def log_eval_results_predictor(
-    eval_losses: dict,
-    loss_weights: dict,
-    eval_type: str,
-    global_step: int,
-    terminal_log_path: Path,
-    eval_history: list,
-    log_dir: Path,
-    swanlab_prefix: str,
-    reasoning_texts: list[str],
-    eval_samples: list[dict],
-    eval_sample_history: list,
-    logger: logging.Logger,
-) -> None:
-    """Console + SwanLab + eval_history + sample-history writer for eval.
-
-    Mirrors ``eval_builder.log_eval_results`` in shape, but for the
-    predictor's two-component loss schema (concept + reasoning).
-    """
-    w_concept = eval_losses["concept"] * loss_weights["concept_loss_weight"]
-    ew = {"concept": w_concept}
-    reasoning_part = ""
-    if "reasoning" in eval_losses:
-        ew["reasoning"] = (
-            eval_losses["reasoning"] * loss_weights["reasoning_loss_weight"]
-        )
-        reasoning_part = " reasoning=%.4f/%.4f" % (
-            eval_losses["reasoning"],
-            ew["reasoning"],
-        )
-
-    label = "eval(quick)" if eval_type == "quick" else "eval(full) "
-    logger.info(
-        "  %s | total=%.4f concept=%.4f/%.4f%s",
-        label,
-        eval_losses["total"],
-        eval_losses["concept"],
-        ew["concept"],
-        reasoning_part,
-    )
-
-    # SwanLab metrics
-    metrics = {
-        f"{swanlab_prefix}/total_loss": eval_losses["total"],
-        f"{swanlab_prefix}/concept_raw": eval_losses["concept"],
-        f"{swanlab_prefix}/concept_weighted": ew["concept"],
-    }
-    if "reasoning" in eval_losses:
-        metrics[f"{swanlab_prefix}/reasoning_raw"] = eval_losses["reasoning"]
-        metrics[f"{swanlab_prefix}/reasoning_weighted"] = ew["reasoning"]
-    if "concept_per_level" in eval_losses:
-        for k, v in enumerate(eval_losses["concept_per_level"]):
-            metrics[f"{swanlab_prefix}/concept_level{k}"] = v
-    swanlab.log(metrics, step=global_step)
-
-    # terminal_output.jsonl row
-    term_entry = {
-        "step": global_step,
-        "eval_type": eval_type,
-        **{
-            f"eval_{k}": round(v, 6)
-            for k, v in eval_losses.items()
-            if k != "concept_per_level"
-        },
-        **{f"eval_{k}_w": round(v, 6) for k, v in ew.items()},
-    }
-    if "concept_per_level" in eval_losses:
-        term_entry["eval_concept_per_level"] = [
-            round(v, 6) for v in eval_losses["concept_per_level"]
-        ]
-    log_terminal_entry(terminal_log_path, term_entry)
-
-    # eval_history.json (crash-safe rewrite per eval)
-    eval_history.append(
-        {
-            "step": global_step,
-            "eval_type": eval_type,
-            **eval_losses,
-            **{f"{k}_w": v for k, v in ew.items()},
-        }
-    )
-    with open(log_dir / "eval_history.json", "w", encoding="utf-8") as f:
-        json.dump(eval_history, f, indent=2, default=str)
-
-    if reasoning_texts:
-        entry = {
-            "step": global_step,
-            "eval_type": eval_type,
-            "texts": reasoning_texts,
-        }
-        with open(log_dir / "eval_reasoning_texts.jsonl", "a", encoding="utf-8") as f:
-            f.write(json.dumps(entry, default=str) + "\n")
-
-    import datetime as _dt
-
-    eval_sample_history.append(
-        {
-            "step": global_step,
-            "eval_type": eval_type,
-            "timestamp": _dt.datetime.now().isoformat(),
-            "num_samples": len(eval_samples),
-            "samples": eval_samples,
-        }
-    )
-    with open(log_dir / "eval_sample_history.json", "w", encoding="utf-8") as f:
-        json.dump(eval_sample_history, f, indent=2, default=str)
-
-
-# =============================================================================
 # Main training loop
 # =============================================================================
 
@@ -988,6 +725,10 @@ def train_predictor(
     eval_interval = eval_cfg["eval_step_interval"]
     eval_enabled = eval_interval > 0
     eval_dataloader = None
+    # Reasoning text recording flags (default: teacher-forced ON, generation OFF)
+    tf_reasoning = eval_cfg.get("teacher_force_reasoning", True)
+    gen_reasoning = eval_cfg.get("generation_reasoning", False)
+    gen_max_tokens = eval_cfg.get("generation_max_tokens", 256)
     eval_history: list[dict] = []
     eval_sample_history: list[dict] = []
     quick_eval_batches = 0
@@ -1099,12 +840,30 @@ def train_predictor(
             dataloader, desc=f"Epoch {epoch+1}/{num_epochs}", miniters=log_interval
         )
         for batch_idx, batch in enumerate(pbar):
-            output = _run_predictor_step(predictor, builder, batch, max_length, device)
+            # Builder forward (frozen, no_grad) for gt_concepts
+            with torch.no_grad():
+                pyramid = builder(_strip_solutions(batch))
+                gt_concepts = [c.detach() for c in pyramid.concepts]
+
+            # Tokenize + predictor forward
+            q_ids, q_mask, s_ids, s_mask = _tokenize_qs(
+                builder, batch, max_length, device
+            )
+            output = predictor(
+                question_ids=q_ids,
+                question_attention_mask=q_mask,
+                gt_concepts=gt_concepts,
+                solution_ids=s_ids,
+                solution_attention_mask=s_mask,
+            )
             total_loss, loss_dict = compute_predictor_loss(
                 output, loss_weights, concept_loss_type="mse"
             )
 
+            # Backward
             total_loss.backward()
+
+            # Optimizer
             if gradient_clip > 0:
                 torch.nn.utils.clip_grad_norm_(trainable_params, gradient_clip)
             optimizer.step()
@@ -1180,7 +939,7 @@ def train_predictor(
 
                 # Quick eval (skip when full eval fires at same step).
                 if eval_enabled and not (global_step % eval_interval == 0):
-                    eval_losses, reasoning_texts, samples = evaluate_predictor(
+                    eval_losses, reasoning_texts_dict, samples = evaluate_predictor(
                         predictor,
                         builder,
                         eval_dataloader,
@@ -1188,6 +947,9 @@ def train_predictor(
                         max_length,
                         device,
                         max_batches=quick_eval_batches,
+                        teacher_force_reasoning=tf_reasoning,
+                        generation_reasoning=gen_reasoning,
+                        generation_max_tokens=gen_max_tokens,
                     )
                     log_eval_results_predictor(
                         eval_losses,
@@ -1198,10 +960,9 @@ def train_predictor(
                         eval_history,
                         log_dir,
                         "eval_quick",
-                        reasoning_texts,
+                        reasoning_texts_dict,
                         samples,
                         eval_sample_history,
-                        logger,
                     )
 
             # ── Checkpoint scheduling (identical policy to builder) ──
@@ -1251,7 +1012,7 @@ def train_predictor(
 
             # ── Full eval at eval_interval ──────────────────────────
             if eval_enabled and global_step % eval_interval == 0:
-                eval_losses, reasoning_texts, samples = evaluate_predictor(
+                eval_losses, reasoning_texts_dict, samples = evaluate_predictor(
                     predictor,
                     builder,
                     eval_dataloader,
@@ -1259,6 +1020,9 @@ def train_predictor(
                     max_length,
                     device,
                     max_batches=full_eval_batches,
+                    teacher_force_reasoning=tf_reasoning,
+                    generation_reasoning=gen_reasoning,
+                    generation_max_tokens=gen_max_tokens,
                 )
                 log_eval_results_predictor(
                     eval_losses,
@@ -1269,10 +1033,9 @@ def train_predictor(
                     eval_history,
                     log_dir,
                     "eval",
-                    reasoning_texts,
+                    reasoning_texts_dict,
                     samples,
                     eval_sample_history,
-                    logger,
                 )
                 if eval_losses["total"] < best_eval_loss:
                     best_eval_loss = eval_losses["total"]
@@ -1310,13 +1073,23 @@ def train_predictor(
         avg_epoch_loss = (
             sum(epoch_losses) / len(epoch_losses) if epoch_losses else float("inf")
         )
-        logger.info("Epoch %d avg loss: %.4f", epoch + 1, avg_epoch_loss)
+        logger.info(
+            "Epoch %d avg loss: %.4f",
+            epoch + 1,
+            avg_epoch_loss,
+        )
         log_terminal_entry(
             terminal_log_path,
-            {"epoch": epoch, "avg_epoch_loss": round(avg_epoch_loss, 6)},
+            {
+                "epoch": epoch,
+                "avg_epoch_loss": round(avg_epoch_loss, 6),
+            },
         )
         swanlab.log(
-            {"epoch/avg_loss": avg_epoch_loss, "epoch/epoch": epoch + 1},
+            {
+                "epoch/avg_loss": avg_epoch_loss,
+                "epoch/epoch": epoch + 1,
+            },
             step=global_step,
         )
 

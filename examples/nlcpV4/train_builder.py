@@ -559,6 +559,10 @@ def train_builder(
     eval_interval = eval_cfg["eval_step_interval"]
     eval_enabled = eval_interval > 0
     eval_dataloader = None
+    # Reasoning text recording flags (default: teacher-forced ON, generation OFF)
+    tf_reasoning = eval_cfg.get("teacher_force_reasoning", True)
+    gen_reasoning = eval_cfg.get("generation_reasoning", False)
+    gen_max_tokens = eval_cfg.get("generation_max_tokens", 256)
     # eval_history holds per-invocation loss rows (eval_history.json);
     # eval_sample_history holds the matching sample lists
     # (eval_sample_history.json). Both are written crash-safely after
@@ -789,12 +793,15 @@ def train_builder(
 
                 # ── Quick eval (skip when full eval fires at same step) ──
                 if eval_enabled and not (global_step % eval_interval == 0):
-                    eval_losses, reasoning_texts, samples = evaluate_builder(
+                    eval_losses, reasoning_texts_dict, samples = evaluate_builder(
                         builder,
                         eval_dataloader,
                         loss_weights,
                         ordering_loss_type,
                         max_batches=quick_eval_batches,
+                        teacher_force_reasoning=tf_reasoning,
+                        generation_reasoning=gen_reasoning,
+                        generation_max_tokens=gen_max_tokens,
                     )
                     log_eval_results(
                         eval_losses,
@@ -805,7 +812,7 @@ def train_builder(
                         eval_history,
                         log_dir,
                         "eval_quick",
-                        reasoning_texts,
+                        reasoning_texts_dict,
                         samples,
                         eval_sample_history,
                     )
@@ -873,12 +880,15 @@ def train_builder(
 
             # ── Full eval at eval_interval ──────────────────────
             if eval_enabled and global_step % eval_interval == 0:
-                eval_losses, reasoning_texts, samples = evaluate_builder(
+                eval_losses, reasoning_texts_dict, samples = evaluate_builder(
                     builder,
                     eval_dataloader,
                     loss_weights,
                     ordering_loss_type,
                     max_batches=full_eval_batches,
+                    teacher_force_reasoning=tf_reasoning,
+                    generation_reasoning=gen_reasoning,
+                    generation_max_tokens=gen_max_tokens,
                 )
                 log_eval_results(
                     eval_losses,
@@ -889,7 +899,7 @@ def train_builder(
                     eval_history,
                     log_dir,
                     "eval",
-                    reasoning_texts,
+                    reasoning_texts_dict,
                     samples,
                     eval_sample_history,
                 )
@@ -924,15 +934,26 @@ def train_builder(
         avg_epoch_loss = (
             sum(epoch_losses) / len(epoch_losses) if epoch_losses else float("inf")
         )
-        logger.info("Epoch %d avg loss: %.4f", epoch + 1, avg_epoch_loss)
+        num_steps_epoch = len(epoch_losses)
+        logger.info(
+            "Epoch %d avg loss: %.4f",
+            epoch + 1,
+            avg_epoch_loss,
+        )
         log_terminal_entry(
             terminal_log_path,
-            {"epoch": epoch, "avg_epoch_loss": round(avg_epoch_loss, 6)},
+            {
+                "epoch": epoch,
+                "avg_epoch_loss": round(avg_epoch_loss, 6),
+            },
         )
 
         # ── SwanLab epoch-level logging ──────────────────────────
         swanlab.log(
-            {"epoch/avg_loss": avg_epoch_loss, "epoch/epoch": epoch + 1},
+            {
+                "epoch/avg_loss": avg_epoch_loss,
+                "epoch/epoch": epoch + 1,
+            },
             step=global_step,
         )
 

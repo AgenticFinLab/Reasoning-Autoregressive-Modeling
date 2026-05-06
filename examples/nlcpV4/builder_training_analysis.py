@@ -75,7 +75,7 @@ sys.path.insert(0, str(PROJECT_ROOT / "examples"))
 from lmbase.utils.env_tools import get_device
 from nlcpV4.concept_builder import ConceptPyramidBuilder
 from nlcpV4.data_loader import NLCPV4DataLoader
-from nlcpV4.eval_builder import evaluate_builder
+from nlcpV4.eval_builder import compute_reasoning_accuracy, evaluate_builder
 from ram.utils import apply_storage_root, load_config, print_storage_paths
 
 logger = logging.getLogger(__name__)
@@ -95,6 +95,7 @@ ANALYSIS_OUTPUTS = (
     "training_losses_raw.png",
     "training_losses_overlay_raw.png",
     "eval_losses_overlay_raw.png",
+    "eval_reasoning_accuracy.png",
 )
 
 
@@ -282,6 +283,66 @@ def load_eval_history(log_dir: Path):
         return []
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
+
+
+def _backfill_reasoning_accuracy(eval_hist: list, log_dir: Path) -> None:
+    """Compute reasoning_accuracy from log files and inject into eval records.
+
+    Loads ``eval_reasoning_texts.jsonl`` (predicted texts per step/eval_type)
+    and ``eval_sample_history.json`` (ground-truth solutions per step/eval_type),
+    matches them by (step, eval_type), runs ``compute_reasoning_accuracy``,
+    and injects the result into the corresponding eval_history records in-place.
+
+    Handles both old format (no "type" field) and new format with
+    "type": "teacher_forced" / "generation".  Only teacher-forced texts
+    are used for accuracy computation.
+    """
+    # Load reasoning texts (predictions)
+    texts_path = log_dir / "eval_reasoning_texts.jsonl"
+    if not texts_path.exists():
+        return
+    texts_by_key: dict[tuple[int, str], list[str]] = {}
+    with open(texts_path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            entry = json.loads(line)
+            # New format has "type" field; only use teacher_forced for accuracy.
+            # Old format has no "type" field — treat as teacher_forced.
+            text_type = entry.get("type", "teacher_forced")
+            if text_type != "teacher_forced":
+                continue
+            key = (entry["step"], entry.get("eval_type", "full"))
+            texts_by_key[key] = entry["texts"]
+
+    # Load sample history (ground-truth solutions)
+    samples_path = log_dir / "eval_sample_history.json"
+    if not samples_path.exists():
+        return
+    with open(samples_path, "r", encoding="utf-8") as f:
+        sample_history = json.load(f)
+    solutions_by_key: dict[tuple[int, str], list[str]] = {}
+    for record in sample_history:
+        key = (record["step"], record.get("eval_type", "full"))
+        solutions_by_key[key] = [s.get("solution") for s in record.get("samples", [])]
+
+    # Compute accuracy for each eval record
+    num_filled = 0
+    for r in eval_hist:
+        key = (r["step"], r.get("eval_type", "full"))
+        texts = texts_by_key.get(key)
+        solutions = solutions_by_key.get(key)
+        if texts and solutions:
+            acc_result = compute_reasoning_accuracy(texts, solutions)
+            r["reasoning_accuracy"] = acc_result["accuracy"]
+            num_filled += 1
+
+    if num_filled > 0:
+        logger.info(
+            "Computed reasoning_accuracy for %d eval records from logs",
+            num_filled,
+        )
 
 
 def run_checkpoint_eval(config: dict) -> dict | None:
@@ -809,6 +870,111 @@ def _build_figures(
     plt.close(fig3)
 
 
+def _build_accuracy_figure(
+    *,
+    output_dir: Path,
+    experiment_name: str,
+    eval_quick: list,
+    eval_full: list,
+    ckpt_eval: dict | None,
+    last_step: int,
+) -> None:
+    """Build the reasoning accuracy PNG and save to ``output_dir``.
+
+    Plots accuracy (exact-match on final answer) from eval_history
+    records that contain a ``reasoning_accuracy`` field. If no eval
+    records have this field (e.g. older runs), the figure is still
+    created but will be empty with a note.
+    """
+    fig, ax = plt.subplots(figsize=(14, 6))
+    ax.set_title(f"Reasoning Accuracy (Exact-Match): {experiment_name}")
+
+    has_data = False
+
+    # Quick eval accuracy
+    acc_quick = [
+        (r["step"], r["reasoning_accuracy"])
+        for r in eval_quick
+        if "reasoning_accuracy" in r
+    ]
+    if acc_quick:
+        steps_q, vals_q = zip(*acc_quick)
+        ax.plot(
+            np.array(steps_q),
+            np.array(vals_q),
+            linestyle="--",
+            marker=".",
+            color="tab:cyan",
+            linewidth=1.2,
+            markersize=5,
+            alpha=0.9,
+            label="eval(quick)",
+        )
+        has_data = True
+
+    # Full eval accuracy
+    acc_full = [
+        (r["step"], r["reasoning_accuracy"])
+        for r in eval_full
+        if "reasoning_accuracy" in r
+    ]
+    if acc_full:
+        steps_f, vals_f = zip(*acc_full)
+        ax.plot(
+            np.array(steps_f),
+            np.array(vals_f),
+            linestyle="-",
+            marker="s",
+            color="tab:red",
+            linewidth=1.5,
+            markersize=6,
+            alpha=0.9,
+            label="eval(full)",
+        )
+        has_data = True
+
+    # Checkpoint eval fallback
+    if not has_data and ckpt_eval is not None and "reasoning_accuracy" in ckpt_eval:
+        val = ckpt_eval["reasoning_accuracy"]
+        ax.axhline(y=val, color="tab:red", linestyle="--", linewidth=1.0, alpha=0.6)
+        ax.plot(
+            last_step,
+            val,
+            "*",
+            color="tab:red",
+            markersize=14,
+            zorder=5,
+            label=f"best ckpt eval ({val:.1%})",
+        )
+        has_data = True
+
+    ax.set_xlabel("Step")
+    ax.set_ylabel("Accuracy")
+    ax.set_ylim(-0.05, 1.05)
+    ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda y, _: f"{y:.0%}"))
+    ax.grid(True, alpha=0.3)
+    if has_data:
+        ax.legend()
+    else:
+        ax.text(
+            0.5,
+            0.5,
+            "No reasoning_accuracy data in eval_history\n"
+            "(run eval with updated eval_builder to populate)",
+            transform=ax.transAxes,
+            ha="center",
+            va="center",
+            fontsize=12,
+            color="gray",
+        )
+
+    plt.tight_layout()
+    fig.savefig(
+        output_dir / "eval_reasoning_accuracy.png", dpi=150, bbox_inches="tight"
+    )
+    plt.close(fig)
+
+
 def _run_builder_analysis(config_path: Path, storage_root: str) -> None:
     """Run the full analysis for a single config and write 6 PNGs to
     ``<experiment>/train_analysis/`` (sibling of ``logs/``).
@@ -862,6 +1028,10 @@ def _run_builder_analysis(config_path: Path, storage_root: str) -> None:
     history = load_training_history(log_dir)
     terminal = load_terminal_output(log_dir)
     eval_hist = load_eval_history(log_dir)
+
+    # Backfill reasoning_accuracy from reasoning texts + sample history
+    # for older runs that didn't compute it during training.
+    _backfill_reasoning_accuracy(eval_hist, log_dir)
 
     # Separate quick and full eval histories
     eval_quick = [r for r in eval_hist if r.get("eval_type") == "quick"]
@@ -958,6 +1128,16 @@ def _run_builder_analysis(config_path: Path, storage_root: str) -> None:
         ckpt_eval=ckpt_eval,
         lr_steps=lr_steps,
         lr_values=lr_values,
+    )
+
+    # ── Reasoning accuracy figure ─────────────────────────────
+    _build_accuracy_figure(
+        output_dir=output_dir,
+        experiment_name=experiment_name,
+        eval_quick=eval_quick,
+        eval_full=eval_full,
+        ckpt_eval=ckpt_eval,
+        last_step=last_step,
     )
 
     print("Saved to %s" % output_dir)
