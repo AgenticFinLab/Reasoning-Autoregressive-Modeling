@@ -116,6 +116,9 @@ log:
 # -----------------------------------------------------------------------------
 evaluation:
   eval_step_interval: 500   # -1 = disabled
+  teacher_force_reasoning: true   # record teacher-forced argmax decoded texts
+  generation_reasoning: false     # record free autoregressive generation texts
+  generation_max_tokens: 512      # max new tokens for free generation
   data:
     data_name: GSM8K
     data_path: EXPERIMENT/data/GSM8K
