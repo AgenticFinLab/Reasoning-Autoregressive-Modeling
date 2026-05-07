@@ -47,10 +47,15 @@ imports from the other.
     )
 
     # CLI-style eval: per-sample folders, with artifact toggle.
+    # AutoWeighted example — resolved checkpoint/log paths carry the
+    # ``_AutoWeighted`` suffix but no code change is needed here.
     artifacts = BuilderEvalArtifacts.from_config(config["evaluation"])
     avg_losses, texts_dict, samples = evaluate_builder(
         ...,
-        output_root=Path("runs/.../eval_builder/teacher_forced"),
+        output_root=Path(
+            "/Data/ReasoningNLCP/EXPERIMENT/nlcpV4/builder/"
+            "GSM8K_Qwen2.5-0.5B_3level_AutoWeighted/logs/eval_builder/teacher_forced"
+        ),
         dump_artifacts=True,
         artifacts=artifacts,
     )
@@ -106,22 +111,31 @@ Flag reference
   USAGE SCENARIOS
 ================================================================================
 
+All examples below use ``AutoWeighted`` configs (auto-generated from
+``Loss_prepare_weights.csv``) — the standard training variant. The
+schema is identical to the plain configs, so ``eval_builder.py``
+handles both without modification; the only difference is that
+AutoWeighted log / checkpoint paths carry the ``_AutoWeighted``
+suffix and ``training.loss_weights`` values are auto-tuned.
+
 A. Quick check on 10 samples, teacher-forced, defaults from YAML
    (vector dump comes from ``evaluation.intermediate_vector_save``):
 
-       python examples/nlcpV4/eval_builder.py -c configs/nlcpV4/GSM8K/train_builder_Qwen2.5-0.5B_3level.yml -s /Data/ReasoningNLCP --mode teacher_forced --max-samples 10
+       python examples/nlcpV4/eval_builder.py -c configs/nlcpV4/GSM8K/AutoWeighted/train_builder_Qwen2.5-0.5B_3level.yml -s /Data/ReasoningNLCP --mode teacher_forced --max-samples 10
 
 B. Free-generation only, full eval split, vectors disabled to save disk:
 
-       python examples/nlcpV4/eval_builder.py -c configs/nlcpV4/GSM8K/train_builder_Qwen2.5-0.5B_3level.yml -s /Data/ReasoningNLCP --mode free_generation --max-samples 0 -v 0
+       python examples/nlcpV4/eval_builder.py -c configs/nlcpV4/GSM8K/AutoWeighted/train_builder_Qwen2.5-0.5B_3level.yml -s /Data/ReasoningNLCP --mode free_generation --max-samples 0 -v 0
 
 C. Run BOTH paths and compare, with explicit checkpoint and custom output:
 
-       python examples/nlcpV4/eval_builder.py -c configs/nlcpV4/GSM8K/train_builder_Qwen2.5-0.5B_3level.yml -s /Data/ReasoningNLCP --mode both --max-samples 200 --ckpt /Data/ReasoningNLCP/EXPERIMENT/nlcpV4/builder/GSM8K_Qwen2.5-0.5B_3level/checkpoints/checkpoint_best_eval-step5000.pt -o /tmp/eval_out -v 1
+       python examples/nlcpV4/eval_builder.py -c configs/nlcpV4/GSM8K/AutoWeighted/train_builder_Qwen2.5-0.5B_3level.yml -s /Data/ReasoningNLCP --mode both --max-samples 200 --ckpt /Data/ReasoningNLCP/EXPERIMENT/nlcpV4/builder/GSM8K_Qwen2.5-0.5B_3level_AutoWeighted/checkpoints/checkpoint_best_eval-step5000.pt -o /tmp/eval_out -v 1
 
 D. Reuse training output tree (no -o): writes to
    ``<log_path>/eval_builder/<mode>/sample_<id>/`` plus ``eval.log`` and
-   ``eval_summary.json`` at that root.
+   ``eval_summary.json`` at that root. For the AutoWeighted 3-level
+   config above, that resolves to
+   ``/Data/ReasoningNLCP/EXPERIMENT/nlcpV4/builder/GSM8K_Qwen2.5-0.5B_3level_AutoWeighted/logs/eval_builder/<mode>/``.
 
 ================================================================================
   OUTPUT LAYOUT
