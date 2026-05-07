@@ -47,6 +47,7 @@ Differences from builder_training_analysis.py:
 import argparse
 import json
 import logging
+import re
 import sys
 from pathlib import Path
 
@@ -66,6 +67,32 @@ CONFIGS_ROOT = PROJECT_ROOT / "configs" / "nlcpV4"
 VALID_MODULES = {"builder", "predictor"}
 ALL_KEYWORD = "all"
 ANALYSIS_OUTPUT_DIR_NAME = "train_analysis"
+
+# Configs whose eval_losses_overlay figures should suppress the legend
+# (e.g. too many overlapping entries make the legend unreadable).
+IGNORE_LEGEND_LIST = [
+    # "GSM8K_Qwen2.5-0.5B_4level_independent_AutoWeighted",
+    # "GSM8K_Qwen2.5-0.5B_6level_independent_AutoWeighted",
+]
+
+# Configs whose plot titles should replace the model-name substring
+# (e.g. ``Qwen2.5-0.5B_``) with a different label for presentation.
+# Matched against ``log_dir.parent.name`` — same key as IGNORE_LEGEND_LIST.
+STRIP_MODEL_IN_TITLE_LIST = [
+    "GSM8K_Qwen2.5-0.5B_2level_independent_AutoWeighted",
+    "GSM8K_Qwen2.5-0.5B_4level_independent_AutoWeighted",
+    "GSM8K_Qwen2.5-0.5B_6level_independent_AutoWeighted",
+]
+
+# Matches model-name tokens like ``Qwen2.5-0.5B_`` / ``Qwen3-8B_``
+# that appear in experiment names; used to rename them when the
+# parent dir is listed in STRIP_MODEL_IN_TITLE_LIST.
+_MODEL_NAME_RE = re.compile(r"Qwen[\d.]+-[\d.]+B_")
+
+# Replacement label for titles matched by STRIP_MODEL_IN_TITLE_LIST
+# (set to empty string to strip instead of rename).
+TITLE_MODEL_REPLACEMENT = "Llama-2-7B-chat_"
+
 ANALYSIS_OUTPUTS = (
     "training_losses.png",
     "training_losses_overlay.png",
@@ -402,7 +429,7 @@ def _plot_eval_on_ax(ax, eval_quick, eval_full, key, weight, ckpt_eval, last_ste
             linewidth=1.0,
             markersize=4,
             alpha=0.8,
-            label="eval(quick)",
+            label="eval(batch)",
         )
     if eval_full:
         ef_steps = np.array([r["step"] for r in eval_full])
@@ -454,7 +481,7 @@ def _plot_eval_total_on_ax(
             linewidth=1.0,
             markersize=4,
             alpha=0.8,
-            label="eval(quick)",
+            label="eval(batch)",
         )
     if eval_full:
         ef_steps = np.array([r["step"] for r in eval_full])
@@ -504,6 +531,7 @@ def _build_figures(
     ckpt_eval,
     lr_steps,
     lr_values,
+    suppress_eval_legend: bool = False,
 ) -> None:
     """Build 3 PNGs for one loss mode (weighted / raw).
 
@@ -661,7 +689,7 @@ def _build_figures(
                 linewidth=1.0,
                 markersize=4,
                 alpha=0.8,
-                label=f"{overlay_label(key)} [quick]",
+                label=f"{overlay_label(key)} [batch]",
             )
     if eval_full:
         ef_steps = np.array([r["step"] for r in eval_full])
@@ -698,7 +726,8 @@ def _build_figures(
     ax3.set_xlabel("Step")
     ax3.set_ylabel("Loss")
     if has_any_eval or ckpt_eval is not None:
-        ax3.legend(ncol=2)
+        if not suppress_eval_legend:
+            ax3.legend(ncol=1)
     ax3.grid(True, alpha=0.3)
     _eval_ylim_arrays: list = []
     for _records in (eval_quick, eval_full):
@@ -720,14 +749,20 @@ def _build_figures(
     fig.savefig(
         output_dir / f"training_losses{suffix}.png", dpi=150, bbox_inches="tight"
     )
+    fig.savefig(output_dir / f"training_losses{suffix}.pdf", bbox_inches="tight")
     fig2.savefig(
         output_dir / f"training_losses_overlay{suffix}.png",
         dpi=150,
         bbox_inches="tight",
     )
+    fig2.savefig(
+        output_dir / f"training_losses_overlay{suffix}.pdf",
+        bbox_inches="tight",
+    )
     fig3.savefig(
         output_dir / f"eval_losses_overlay{suffix}.png", dpi=150, bbox_inches="tight"
     )
+    fig3.savefig(output_dir / f"eval_losses_overlay{suffix}.pdf", bbox_inches="tight")
     plt.close(fig)
     plt.close(fig2)
     plt.close(fig3)
@@ -778,7 +813,7 @@ def _build_concept_per_level_figure(
                     linewidth=1.0,
                     markersize=4,
                     alpha=0.8,
-                    label=f"L{lvl} [quick]",
+                    label=f"L{lvl} [batch]",
                 )
 
     if eval_full:
@@ -803,7 +838,7 @@ def _build_concept_per_level_figure(
 
     ax.set_xlabel("Step")
     ax.set_ylabel("Concept Loss (MSE)")
-    ax.legend(ncol=2)
+    ax.legend(ncol=1)
     ax.grid(True, alpha=0.3)
 
     # Robust ylim across all level curves
@@ -814,6 +849,7 @@ def _build_concept_per_level_figure(
 
     plt.tight_layout()
     fig.savefig(output_dir / "concept_per_level.png", dpi=150, bbox_inches="tight")
+    fig.savefig(output_dir / "concept_per_level.pdf", bbox_inches="tight")
     plt.close(fig)
 
 
@@ -848,7 +884,7 @@ def _build_accuracy_figure(
             linewidth=1.2,
             markersize=5,
             alpha=0.9,
-            label="eval(quick)",
+            label="eval(batch)",
         )
         has_data = True
 
@@ -910,6 +946,7 @@ def _build_accuracy_figure(
     fig.savefig(
         output_dir / "eval_reasoning_accuracy.png", dpi=150, bbox_inches="tight"
     )
+    fig.savefig(output_dir / "eval_reasoning_accuracy.pdf", bbox_inches="tight")
     plt.close(fig)
 
 
@@ -926,15 +963,15 @@ def _run_predictor_analysis(
     plt.rcParams.update(
         {
             "font.weight": "bold",
-            "axes.titlesize": 24,
+            "axes.titlesize": 28,
             "axes.titleweight": "bold",
-            "axes.labelsize": 18,
+            "axes.labelsize": 22,
             "axes.labelweight": "bold",
-            "figure.titlesize": 26,
+            "figure.titlesize": 30,
             "figure.titleweight": "bold",
-            "legend.fontsize": 18,
-            "xtick.labelsize": 16,
-            "ytick.labelsize": 16,
+            "legend.fontsize": 28,
+            "xtick.labelsize": 20,
+            "ytick.labelsize": 20,
             "axes.spines.top": False,
             "axes.spines.right": False,
         }
@@ -946,8 +983,17 @@ def _run_predictor_analysis(
     w_concept = loss_weights["concept_loss_weight"]
     w_reasoning = loss_weights["reasoning_loss_weight"]
 
-    # Title uses only the config file stem (e.g. train_predictor_Qwen2.5-1.5B_8level_independent)
-    experiment_name = config_path.stem
+    # Title: strip "train_" prefix, keep "predictor_..." onward
+    _stem = config_path.stem
+    if _stem.startswith("train_"):
+        _stem = _stem[len("train_") :]
+    experiment_name = _stem
+
+    # Optionally rename the model-name token (e.g. ``Qwen2.5-0.5B_`` ->
+    # ``Llama-2-7B-chat_``) in the title for configs listed in
+    # STRIP_MODEL_IN_TITLE_LIST.
+    if log_dir.parent.name in STRIP_MODEL_IN_TITLE_LIST:
+        experiment_name = _MODEL_NAME_RE.sub(TITLE_MODEL_REPLACEMENT, experiment_name)
 
     # ── Load data ─────────────────────────────────────────────────
     history = load_training_history(log_dir)
@@ -995,6 +1041,9 @@ def _run_predictor_analysis(
     output_dir = log_dir.parent / ANALYSIS_OUTPUT_DIR_NAME
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    # Check if this config should suppress eval overlay legend
+    suppress_eval_legend = log_dir.parent.name in IGNORE_LEGEND_LIST
+
     # ── Raw component arrays ──────────────────────────────────────
     concept_raw = np.array([r["concept"] for r in history])
     reasoning_raw = np.array([r.get("reasoning", 0.0) for r in history])
@@ -1019,6 +1068,7 @@ def _run_predictor_analysis(
         ckpt_eval=ckpt_eval,
         lr_steps=lr_steps,
         lr_values=lr_values,
+        suppress_eval_legend=suppress_eval_legend,
     )
 
     # ── Raw pass ──────────────────────────────────────────────
@@ -1038,6 +1088,7 @@ def _run_predictor_analysis(
         ckpt_eval=ckpt_eval,
         lr_steps=lr_steps,
         lr_values=lr_values,
+        suppress_eval_legend=suppress_eval_legend,
     )
 
     # ── Concept per-level figure ──────────────────────────────

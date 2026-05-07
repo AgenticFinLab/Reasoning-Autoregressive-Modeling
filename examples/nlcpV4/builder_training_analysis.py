@@ -863,14 +863,20 @@ def _build_figures(
     fig.savefig(
         output_dir / f"training_losses{suffix}.png", dpi=150, bbox_inches="tight"
     )
+    fig.savefig(output_dir / f"training_losses{suffix}.pdf", bbox_inches="tight")
     fig2.savefig(
         output_dir / f"training_losses_overlay{suffix}.png",
         dpi=150,
         bbox_inches="tight",
     )
+    fig2.savefig(
+        output_dir / f"training_losses_overlay{suffix}.pdf",
+        bbox_inches="tight",
+    )
     fig3.savefig(
         output_dir / f"eval_losses_overlay{suffix}.png", dpi=150, bbox_inches="tight"
     )
+    fig3.savefig(output_dir / f"eval_losses_overlay{suffix}.pdf", bbox_inches="tight")
     plt.close(fig)
     plt.close(fig2)
     plt.close(fig3)
@@ -978,6 +984,7 @@ def _build_accuracy_figure(
     fig.savefig(
         output_dir / "eval_reasoning_accuracy.png", dpi=150, bbox_inches="tight"
     )
+    fig.savefig(output_dir / "eval_reasoning_accuracy.pdf", bbox_inches="tight")
     plt.close(fig)
 
 
