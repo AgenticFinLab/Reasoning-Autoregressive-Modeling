@@ -1,142 +1,167 @@
-"""Inspect the builder's concept pyramid: encodings and attention.
+"""Render concept-pyramid diagnostic figures from ``eval_builder.py`` dumps.
 
-This tool loads a trained ``ConceptPyramidBuilder`` checkpoint and,
-for EACH sample in a deterministic slice of ``evaluation.data``, runs
-one forward pass (``batch_size=1``) and emits the complete set of
-per-sample diagnostic figures into that sample's OWN folder.
+This tool consumes the per-sample tensors that ``eval_builder.py`` already
+serialised to disk and renders the full suite of concept-pyramid diagnostic
+figures INTO those very same sample folders. No checkpoint load, no forward
+pass — the heavy lifting was already done by eval_builder; this script just
+reads ``pyramid.pt`` + ``input.json`` and plots.
 
 Storage layout
 ==============
-Outputs land next to the model, under
-``<checkpoint_dir>.parent / concept_pyramid_analysis/``. Concretely:
+Given a builder config (e.g. the AutoWeighted 4-level GSM8K run), the
+resolved tree is::
 
-    concept_pyramid_analysis/
-    ├── sample_<main_id_1>/
-    │   ├── input.txt                       # raw Q + CoT (and solution)
-    │   ├── attention_heatmap.{png,pdf}
-    │   ├── attention_text_overlay.{png,pdf}
-    │   ├── concept_norms.{png,pdf}
-    │   ├── residual_decomposition.{png,pdf}
-    │   ├── intra_level_similarity.{png,pdf}
-    │   ├── inter_level_similarity.{png,pdf}
-    │   ├── attention_entropy.{png,pdf}
-    │   ├── token_coverage.{png,pdf}
-    │   └── concept_pca.{png,pdf}
-    ├── sample_<main_id_2>/
-    │   └── ...
+    <storage_root>/EXPERIMENT/nlcpV4/builder/
+        GSM8K_Qwen2.5-0.5B_4level_AutoWeighted/logs/eval_builder/<mode>/
+            # ----- aggregate figures pooling ALL samples (written here) -----
+            aggregate_concept_pca_level{k}.{png,pdf}                    # per level k
+            sample_<main_id_1>/
+                input.json           # written by eval_builder
+                pyramid.pt           # written by eval_builder (requires -v 1)
+                reasoning.json       # written by eval_builder
+                timing.json          # written by eval_builder
+                losses.json          # written by eval_builder
+                # ----- figures produced by THIS script (written in place) -----
+                # Every plot is a SEPARATE file; multi-level analyses are split
+                # into per-level (and per-slot) files — subplots are avoided so
+                # figures stay legible at any pyramid depth.
+                attention_heatmap_level{k}.{png,pdf}                    # per level k
+                attention_text_overlay_level{k}.{png,pdf}               # per level k
+                attention_text_per_concept_level{k}_slot{j}.{png,pdf}   # per (k, slot j)
+                concept_norms_level{k}.{png,pdf}                        # per level k
+                intra_level_similarity_level{k}.{png,pdf}               # per level k
+                concept_pca_level{k}.{png,pdf}                          # per level k
+                # Single-axis plots (cross-level comparison lives on one axis):
+                residual_decomposition.{png,pdf}
+                inter_level_similarity.{png,pdf}
+                attention_entropy.{png,pdf}
+                token_coverage.{png,pdf}
+                concept_pca.{png,pdf}
+            sample_<main_id_2>/
+                ...
 
-One folder per sample keeps the raw source alongside every derived
-figure — you can open ``input.txt`` in any viewer and cross-reference
-its contents against the attention-on-text overlay without hunting
-across directories.
+Every sample folder becomes self-contained: raw Q/CoT in ``input.json``,
+intermediate tensors in ``pyramid.pt``, reasoning output in
+``reasoning.json``, and every derived figure beside them. Open one folder
+→ see everything about that sample.
+
+Prerequisites
+=============
+You MUST have run ``eval_builder.py`` for this config first, with
+``-v 1`` (i.e. ``intermediate_vector_save: 1`` in the YAML) so that
+``pyramid.pt`` files exist. Example::
+
+    python3 examples/nlcpV4/eval_builder.py -c configs/nlcpV4/GSM8K/AutoWeighted/train_builder_Qwen2.5-0.5B_4level.yml -s /Data/ReasoningNLCP --mode teacher_forced --max-samples 50 -v 1
 
 WHAT IS ANALYZED
 ================
 The builder's :class:`PyramidOutput` carries two first-class tensors
-per level:
+per level, both of which eval_builder serialises into ``pyramid.pt``:
 
-    * ``C_k`` (concept encodings)   : [B, L_k, D]
-    * ``A_k`` (soft attention map)  : [B, L_k, L]
+    * ``C_k`` (concept encodings)   : [1, L_k, D]
+    * ``A_k`` (soft attention map)  : [1, L_k, L]
 
-This script inspects both — concept geometry *and* how each concept slot
-draws attention over CoT tokens. No training happens; the builder runs in
-``eval()`` under ``torch.no_grad()``.
+This script reads them back (plus ``projected_hidden``,
+``reconstruction``, ``attention_mask``, …) and runs the analyses below.
 
 AVAILABLE ANALYSES (select via ``--analyses``)
 ==============================================
-    ``attention_heatmaps``   — per-sample attention heatmap (K subplots).
-                               Shows which CoT tokens every concept slot
-                               attends to at each pyramid level.
-    ``attention_text_overlay``— per-sample "attention-on-text" overlay.
-                               The CoT is rendered as wrapped rows of
-                               token boxes; each box's background colour
-                               encodes the per-level aggregated attention
-                               weight (deeper colour = larger weight).
-                               The most intuitive diagnostic — you see
-                               exactly WHICH substrings each level reads.
-    ``concept_norms``         — per-level histograms of ``||C_k[j]||``.
-    ``residual_decomposition``— line plot of ``||H_rest_k||``, ``||R_k||``,
-                               ``||H_hat_k||`` vs level.
-    ``intra_level_similarity``— K cosine-sim heatmaps, one per level.
-    ``inter_level_similarity``— single K×K cosine-sim matrix over
-                               slot-averaged per-level concepts.
-    ``attention_entropy``     — per-level box plots of ``H(A_{k,j})``.
-    ``token_coverage``        — per-level curves of column-summed attention
-                               over normalised token position.
-    ``concept_pca``           — 2-D PCA scatter of all concepts
-                               coloured by level.
-    ``all`` (default)         — run every analysis above.
+    ``attention_heatmaps``      — per-level attention heatmap (ONE file per
+                                  level). Shows which CoT tokens each
+                                  concept slot attends to.
+    ``attention_text_overlay``  — per-level attention on CoT text (ONE
+                                  file per level). Box colours encode
+                                  slot-summed attention per token.
+    ``attention_text_per_concept`` — per-level, per-concept attention on
+                                     text (ONE file per (level, slot)).
+                                     Isolates what each concept slot
+                                     reads individually.
+    ``concept_norms``           — per-level histogram of ``||C_k[j]||``
+                                  (ONE file per level).
+    ``residual_decomposition``  — single-axis line plot of ``||H_rest_k||``,
+                                  ``||R_k||``, ``||H_hat_k||`` vs level.
+    ``intra_level_similarity``  — slot-to-slot cosine similarity heatmap
+                                  (ONE file per level).
+    ``inter_level_similarity``  — single K×K cosine-similarity matrix over
+                                  slot-averaged per-level concepts.
+    ``attention_entropy``       — single-axis per-level box plots of
+                                  ``H(A_{k,j})``.
+    ``token_coverage``          — single-axis per-level curves of column-
+                                  summed attention over normalised token
+                                  position.
+    ``concept_pca``             — single 2-D PCA scatter of ALL concepts
+                                  coloured by level (cross-level view).
+    ``concept_pca_per_level``   — per-level 2-D PCA scatter (ONE file per
+                                  level), using that level's own top-2
+                                  principal axes. Reveals intra-level
+                                  geometry.
+    ``aggregate_concept_pca_per_level`` — AGGREGATE per-level 2-D PCA
+                                          across ALL samples (ONE file
+                                          per level, written to
+                                          eval_root beside the sample
+                                          folders). Slot index encoded
+                                          by marker shape; sample index
+                                          encoded by colour. Lets you
+                                          compare slot geometry across
+                                          the whole dataset at once.
+    ``all`` (default)           — run every analysis above.
 
 Usage
 -----
-Direct config path (sample 4 deterministic rows from the test split)::
+Single config (reads every ``sample_*/pyramid.pt`` under the eval_builder
+tree for the chosen mode, plots in place)::
 
-    python3 examples/nlcpV4/builder_concept_pyramid_analysis.py \\
-        -c configs/nlcpV4/GSM8K/train_builder_Qwen2.5-0.5B_6level.yml
+    python3 examples/nlcpV4/builder_concept_pyramid_analysis.py -c configs/nlcpV4/GSM8K/AutoWeighted/train_builder_Qwen2.5-0.5B_4level.yml --mode teacher_forced
 
-Override the checkpoint file (use evaluation.data from the config
-but load this exact ``.pt`` directly — output goes next to it)::
+Batch over an entire dataset dir (every ``train_builder_*.yml`` under it)::
 
-    python3 examples/nlcpV4/builder_concept_pyramid_analysis.py \\
-        -c configs/nlcpV4/GSM8K/train_builder_Qwen2.5-0.5B_6level.yml \\
-        -p /Data/proj/logs/...builder.../checkpoints/checkpoint_best.pt
-
-Discovery by dataset + experiment::
-
-    python3 examples/nlcpV4/builder_concept_pyramid_analysis.py \\
-        -d GSM8K -e Qwen2.5-0.5B_6level
+    python3 examples/nlcpV4/builder_concept_pyramid_analysis.py -d GSM8K/AutoWeighted -e all --mode teacher_forced
 
 Select a subset of analyses::
 
-    python3 examples/nlcpV4/builder_concept_pyramid_analysis.py \\
-        -c configs/nlcpV4/GSM8K/train_builder_Qwen2.5-0.5B_6level.yml \\
-        --analyses attention_heatmaps,attention_text_overlay,concept_norms \\
-        --num-samples 2
+    python3 examples/nlcpV4/builder_concept_pyramid_analysis.py -c configs/nlcpV4/GSM8K/AutoWeighted/train_builder_Qwen2.5-0.5B_4level.yml --analyses attention_heatmaps,attention_text_overlay,concept_norms
 
 Arguments
 ---------
-    -s / --storage-root     Prefix prepended to relative log paths.
-                            MUST match the value used at training time.
-    -c / --config           Direct path to a single ``train_builder_*.yml``.
-                            Mutually exclusive with ``-d``/``-e``.
-    -d / --dataset          Dataset directory under ``configs/nlcpV4/``.
-                            Required when ``-c`` is not given.
-    -e / --experiment       Config stem after ``train_builder_`` or ``all``.
-                            Required when ``-c`` is not given.
-    -p / --checkpoint       Override the checkpoint file. When set, the
-                            config's ``evaluation`` section still drives
-                            data + model structure, but THIS exact ``.pt``
-                            is loaded, and outputs go to
-                            ``<parent-of-p>.parent / concept_pyramid_analysis/``.
-    -o / --overlap          If true (default), overwrite existing figures.
-                            ``--no-overlap`` skips samples already written.
-    --split                 Data split: ``test`` (default) or ``train``.
-    --num-samples           How many samples to analyze (each gets its
-                            own folder). Default 4. The forward pass
-                            always runs with ``batch_size=1``.
-    --analyses              Comma-separated subset of analysis keys or
-                            ``all`` (default).
-    --seed                  RNG seed for deterministic batch sampling.
+    -s / --storage-root   Prefix prepended to relative log paths. MUST match
+                          the value used when ``eval_builder`` ran.
+                          Default: ``./`` (current working directory).
+    -c / --config         Direct path to a single ``train_builder_*.yml``.
+                          Mutually exclusive with ``-d``/``-e``.
+    -d / --dataset        Dataset dir under ``configs/nlcpV4/`` (may be
+                          nested, e.g. ``GSM8K/AutoWeighted``). Required when
+                          ``-c`` is not given.
+    -e / --experiment     Config stem after ``train_builder_`` or ``all`` to
+                          process every matching config. Required when ``-c``
+                          is not given.
+    --mode                Which ``eval_builder/<mode>/`` subdirectory to read.
+                          One of ``teacher_forced`` (default), ``free_generation``,
+                          ``both``. MUST match the ``--mode`` passed to
+                          ``eval_builder``.
+    -o / --overlap        If true (default), overwrite existing figures.
+                          ``--no-overlap`` skips configs whose per-sample
+                          figures are already present.
+    --analyses            Comma-separated subset of analysis keys or ``all``
+                          (default).
 """
 
 import argparse
+import json
 import logging
-import random
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from types import SimpleNamespace
+from typing import Any, Dict, List, Sequence, Tuple
 
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+from transformers import AutoTokenizer
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(PROJECT_ROOT / "examples"))
 
-from lmbase.utils.env_tools import get_device
-from nlcpV4.concept_builder import ConceptPyramidBuilder, PyramidOutput
-from nlcpV4.data_loader import BuilderInput, NLCPV4DataLoader
 from ram.utils import apply_storage_root, load_config, print_storage_paths
 
 logger = logging.getLogger(__name__)
@@ -144,9 +169,15 @@ logger = logging.getLogger(__name__)
 # --- Batch-mode constants ------------------------------------------
 CONFIGS_ROOT = PROJECT_ROOT / "configs" / "nlcpV4"
 ALL_KEYWORD = "all"
-# Outputs land under <experiment>/concept_pyramid_analysis/ (sibling of logs/
-# and checkpoints/). The name matches the script stem for discoverability.
-ANALYSIS_OUTPUT_DIR_NAME = "concept_pyramid_analysis"
+# eval_builder.py writes per-sample dumps under
+#   <log_path>/eval_builder/<mode>/sample_<main_id>/{input,pyramid,reasoning,\u2026}.
+# We plot directly into those sample folders (no separate output tree) so the
+# raw inputs, intermediate tensors and diagnostic figures sit side-by-side.
+EVAL_BUILDER_DIR_NAME = "eval_builder"
+VALID_EVAL_MODES = ("teacher_forced", "free_generation", "both")
+DEFAULT_EVAL_MODE = "teacher_forced"
+PYRAMID_DUMP_NAME = "pyramid.pt"
+INPUT_JSON_NAME = "input.json"
 # Canonical analysis keys — must match the dispatch table in _run_concept_analysis.
 # Every key produces a single file per sample named ``<key>.{png,pdf}`` that
 # lives inside the sample's own folder, so the output layout is flat and
@@ -154,6 +185,7 @@ ANALYSIS_OUTPUT_DIR_NAME = "concept_pyramid_analysis"
 ALL_ANALYSES = (
     "attention_heatmaps",
     "attention_text_overlay",
+    "attention_text_per_concept",
     "concept_norms",
     "residual_decomposition",
     "intra_level_similarity",
@@ -161,20 +193,33 @@ ALL_ANALYSES = (
     "attention_entropy",
     "token_coverage",
     "concept_pca",
+    "concept_pca_per_level",
+    "aggregate_concept_pca_per_level",
 )
-# Per-analysis filename stem written into each sample folder. We intentionally
-# drop the plural-heatmaps and overlay suffixes so the filenames read cleanly
-# inside ``sample_<id>/``.
-_ANALYSIS_FILE_STEMS: Dict[str, str] = {
-    "attention_heatmaps": "attention_heatmap",
-    "attention_text_overlay": "attention_text_overlay",
-    "concept_norms": "concept_norms",
+# Per-sample SENTINEL filename stem — used by ``_existing_outputs`` to
+# decide whether a sample's figures were already produced. Multi-level
+# analyses write many files, but the level-0 (and slot-0) file is always
+# present when the run completed, so it's a safe existence probe. Single
+# plots map to their exact filename. These files live INSIDE each
+# ``sample_*/`` directory.
+_PER_SAMPLE_ANALYSIS_SENTINEL_STEMS: Dict[str, str] = {
+    "attention_heatmaps": "attention_heatmap_level0",
+    "attention_text_overlay": "attention_text_overlay_level0",
+    "attention_text_per_concept": "attention_text_per_concept_level0_slot0",
+    "concept_norms": "concept_norms_level0",
     "residual_decomposition": "residual_decomposition",
-    "intra_level_similarity": "intra_level_similarity",
+    "intra_level_similarity": "intra_level_similarity_level0",
     "inter_level_similarity": "inter_level_similarity",
     "attention_entropy": "attention_entropy",
     "token_coverage": "token_coverage",
     "concept_pca": "concept_pca",
+    "concept_pca_per_level": "concept_pca_level0",
+}
+# Aggregate SENTINEL filename stem — these files live at the eval_root
+# level (beside the ``sample_*/`` folders), NOT inside them, because they
+# pool data from every sample.
+_AGGREGATE_ANALYSIS_SENTINEL_STEMS: Dict[str, str] = {
+    "aggregate_concept_pca_per_level": "aggregate_concept_pca_level0",
 }
 
 
@@ -184,9 +229,16 @@ _ANALYSIS_FILE_STEMS: Dict[str, str] = {
 
 
 def parse_args() -> argparse.Namespace:
-    """Parse CLI arguments. Mirrors ``builder_training_analysis``."""
+    """Parse CLI arguments.
+
+    The script auto-discovers ``sample_*/pyramid.pt`` under
+    ``<log_path>/eval_builder/<mode>/`` (resolved from the YAML via
+    ``apply_storage_root``) and renders figures in place, so the CLI
+    surface is intentionally small: choose a config (or a dataset batch),
+    choose a mode, choose an analysis subset — that's it.
+    """
     parser = argparse.ArgumentParser(
-        description="Analyze concept encodings + attention from a trained builder",
+        description="Render concept-pyramid figures from eval_builder dumps",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
@@ -196,8 +248,8 @@ def parse_args() -> argparse.Namespace:
         default="./",
         help=(
             "Prefix for relative config.log paths. MUST match the value "
-            "used at training time so this script reads the same "
-            "checkpoint / eval data. Default './'."
+            "used when eval_builder ran so this script reads the same "
+            "eval_builder/<mode>/ tree. Default './' (current working directory)."
         ),
     )
     parser.add_argument(
@@ -208,8 +260,8 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Direct path to a single train_builder_*.yml. Mutually "
             "exclusive with -d/-e; when given, dataset/experiment "
-            "discovery is bypassed and this config drives model, "
-            "checkpoint and evaluation-data retrieval."
+            "discovery is bypassed and this config drives the "
+            "eval_builder output-tree lookup."
         ),
     )
     parser.add_argument(
@@ -217,8 +269,8 @@ def parse_args() -> argparse.Namespace:
         "--dataset",
         default=None,
         help=(
-            "Dataset dir under configs/nlcpV4/ (may be nested). "
-            "Required when -c is not given."
+            "Dataset dir under configs/nlcpV4/ (may be nested, e.g. "
+            "'GSM8K/AutoWeighted'). Required when -c is not given."
         ),
     )
     parser.add_argument(
@@ -231,15 +283,13 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
-        "-p",
-        "--checkpoint",
-        type=str,
-        default=None,
+        "--mode",
+        choices=list(VALID_EVAL_MODES),
+        default=DEFAULT_EVAL_MODE,
         help=(
-            "Override the checkpoint .pt file. When set, this exact file "
-            "is loaded (the config's evaluation section still drives data "
-            "loading & model structure). Outputs go to the parent of -p's "
-            "parent dir / concept_pyramid_analysis/."
+            "Which eval_builder/<mode>/ subdirectory to read. MUST match "
+            "the --mode passed to eval_builder. One of "
+            f"{', '.join(VALID_EVAL_MODES)}. Default '{DEFAULT_EVAL_MODE}'."
         ),
     )
     parser.add_argument(
@@ -249,23 +299,7 @@ def parse_args() -> argparse.Namespace:
         default=True,
         help=(
             "If true (default), overwrite existing figures. --no-overlap "
-            "skips configs whose outputs already exist."
-        ),
-    )
-    parser.add_argument(
-        "--split",
-        choices=("train", "test"),
-        default="test",
-        help="Data split for the analysis batch. Default 'test'.",
-    )
-    parser.add_argument(
-        "--num-samples",
-        type=int,
-        default=4,
-        help=(
-            "How many samples to analyze (each gets its own folder). "
-            "Default 4. The forward pass always runs with batch_size=1, "
-            "ignoring any value set in the config."
+            "skips configs whose per-sample figures already exist."
         ),
     )
     parser.add_argument(
@@ -276,12 +310,6 @@ def parse_args() -> argparse.Namespace:
             "Comma-separated subset of analysis keys or 'all' (default). "
             f"Valid keys: {', '.join(ALL_ANALYSES)}."
         ),
-    )
-    parser.add_argument(
-        "--seed",
-        type=int,
-        default=42,
-        help="RNG seed for deterministic batch sampling. Default 42.",
     )
     return parser.parse_args()
 
@@ -327,149 +355,101 @@ def discover_configs(dataset: str, experiment: str) -> List[Path]:
 
 
 # =============================================================================
-# Builder + data loading
+# Per-sample disk loading (from eval_builder dumps)
 # =============================================================================
 
 
-def _locate_best_checkpoint(checkpoint_dir: Path) -> Optional[Path]:
-    """Return the preferred ``.pt`` file, or None when absent."""
-    for name in ("checkpoint_best_eval.pt", "checkpoint_best.pt"):
-        p = checkpoint_dir / name
-        if p.is_file():
-            return p
-    return None
+def _load_pyramid_from_disk(pt_path: Path) -> SimpleNamespace:
+    """Reconstruct a PyramidOutput-shaped namespace from eval_builder's pyramid.pt.
 
+    eval_builder's ``_pyramid_to_dump_dict`` serialises::
 
-def load_builder(
-    config: Dict[str, Any],
-    *,
-    checkpoint_override: Optional[Path] = None,
-) -> Tuple[ConceptPyramidBuilder, torch.device, Path]:
-    """Instantiate a builder and load the best (or overridden) checkpoint.
+        concepts:             list[Tensor[1, L_k, D]]   (K entries)
+        attention_weights:    list[Tensor[1, L_k, L]]   (K entries)
+        reconstruction:       list[Tensor[1, L, D]]     (K entries)
+        encoder_hidden_states: Tensor[1, L, D_enc]
+        projected_hidden:     Tensor[1, L, D]
+        reconstructed_hidden: Tensor[1, L, D]
+        residual_hidden:      Tensor[1, L, D]
+        attention_mask:       Tensor[1, L]
 
-    When ``checkpoint_override`` is provided we load THAT exact ``.pt``
-    file (the user passed ``-p``); otherwise we discover the best file
-    under ``config['log']['checkpoint_path']``.
-
-    Raises ``FileNotFoundError`` when no checkpoint can be located, so
-    the caller can mark the config as ``skip_no_data`` cleanly.
+    The plotting functions access a strict subset of PyramidOutput's
+    surface — ``num_levels``, ``level_lengths``, ``concepts``,
+    ``level_outputs[k].attention_weights / .reconstruction``,
+    ``projected_hidden``, ``attention_mask`` — so a SimpleNamespace with
+    a matching level_outputs list of inner namespaces is sufficient. No
+    downstream plotting code needs to change.
     """
-    if checkpoint_override is not None:
-        ckpt_path = checkpoint_override
-        if not ckpt_path.is_file():
-            raise FileNotFoundError(f"Checkpoint file not found: {ckpt_path}")
-    else:
-        checkpoint_dir = Path(config["log"]["checkpoint_path"]).expanduser()
-        ckpt_path = _locate_best_checkpoint(checkpoint_dir)
-        if ckpt_path is None:
-            raise FileNotFoundError(f"No checkpoint_best*.pt under {checkpoint_dir}")
-
-    device = torch.device(str(get_device("auto")))
-    builder = ConceptPyramidBuilder(config)
-    builder.to(device)
-
-    ckpt = torch.load(ckpt_path, map_location=device)
-    builder.load_state_dict(ckpt["model_state_dict"])
-    builder.eval()
-    logger.info(
-        "Loaded checkpoint: %s (step=%s, loss=%.4f)",
-        ckpt_path,
-        ckpt.get("step", "?"),
-        ckpt.get("eval_loss", ckpt.get("loss", 0.0)),
-    )
-    return builder, device, ckpt_path
-
-
-def collect_batch(
-    config: Dict[str, Any],
-    *,
-    split: str,
-    num_samples: int,
-    batch_size: int,
-    seed: int,
-) -> BuilderInput:
-    """Gather ``num_samples`` rows from ``evaluation.data`` deterministically.
-
-    We hijack the evaluation data config and override its ``split`` so the
-    user can flip between ``test`` and ``train`` from the CLI without
-    editing YAML. ``include_solution`` is set to ``False`` — this bypasses
-    the builder's reasoning branch and keeps the forward pass cheap.
-    """
-    data_cfg = dict(config["evaluation"]["data"])
-    data_cfg["split"] = split
-
-    env_cfg = config["environment"]
-    loader = NLCPV4DataLoader(
-        data_cfg=data_cfg,
-        batch_size=batch_size,
-        include_solution=False,
-        shuffle=False,
-        drop_last=False,
-        num_workers=env_cfg["dataloader_num_workers"],
-    )
-
-    # Seed so any shuffle-like behaviour downstream is repeatable.
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-
-    questions: List[str] = []
-    cot_answers: List[str] = []
-    main_ids: List[str] = []
-    for batch in loader:
-        take = min(num_samples - len(questions), batch.batch_size)
-        questions.extend(batch.questions[:take])
-        cot_answers.extend(batch.cot_answers[:take])
-        main_ids.extend(batch.main_ids[:take])
-        if len(questions) >= num_samples:
-            break
-
-    if not questions:
-        raise RuntimeError(
-            f"Empty batch from split='{split}' dataset_size={loader.dataset_size}"
+    data = torch.load(pt_path, map_location="cpu")
+    concepts = list(data["concepts"])
+    num_levels = len(concepts)
+    level_lengths = [int(c.shape[1]) for c in concepts]
+    level_outputs = [
+        SimpleNamespace(
+            attention_weights=data["attention_weights"][k],
+            reconstruction=data["reconstruction"][k],
         )
-    return BuilderInput(
-        questions=questions,
-        cot_answers=cot_answers,
-        solutions=[],
-        main_ids=main_ids,
+        for k in range(num_levels)
+    ]
+    return SimpleNamespace(
+        num_levels=num_levels,
+        level_lengths=level_lengths,
+        concepts=concepts,
+        level_outputs=level_outputs,
+        encoder_hidden_states=data["encoder_hidden_states"],
+        projected_hidden=data["projected_hidden"],
+        reconstructed_hidden=data["reconstructed_hidden"],
+        residual_hidden=data["residual_hidden"],
+        attention_mask=data["attention_mask"],
     )
 
 
-@torch.no_grad()
-def run_forward(
-    builder: ConceptPyramidBuilder, batch: BuilderInput
-) -> Tuple[PyramidOutput, List[List[str]]]:
-    """Run the builder and also return per-row decoded token strings.
+def _load_sample_input(input_path: Path) -> Dict[str, Any]:
+    """Read ``input.json`` (main_id, question, cot_answer, solution…).
 
-    The builder's ``forward`` tokenizes CoT internally but does not expose
-    the token ids. To label attention-heatmap x-axes we retokenize the
-    same inputs with the same tokenizer and max length; the token order
-    is stable across calls so the labels align with ``A_k`` columns.
+    eval_builder.py writes this via ``_dump_builder_sample``; field names
+    are stable (see ``BuilderInput`` contract). Missing fields fall back
+    to empty strings in the caller.
     """
-    pyramid = builder(batch)
+    with input_path.open("r", encoding="utf-8") as f:
+        return json.load(f)
 
-    max_length = builder.pyramid_cfg["max_seq_len"]
-    tokenized = builder.tokenizer(
-        batch.cot_answers,
+
+def _load_tokenizer_from_config(config: Dict[str, Any]):
+    """Instantiate the HuggingFace tokenizer used by the builder at eval time.
+
+    The builder tokenises CoT with this tokenizer and
+    ``max_length = config['model']['pyramid']['max_seq_len']`` (see
+    ``concept_builder.py``). Reloading the same tokenizer here lets us
+    produce column labels whose order is identical to the saved
+    ``attention_weights[k]`` tensor's token dimension on the valid-length
+    prefix — no label drift between figure and tensor.
+    """
+    model_name = config["model"]["reason_model"]["reason_model_name"]
+    tok = AutoTokenizer.from_pretrained(model_name)
+    if tok.pad_token is None:
+        tok.pad_token = tok.eos_token
+    return tok
+
+
+def _retokenize_cot(tokenizer, cot_text: str, max_length: int) -> List[str]:
+    """Retokenise a CoT string into a list of decoded token strings.
+
+    Mirrors the builder's tokenisation parameters (``truncation=True,
+    max_length=max_seq_len``). ``padding=False`` is safe here because
+    eval_builder runs with batch_size=1 — the saved attention tensors'
+    token dimension already equals the un-padded valid length.
+    """
+    enc = tokenizer(
+        cot_text,
         return_tensors="pt",
-        padding=True,
+        padding=False,
         truncation=True,
         max_length=max_length,
     )
-    ids = tokenized["input_ids"]
-    mask = tokenized["attention_mask"]
-
-    tokens_per_row: List[List[str]] = []
-    for row_ids, row_mask in zip(ids, mask):
-        valid = row_ids[row_mask.bool()]
-        # One decode-per-id keeps tokens aligned with columns of A_k (the
-        # builder runs attention over the full padded length — here we
-        # report only the non-pad prefix).
-        tokens_per_row.append(
-            [builder.tokenizer.decode([int(t)]) for t in valid.tolist()]
-        )
-    return pyramid, tokens_per_row
+    ids = enc["input_ids"][0]
+    # One decode-per-id keeps tokens aligned with attention columns.
+    return [tokenizer.decode([int(t)]) for t in ids.tolist()]
 
 
 # =============================================================================
@@ -515,7 +495,7 @@ def _tick_positions(length: int, max_ticks: int = 20) -> np.ndarray:
     return np.linspace(0, length - 1, max_ticks).round().astype(int)
 
 
-def _per_row_valid_length(pyramid: PyramidOutput) -> np.ndarray:
+def _per_row_valid_length(pyramid: SimpleNamespace) -> np.ndarray:
     """Return the number of valid (non-pad) tokens per row as ``[B]`` array."""
     if pyramid.attention_mask is None:
         # Unmasked case — every position counts.
@@ -530,19 +510,18 @@ def _per_row_valid_length(pyramid: PyramidOutput) -> np.ndarray:
 
 
 def _plot_attention_heatmaps(
-    pyramid: PyramidOutput,
+    pyramid: SimpleNamespace,
     tokens_per_row: Sequence[Sequence[str]],
     output_dir: Path,
     experiment_name: str,
     *,
     file_stem: str = "attention_heatmap",
 ) -> None:
-    """Single-sample attention heatmap with K subplots.
+    """Per-level attention heatmap — ONE standalone file per level.
 
-    Renders ``A_k[0]`` for each level (the input pyramid is expected to
-    carry ``B == 1``) with shape ``[L_k, valid_len]``. x-axis shows at
-    most 20 decoded token strings; y-axis shows the concept-slot index
-    ``j ∈ [0, L_k)``. Saved as ``<file_stem>.{png,pdf}`` in ``output_dir``.
+    Writes ``<file_stem>_level{k}.{png,pdf}`` for every ``k \u2208 [0, K)``.
+    Each figure has a single axes: rows = concept slots ``j \u2208 [0, L_k)``,
+    cols = valid CoT tokens (up to 20 tick labels) for sample 0.
     """
     K = pyramid.num_levels
     level_lengths = pyramid.level_lengths
@@ -551,20 +530,20 @@ def _plot_attention_heatmaps(
         return
     valid_lens = _per_row_valid_length(pyramid)
     i = 0  # batch_size = 1 by design
-
     L_i = int(valid_lens[i])
     tokens_i = list(tokens_per_row[i])[:L_i]
-    fig, axes = plt.subplots(
-        K,
-        1,
-        figsize=(16, 1.6 * K + 1.2),
-        squeeze=False,
-    )
-    axes = axes.flatten()
 
-    for k, ax in enumerate(axes):
+    cot_preview = "".join(tokens_per_row[i][:30]).replace("\n", " ").strip()
+    cot_preview = (
+        cot_preview if len(cot_preview) <= 110 else cot_preview[:107] + "\u2026"
+    )
+
+    for k in range(K):
         A_k = pyramid.level_outputs[k].attention_weights[i, :, :L_i]
         mat = A_k.detach().cpu().float().numpy()
+        L_k = level_lengths[k]
+        fig_h = max(2.4, 0.35 * L_k + 2.0)
+        fig, ax = plt.subplots(1, 1, figsize=(16, fig_h))
         im = ax.imshow(
             mat,
             aspect="auto",
@@ -572,34 +551,27 @@ def _plot_attention_heatmaps(
             interpolation="nearest",
             vmin=0.0,
         )
-        ax.set_ylabel(f"level {k}\n(L_k={level_lengths[k]})")
-        ax.set_yticks(np.arange(level_lengths[k]))
-        ax.set_yticklabels([str(j) for j in range(level_lengths[k])])
+        ax.set_ylabel(f"slot j  (L_k={L_k})")
+        ax.set_yticks(np.arange(L_k))
+        ax.set_yticklabels([str(j) for j in range(L_k)])
         xticks = _tick_positions(L_i, max_ticks=20)
         ax.set_xticks(xticks)
-        if k == K - 1:
-            ax.set_xticklabels(
-                [_short(tokens_i[t], n=8) for t in xticks],
-                rotation=60,
-                ha="right",
-            )
-            ax.set_xlabel("CoT token")
-        else:
-            ax.set_xticklabels([])
+        ax.set_xticklabels(
+            [_short(tokens_i[t], n=8) for t in xticks],
+            rotation=60,
+            ha="right",
+        )
+        ax.set_xlabel("CoT token")
         fig.colorbar(im, ax=ax, fraction=0.015, pad=0.01)
-
-    cot_preview = "".join(tokens_per_row[i][:30]).replace("\n", " ").strip()
-    cot_preview = cot_preview if len(cot_preview) <= 110 else cot_preview[:107] + "…"
-    fig.suptitle(
-        f"{experiment_name} — attention pyramid\n{cot_preview}",
-        y=1.02,
-    )
-    fig.tight_layout()
-    _save_figure(fig, output_dir, file_stem)
+        ax.set_title(
+            f"{experiment_name} \u2014 attention heatmap (level {k})\n{cot_preview}"
+        )
+        fig.tight_layout()
+        _save_figure(fig, output_dir, f"{file_stem}_level{k}")
 
 
 def _plot_attention_text_overlay(
-    pyramid: PyramidOutput,
+    pyramid: SimpleNamespace,
     tokens_per_row: Sequence[Sequence[str]],
     output_dir: Path,
     experiment_name: str,
@@ -607,16 +579,14 @@ def _plot_attention_text_overlay(
     file_stem: str = "attention_text_overlay",
     tokens_per_line: int = 18,
 ) -> None:
-    """Single-sample CoT-token coloured-box overlay, one row per level.
+    """Per-level attention-on-text overlay — ONE standalone file per level.
 
-    For sample 0 (input pyramid is expected to carry ``B == 1``) we
-    aggregate each level's attention across concept slots
-    (``a_k[t] = sum_j A_k[0, j, t]``), normalise per level, then draw the
-    CoT token sequence as a grid of rounded boxes wrapping every
+    For sample 0 (B==1) we aggregate each level's attention across concept
+    slots (``a_k[t] = sum_j A_k[0, j, t]``), normalise per level, then
+    draw the CoT token sequence as a grid of rounded boxes wrapping every
     ``tokens_per_line`` tokens. Box background colour (YlOrRd) encodes
-    ``a_k[t]``; one subplot per level, all stacked vertically.
-
-    Saved as ``<file_stem>.{png,pdf}`` in ``output_dir``.
+    ``a_k[t]``. ONE figure per level; written as
+    ``<file_stem>_level{k}.{png,pdf}``.
     """
     K = pyramid.num_levels
     B = pyramid.projected_hidden.shape[0]
@@ -633,12 +603,12 @@ def _plot_attention_text_overlay(
     n_lines = (L_i + tokens_per_line - 1) // tokens_per_line
 
     fig_w = min(20.0, 1.05 * tokens_per_line + 2.0)
-    fig_h = max(2.2, K * (0.45 * n_lines + 0.9))
-    fig, axes = plt.subplots(K, 1, figsize=(fig_w, fig_h), squeeze=False)
-    axes = axes[:, 0]
+    fig_h = max(2.4, 0.45 * n_lines + 1.4)
+
+    preview = "".join(tokens_i[:30]).replace("\n", " ").strip()
+    preview = preview if len(preview) <= 110 else preview[:107] + "\u2026"
 
     for k in range(K):
-        ax = axes[k]
         A_k = (
             pyramid.level_outputs[k]
             .attention_weights[i, :, :L_i]
@@ -651,6 +621,7 @@ def _plot_attention_text_overlay(
         a_max = float(attn.max()) if attn.size and float(attn.max()) > 0 else 1.0
         norm_attn = attn / a_max
 
+        fig, ax = plt.subplots(1, 1, figsize=(fig_w, fig_h))
         ax.set_xlim(-0.55, tokens_per_line - 0.45)
         ax.set_ylim(-(n_lines - 1) - 0.6, 0.6)
         ax.set_xticks([])
@@ -681,11 +652,6 @@ def _plot_attention_text_overlay(
                 ),
             )
 
-        ax.set_title(
-            f"Level {k}  (L_k={pyramid.level_lengths[k]}, max_w={a_max:.3f})",
-            loc="left",
-            fontsize=11,
-        )
         import matplotlib as _mpl
 
         sm = plt.cm.ScalarMappable(
@@ -693,30 +659,133 @@ def _plot_attention_text_overlay(
         )
         sm.set_array([])
         fig.colorbar(sm, ax=ax, fraction=0.012, pad=0.01)
+        ax.set_title(
+            f"{experiment_name} \u2014 attention-on-text (level {k}, "
+            f"L_k={pyramid.level_lengths[k]}, max_w={a_max:.3f})\n{preview}",
+            loc="left",
+            fontsize=11,
+        )
+        fig.tight_layout()
+        _save_figure(fig, output_dir, f"{file_stem}_level{k}")
+
+
+def _plot_attention_text_per_concept(
+    pyramid: SimpleNamespace,
+    tokens_per_row: Sequence[Sequence[str]],
+    output_dir: Path,
+    experiment_name: str,
+    *,
+    file_stem: str = "attention_text_per_concept",
+    tokens_per_line: int = 18,
+) -> None:
+    """Per-level, per-concept attention on text — ONE file per (level, slot).
+
+    For EVERY level k AND EVERY concept slot ``j \u2208 [0, L_k)`` this
+    function writes ``<file_stem>_level{k}_slot{j}.{png,pdf}``. The CoT
+    is rendered as wrapped rows of rounded token boxes whose background
+    colour (YlOrRd) encodes ``A_k[0, j, t]`` normalised by that slot's
+    own maximum, so every file uses the full [0, 1] colour range.
+
+    Keeping each concept slot in its own file lets the reader scroll
+    through them independently at any pyramid depth without subplots
+    shrinking each row to illegibility.
+    """
+    K = pyramid.num_levels
+    B = pyramid.projected_hidden.shape[0]
+    if B == 0:
+        return
+    valid_lens = _per_row_valid_length(pyramid)
+    cmap = plt.get_cmap("YlOrRd")
+    i = 0  # batch_size = 1 by design
+
+    L_i = int(valid_lens[i])
+    if L_i == 0:
+        return
+    tokens_i = list(tokens_per_row[i])[:L_i]
+    n_lines = (L_i + tokens_per_line - 1) // tokens_per_line
+
+    fig_w = min(20.0, 1.05 * tokens_per_line + 2.0)
+    fig_h = max(2.4, 0.45 * n_lines + 1.4)
 
     preview = "".join(tokens_i[:30]).replace("\n", " ").strip()
-    preview = preview if len(preview) <= 110 else preview[:107] + "…"
-    fig.suptitle(
-        f"{experiment_name} — attention-on-text overlay\n{preview}",
-        y=1.0,
-    )
-    fig.tight_layout()
-    _save_figure(fig, output_dir, file_stem)
+    preview = preview if len(preview) <= 110 else preview[:107] + "\u2026"
+
+    for k in range(K):
+        A_k = (
+            pyramid.level_outputs[k]
+            .attention_weights[i, :, :L_i]
+            .detach()
+            .cpu()
+            .float()
+            .numpy()
+        )  # [L_k, L_i]
+        L_k = pyramid.level_lengths[k]
+        for j in range(L_k):
+            row = A_k[j]
+            r_max = float(row.max()) if row.size and float(row.max()) > 0 else 1.0
+            norm_row = row / r_max
+
+            fig, ax = plt.subplots(1, 1, figsize=(fig_w, fig_h))
+            ax.set_xlim(-0.55, tokens_per_line - 0.45)
+            ax.set_ylim(-(n_lines - 1) - 0.6, 0.6)
+            ax.set_xticks([])
+            ax.set_yticks([])
+            for spine in ax.spines.values():
+                spine.set_visible(False)
+
+            for t_idx, tok in enumerate(tokens_i):
+                r = t_idx // tokens_per_line
+                c = t_idx % tokens_per_line
+                weight = float(norm_row[t_idx])
+                face = cmap(weight)
+                luminance = 0.299 * face[0] + 0.587 * face[1] + 0.114 * face[2]
+                txt_color = "white" if luminance < 0.5 else "black"
+                ax.text(
+                    c,
+                    -r,
+                    _short(tok, n=10),
+                    ha="center",
+                    va="center",
+                    fontsize=8,
+                    color=txt_color,
+                    bbox=dict(
+                        boxstyle="round,pad=0.25",
+                        facecolor=face,
+                        edgecolor="0.6",
+                        linewidth=0.3,
+                    ),
+                )
+
+            import matplotlib as _mpl
+
+            sm = plt.cm.ScalarMappable(
+                cmap=cmap, norm=_mpl.colors.Normalize(vmin=0.0, vmax=1.0)
+            )
+            sm.set_array([])
+            fig.colorbar(sm, ax=ax, fraction=0.012, pad=0.01)
+            ax.set_title(
+                f"{experiment_name} \u2014 attention-on-text "
+                f"(level {k}, slot {j}, L_k={L_k}, max_w={r_max:.3f})\n{preview}",
+                loc="left",
+                fontsize=11,
+            )
+            fig.tight_layout()
+            _save_figure(fig, output_dir, f"{file_stem}_level{k}_slot{j}")
 
 
 def _plot_concept_norms(
-    pyramid: PyramidOutput,
+    pyramid: SimpleNamespace,
     output_dir: Path,
     experiment_name: str,
 ) -> None:
-    """Per-level histograms of ``||C_k[b,j]||``.
+    """Per-level histograms of ``||C_k[b,j]||`` — ONE file per level.
 
-    Coarse-to-fine decomposition predicts that deeper levels operate on
-    a shrinking residual, so concept norms should *decrease* with ``k``.
-    Plotting all K histograms with a shared x-axis makes the trend legible.
+    Writes ``concept_norms_level{k}.{png,pdf}`` for every level. Sharing
+    the x-axis across all files (via a global max) makes the trend
+    towards smaller norms at deeper levels visible when flipping through
+    the files.
     """
     K = pyramid.num_levels
-    # Pool norms per level (across batch + slots) onto one row of subplots.
     norms_per_level: List[np.ndarray] = []
     for k in range(K):
         C_k = pyramid.concepts[k]  # [B, L_k, D]
@@ -727,14 +796,8 @@ def _plot_concept_norms(
         float(max(n.max() for n in norms_per_level)) if norms_per_level else 1.0
     )
 
-    cols = min(K, 3)
-    rows = int(np.ceil(K / cols))
-    fig, axes = plt.subplots(
-        rows, cols, figsize=(4.5 * cols, 3.2 * rows), squeeze=False
-    )
-    axes_flat = axes.flatten()
     for k in range(K):
-        ax = axes_flat[k]
+        fig, ax = plt.subplots(1, 1, figsize=(6.5, 4.2))
         ax.hist(norms_per_level[k], bins=30, color="tab:blue", alpha=0.75)
         ax.axvline(
             float(np.mean(norms_per_level[k])),
@@ -743,20 +806,20 @@ def _plot_concept_norms(
             linewidth=1.2,
             label="mean",
         )
-        ax.set_title(f"level {k} (L_k={pyramid.level_lengths[k]})")
         ax.set_xlabel(r"$\|C_k\|_2$")
         ax.set_ylabel("count")
         ax.set_xlim(0, global_max * 1.05)
         ax.legend(loc="upper right")
-    for idx in range(K, len(axes_flat)):
-        axes_flat[idx].set_visible(False)
-    fig.suptitle(f"{experiment_name} — concept-norm distribution per level")
-    fig.tight_layout()
-    _save_figure(fig, output_dir, "concept_norms")
+        ax.set_title(
+            f"{experiment_name} \u2014 concept-norm distribution "
+            f"(level {k}, L_k={pyramid.level_lengths[k]})"
+        )
+        fig.tight_layout()
+        _save_figure(fig, output_dir, f"concept_norms_level{k}")
 
 
 def _plot_residual_decomposition(
-    pyramid: PyramidOutput,
+    pyramid: SimpleNamespace,
     output_dir: Path,
     experiment_name: str,
 ) -> None:
@@ -836,55 +899,49 @@ def _plot_residual_decomposition(
 
 
 def _plot_intra_level_similarity(
-    pyramid: PyramidOutput,
+    pyramid: SimpleNamespace,
     output_dir: Path,
     experiment_name: str,
 ) -> None:
-    """K cosine-similarity heatmaps, one per level (averaged over batch).
+    """Slot-to-slot cosine-similarity heatmap — ONE file per level.
 
-    For level k the slot-to-slot matrix has shape ``[L_k, L_k]``. A diffuse
-    matrix indicates orthogonal slots (healthy); a near-uniform matrix
-    signals slot collapse.
+    Writes ``intra_level_similarity_level{k}.{png,pdf}``. For level k the
+    matrix has shape ``[L_k, L_k]`` (averaged over batch). A diffuse
+    matrix means healthy orthogonal slots; a near-uniform matrix signals
+    slot collapse.
     """
     K = pyramid.num_levels
-    mats: List[np.ndarray] = []
     for k in range(K):
         C_k = pyramid.concepts[k]  # [B, L_k, D]
-        # Unit-normalise along D, then outer product per-batch, average.
         eps = 1e-8
         C_unit = C_k / (torch.linalg.vector_norm(C_k, dim=-1, keepdim=True) + eps)
         sim = torch.bmm(C_unit, C_unit.transpose(1, 2))  # [B, L_k, L_k]
-        mats.append(sim.mean(dim=0).detach().cpu().float().numpy())
+        mat = sim.mean(dim=0).detach().cpu().float().numpy()
 
-    cols = min(K, 3)
-    rows = int(np.ceil(K / cols))
-    fig, axes = plt.subplots(
-        rows, cols, figsize=(4.0 * cols, 3.6 * rows), squeeze=False
-    )
-    axes_flat = axes.flatten()
-    for k in range(K):
-        ax = axes_flat[k]
+        L_k = pyramid.level_lengths[k]
+        fig_size = max(4.0, 0.25 * L_k + 3.5)
+        fig, ax = plt.subplots(1, 1, figsize=(fig_size, fig_size))
         im = ax.imshow(
-            mats[k],
+            mat,
             aspect="auto",
             cmap="coolwarm",
             vmin=-1.0,
             vmax=1.0,
             interpolation="nearest",
         )
-        ax.set_title(f"level {k} (L_k={pyramid.level_lengths[k]})")
         ax.set_xlabel("slot j")
         ax.set_ylabel("slot i")
         fig.colorbar(im, ax=ax, fraction=0.04, pad=0.02)
-    for idx in range(K, len(axes_flat)):
-        axes_flat[idx].set_visible(False)
-    fig.suptitle(f"{experiment_name} — intra-level concept cosine similarity")
-    fig.tight_layout()
-    _save_figure(fig, output_dir, "intra_level_similarity")
+        ax.set_title(
+            f"{experiment_name} \u2014 intra-level cosine similarity "
+            f"(level {k}, L_k={L_k})"
+        )
+        fig.tight_layout()
+        _save_figure(fig, output_dir, f"intra_level_similarity_level{k}")
 
 
 def _plot_inter_level_similarity(
-    pyramid: PyramidOutput,
+    pyramid: SimpleNamespace,
     output_dir: Path,
     experiment_name: str,
 ) -> None:
@@ -939,7 +996,7 @@ def _plot_inter_level_similarity(
 
 
 def _plot_attention_entropy(
-    pyramid: PyramidOutput,
+    pyramid: SimpleNamespace,
     output_dir: Path,
     experiment_name: str,
 ) -> None:
@@ -988,7 +1045,7 @@ def _plot_attention_entropy(
 
 
 def _plot_token_coverage(
-    pyramid: PyramidOutput,
+    pyramid: SimpleNamespace,
     output_dir: Path,
     experiment_name: str,
 ) -> None:
@@ -1041,7 +1098,7 @@ def _plot_token_coverage(
 
 
 def _plot_concept_pca(
-    pyramid: PyramidOutput,
+    pyramid: SimpleNamespace,
     output_dir: Path,
     experiment_name: str,
 ) -> None:
@@ -1092,6 +1149,70 @@ def _plot_concept_pca(
     _save_figure(fig, output_dir, "concept_pca")
 
 
+def _plot_concept_pca_per_level(
+    pyramid: SimpleNamespace,
+    output_dir: Path,
+    experiment_name: str,
+) -> None:
+    """Per-level 2-D PCA of concepts — ONE standalone scatter per level.
+
+    Writes ``concept_pca_level{k}.{png,pdf}``. Unlike ``concept_pca``
+    (all levels in one shared axis), here each level's concepts are
+    mean-centred and projected onto their OWN top-2 principal axes via
+    ``torch.svd_lowrank`` — so the scatter reflects the intra-level
+    structure (spread, clusters) directly without cross-level noise.
+    Each point carries its slot index ``j`` as a text annotation so the
+    reader can correlate geometry with the other per-slot analyses.
+    """
+    K = pyramid.num_levels
+    for k in range(K):
+        C_k = pyramid.concepts[k].detach().cpu().float()  # [B, L_k, D]
+        B_k, L_k, _ = C_k.shape
+        X = C_k.reshape(B_k * L_k, -1)
+        if X.shape[0] < 2:
+            # PCA on a single point is meaningless; skip the figure.
+            continue
+        X_centred = X - X.mean(dim=0, keepdim=True)
+        q = min(3, X_centred.shape[0], X_centred.shape[1])
+        _, _, V = torch.svd_lowrank(X_centred, q=q)
+        pcs = (X_centred @ V[:, :2]).numpy()  # [N, 2]
+
+        # Slot labels repeat every L_k rows across the batch dimension.
+        slots = np.tile(np.arange(L_k), B_k)
+
+        fig, ax = plt.subplots(1, 1, figsize=(6.5, 5.5))
+        sc = ax.scatter(
+            pcs[:, 0],
+            pcs[:, 1],
+            c=slots,
+            cmap="viridis",
+            s=36,
+            alpha=0.85,
+            edgecolors="none",
+        )
+        # Annotate first batch's slots (batch_size is 1 at eval time, so
+        # this labels every point for the typical use case).
+        for n in range(min(L_k, pcs.shape[0])):
+            ax.annotate(
+                f"{slots[n]}",
+                (pcs[n, 0], pcs[n, 1]),
+                textcoords="offset points",
+                xytext=(4, 4),
+                fontsize=9,
+                color="black",
+            )
+        ax.axhline(0.0, color="grey", linestyle=":", linewidth=0.7)
+        ax.axvline(0.0, color="grey", linestyle=":", linewidth=0.7)
+        ax.set_xlabel("PC 1 (level-local)")
+        ax.set_ylabel("PC 2 (level-local)")
+        ax.grid(True, linestyle=":", alpha=0.4)
+        cbar = fig.colorbar(sc, ax=ax, fraction=0.04, pad=0.02)
+        cbar.set_label("slot j")
+        ax.set_title(f"{experiment_name} — concept PCA (level {k}, L_k={L_k})")
+        fig.tight_layout()
+        _save_figure(fig, output_dir, f"concept_pca_level{k}")
+
+
 # =============================================================================
 # Orchestration
 # =============================================================================
@@ -1112,139 +1233,119 @@ def _safe_id(main_id: Any) -> str:
     return safe or "unnamed"
 
 
-def _resolve_output_root(
-    config: Dict[str, Any],
-    checkpoint_override: Optional[Path],
-) -> Path:
-    """Where to write ``concept_pyramid_analysis/`` for this run.
+def _resolve_eval_root(config: Dict[str, Any], mode: str) -> Path:
+    """Return ``<log_path>/eval_builder/<mode>/`` (after ``apply_storage_root``).
 
-    * Without ``-p`` → next to the model's logs (``<log>.parent``).
-    * With ``-p`` → ``Path(-p).parent.parent``. This co-locates the
-      figures with the experiment that owns the override checkpoint.
+    This is the directory eval_builder writes its per-sample dumps into,
+    and the directory this script reads from AND writes figures into.
     """
-    if checkpoint_override is not None:
-        return checkpoint_override.parent.parent / ANALYSIS_OUTPUT_DIR_NAME
     log_dir = Path(config["log"]["log_path"]).expanduser()
-    return log_dir.parent / ANALYSIS_OUTPUT_DIR_NAME
+    return log_dir / EVAL_BUILDER_DIR_NAME / mode
 
 
-def _save_sample_input(batch: BuilderInput, output_dir: Path, sample_id: str) -> None:
-    """Write the sample's raw Q + CoT (and solution if any) to ``input.txt``.
+def _existing_outputs(eval_root: Path, analyses: Sequence[str]) -> bool:
+    """Return True iff every ``sample_*/pyramid.pt`` already has every figure.
 
-    Co-locating the source text with every figure means the reader can
-    open one folder and immediately verify which substrings drive the
-    attention overlay — no need to reproduce the deterministic batch.
+    Layout: ``<eval_root>/sample_*/<file_stem>.png``. Both PNG and PDF
+    are written together so checking the PNG is sufficient. Sample
+    folders missing ``pyramid.pt`` (e.g. eval_builder ran with ``-v 0``)
+    are skipped — they'd never get figures anyway.
     """
-    lines: List[str] = [
-        f"sample_id: {sample_id}",
-        "=" * 70,
-        "## QUESTION",
-        batch.questions[0] if batch.questions else "",
-        "",
-        "## CHAIN-OF-THOUGHT",
-        batch.cot_answers[0] if batch.cot_answers else "",
-    ]
-    if batch.solutions:
-        lines.extend(["", "## SOLUTION", batch.solutions[0]])
-    (output_dir / "input.txt").write_text("\n".join(lines), encoding="utf-8")
-
-
-def _existing_outputs(
-    output_dir: Path, analyses: Sequence[str], num_samples: int
-) -> bool:
-    """Return True iff ``num_samples`` sample folders already carry every analysis.
-
-    Layout: ``<output_dir>/sample_*/<file_stem>.png``. Both PNG and PDF
-    are written together so checking the PNG is sufficient.
-    """
-    if not output_dir.is_dir():
+    if not eval_root.is_dir():
         return False
     sample_dirs = sorted(
-        p for p in output_dir.iterdir() if p.is_dir() and p.name.startswith("sample_")
+        p for p in eval_root.iterdir() if p.is_dir() and p.name.startswith("sample_")
     )
-    if len(sample_dirs) < num_samples:
+    if not sample_dirs:
         return False
     needed_stems = [
-        _ANALYSIS_FILE_STEMS[k] for k in analyses if k in _ANALYSIS_FILE_STEMS
+        _ANALYSIS_SENTINEL_STEMS[k] for k in analyses if k in _ANALYSIS_SENTINEL_STEMS
     ]
-    for sd in sample_dirs[:num_samples]:
+    any_with_dump = False
+    for sd in sample_dirs:
+        if not (sd / PYRAMID_DUMP_NAME).is_file():
+            continue
+        any_with_dump = True
         for stem in needed_stems:
             if not (sd / f"{stem}.png").is_file():
                 return False
-    return True
+    return any_with_dump
 
 
 def _run_concept_analysis(
     config_path: Path,
     *,
     storage_root: str,
-    split: str,
-    num_samples: int,
+    mode: str,
     analyses: Sequence[str],
-    seed: int,
-    checkpoint_override: Optional[Path],
-) -> None:
-    """Full pipeline for a single config: load -> per-sample forward -> dispatch.
+) -> int:
+    """Iterate every ``sample_*/pyramid.pt`` under eval_root and render figures.
 
-    Forward pass uses ``batch_size=1`` by design. Each sample lands in
-    ``<output_root>/sample_<main_id>/`` together with ``input.txt`` and
-    every requested analysis figure. Aggregate-style plots (histograms,
-    PCA, similarity matrices) still render meaningfully on a B=1 slice
-    because they pool over the per-sample slot dimension.
+    Figures land INSIDE each sample folder (next to ``input.json`` /
+    ``pyramid.pt`` / ``reasoning.json``), so the layout is flat and
+    self-describing: open a sample folder → everything about that sample.
+
+    The HF tokenizer is lazy-instantiated on first use (zero cost when
+    there are no samples to plot) so that repeatedly invoking this on
+    skip_no_data configs does not trigger tokenizer downloads.
+
+    Returns the number of sample folders that received figures.
     """
     config = load_config(str(config_path))
     apply_storage_root(config, storage_root)
     _apply_plot_style()
 
     experiment_name = _derive_experiment_name(config_path)
-    output_root = _resolve_output_root(config, checkpoint_override)
-    output_root.mkdir(parents=True, exist_ok=True)
+    eval_root = _resolve_eval_root(config, mode)
 
-    builder, device, _ckpt_path = load_builder(
-        config, checkpoint_override=checkpoint_override
+    sample_dirs = sorted(
+        p for p in eval_root.iterdir() if p.is_dir() and p.name.startswith("sample_")
     )
 
-    # Collect num_samples deterministic rows; loader uses bs=1 so the
-    # first num_samples rows are always the same regardless of split.
-    batch = collect_batch(
-        config,
-        split=split,
-        num_samples=num_samples,
-        batch_size=1,
-        seed=seed,
-    )
-    logger.info(
-        "Per-sample analysis: split=%s  N=%d  device=%s",
-        split,
-        batch.batch_size,
-        device,
-    )
-
+    tokenizer = None
+    max_seq_len = int(config["model"]["pyramid"]["max_seq_len"])
     analyses_set = set(analyses)
-    actual = min(num_samples, batch.batch_size)
-    for i in range(actual):
-        sample_id = _safe_id(batch.main_ids[i])
-        sample_dir = output_root / f"sample_{sample_id}"
-        sample_dir.mkdir(parents=True, exist_ok=True)
+    n_rendered = 0
 
-        # Single-sample BuilderInput -> forward yields a B=1 pyramid.
-        single = BuilderInput(
-            questions=[batch.questions[i]],
-            cot_answers=[batch.cot_answers[i]],
-            solutions=[batch.solutions[i]] if batch.solutions else [],
-            main_ids=[batch.main_ids[i]],
-        )
-        _save_sample_input(single, sample_dir, sample_id)
-        pyramid, tokens_per_row = run_forward(builder, single)
+    for sample_dir in sample_dirs:
+        pt_path = sample_dir / PYRAMID_DUMP_NAME
+        if not pt_path.is_file():
+            logger.info("  skip (no pyramid.pt): %s", sample_dir.name)
+            continue
+        try:
+            pyramid = _load_pyramid_from_disk(pt_path)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "  load pyramid.pt failed (%s): %s", type(exc).__name__, pt_path
+            )
+            continue
+
+        # Retokenise CoT from input.json so attention heatmaps / overlays
+        # carry meaningful column labels; fall back to integer indices if
+        # input.json is absent (should be rare — eval_builder always writes
+        # it unless artifacts.input was explicitly disabled).
+        input_json = sample_dir / INPUT_JSON_NAME
+        if input_json.is_file():
+            if tokenizer is None:
+                tokenizer = _load_tokenizer_from_config(config)
+            sample_input = _load_sample_input(input_json)
+            cot_text = sample_input.get("cot_answer", "") or ""
+            tokens_per_row = [_retokenize_cot(tokenizer, cot_text, max_seq_len)]
+        else:
+            L = int(pyramid.projected_hidden.shape[1])
+            tokens_per_row = [[str(i) for i in range(L)]]
 
         # Dispatch every requested analysis into THIS sample's folder.
+        # Multi-level analyses write per-level (or per-slot) files named
+        # with a suffix; single-axis analyses write a single file. See
+        # ``_ANALYSIS_SENTINEL_STEMS`` for the existence-probe stems.
         if "attention_heatmaps" in analyses_set:
             _plot_attention_heatmaps(
                 pyramid,
                 tokens_per_row,
                 sample_dir,
                 experiment_name,
-                file_stem=_ANALYSIS_FILE_STEMS["attention_heatmaps"],
+                file_stem="attention_heatmap",
             )
         if "attention_text_overlay" in analyses_set:
             _plot_attention_text_overlay(
@@ -1252,7 +1353,15 @@ def _run_concept_analysis(
                 tokens_per_row,
                 sample_dir,
                 experiment_name,
-                file_stem=_ANALYSIS_FILE_STEMS["attention_text_overlay"],
+                file_stem="attention_text_overlay",
+            )
+        if "attention_text_per_concept" in analyses_set:
+            _plot_attention_text_per_concept(
+                pyramid,
+                tokens_per_row,
+                sample_dir,
+                experiment_name,
+                file_stem="attention_text_per_concept",
             )
         if "concept_norms" in analyses_set:
             _plot_concept_norms(pyramid, sample_dir, experiment_name)
@@ -1268,15 +1377,19 @@ def _run_concept_analysis(
             _plot_token_coverage(pyramid, sample_dir, experiment_name)
         if "concept_pca" in analyses_set:
             _plot_concept_pca(pyramid, sample_dir, experiment_name)
+        if "concept_pca_per_level" in analyses_set:
+            _plot_concept_pca_per_level(pyramid, sample_dir, experiment_name)
 
+        n_rendered += 1
         logger.info(
-            "sample_%s: wrote %d analyses -> %s",
-            sample_id,
+            "  %s: wrote %d analyses -> %s",
+            sample_dir.name,
             len(analyses_set),
             sample_dir,
         )
 
-    print(f"Saved {actual} sample folder(s) to {output_root}")
+    print(f"Rendered figures into {n_rendered} sample folder(s) under {eval_root}")
+    return n_rendered
 
 
 def analyze_one(
@@ -1284,13 +1397,17 @@ def analyze_one(
     *,
     overlap: bool,
     storage_root: str,
-    split: str,
-    num_samples: int,
+    mode: str,
     analyses: Sequence[str],
-    seed: int,
-    checkpoint_override: Optional[Path],
 ) -> Tuple[str, str]:
-    """Per-config status tracker — mirrors the pattern of ``builder_training_analysis``."""
+    """Per-config status tracker: resolve eval_root, skip or render.
+
+    A config is ``skip_no_data`` when the eval_builder dump directory
+    doesn't exist or has no ``sample_*/pyramid.pt`` files (you need to
+    run ``eval_builder.py ... -v 1 --mode <mode>`` first). It is
+    ``skip_exists`` when every expected figure is already on disk and
+    ``--no-overlap`` was requested.
+    """
     try:
         config = load_config(str(config_path))
     except Exception as exc:  # noqa: BLE001
@@ -1299,35 +1416,35 @@ def analyze_one(
     apply_storage_root(config, storage_root)
     print_storage_paths(config, storage_root)
 
-    # Fast skip: with -p we just check the override file exists; without -p
-    # we look for any checkpoint_best*.pt under the config-resolved dir.
-    if checkpoint_override is None:
-        checkpoint_dir = Path(config["log"]["checkpoint_path"]).expanduser()
-        if _locate_best_checkpoint(checkpoint_dir) is None:
-            return "skip_no_data", f"no checkpoint under {checkpoint_dir}"
-    else:
-        if not checkpoint_override.is_file():
-            return "skip_no_data", f"-p file not found: {checkpoint_override}"
+    eval_root = _resolve_eval_root(config, mode)
+    if not eval_root.is_dir():
+        return "skip_no_data", f"no eval dump at {eval_root}"
 
-    output_root = _resolve_output_root(config, checkpoint_override)
-    if not overlap and _existing_outputs(output_root, analyses, num_samples):
-        return "skip_exists", f"outputs exist at {output_root}"
+    sample_dumps = [
+        p
+        for p in eval_root.iterdir()
+        if p.is_dir()
+        and p.name.startswith("sample_")
+        and (p / PYRAMID_DUMP_NAME).is_file()
+    ]
+    if not sample_dumps:
+        return "skip_no_data", f"no sample_*/pyramid.pt under {eval_root}"
+
+    if not overlap and _existing_outputs(eval_root, analyses):
+        return "skip_exists", f"figures already present under {eval_root}"
 
     try:
-        _run_concept_analysis(
+        n = _run_concept_analysis(
             config_path,
             storage_root=storage_root,
-            split=split,
-            num_samples=num_samples,
+            mode=mode,
             analyses=analyses,
-            seed=seed,
-            checkpoint_override=checkpoint_override,
         )
     except Exception as exc:  # noqa: BLE001
         plt.close("all")
         return "error", f"{type(exc).__name__}: {exc}"
 
-    return "analyzed", f"wrote figures to {output_root}"
+    return "analyzed", f"rendered figures in {n} sample folder(s) under {eval_root}"
 
 
 def _print_summary(rows: List[Tuple[str, str, str]]) -> None:
@@ -1372,32 +1489,22 @@ def _resolve_configs_from_args(args: argparse.Namespace) -> List[Path]:
 
 
 def main() -> int:
-    """CLI entry — iterate matching configs and emit concept-analysis figures."""
+    """CLI entry — iterate matching configs and render concept-analysis figures.
+
+    The script consumes ``eval_builder.py`` dumps, so it expects the
+    eval_builder output tree to exist. Configs without a dump are marked
+    ``skip_no_data`` rather than erroring — useful when batch-processing
+    a dataset where only a subset has been evaluated.
+    """
     args = parse_args()
     overlap: bool = args.overlap
     storage_root: str = args.storage_root
-    split: str = args.split
-    num_samples: int = args.num_samples
+    mode: str = args.mode
     analyses = _parse_analyses(args.analyses)
-    seed: int = args.seed
-    checkpoint_override: Optional[Path] = (
-        Path(args.checkpoint).expanduser().resolve()
-        if args.checkpoint is not None
-        else None
-    )
-
-    if num_samples <= 0:
-        raise SystemExit("[ERROR] --num-samples must be > 0")
-    if checkpoint_override is not None and not checkpoint_override.is_file():
-        raise SystemExit(f"[ERROR] -p/--checkpoint not found: {checkpoint_override}")
 
     configs = _resolve_configs_from_args(args)
     if not configs:
         return 1
-    if checkpoint_override is not None and len(configs) != 1:
-        raise SystemExit(
-            "[ERROR] -p/--checkpoint requires exactly one config (use -c)."
-        )
 
     logging.basicConfig(
         level=logging.INFO,
@@ -1409,13 +1516,9 @@ def main() -> int:
         if args.config is not None
         else f"dataset={args.dataset}  experiment={args.experiment}"
     )
-    ckpt_desc = (
-        f"  checkpoint={checkpoint_override}" if checkpoint_override is not None else ""
-    )
     print(
-        f"[ANALYZE] concept pyramid  {source_desc}  split={split}  "
-        f"num_samples={num_samples}  bs=1  "
-        f"analyses={','.join(analyses)}  overlap={overlap}{ckpt_desc}  "
+        f"[ANALYZE] concept pyramid  {source_desc}  mode={mode}  "
+        f"analyses={','.join(analyses)}  overlap={overlap}  "
         f"({len(configs)} config file(s))"
     )
     for p in configs:
@@ -1432,11 +1535,8 @@ def main() -> int:
             cfg_path,
             overlap=overlap,
             storage_root=storage_root,
-            split=split,
-            num_samples=num_samples,
+            mode=mode,
             analyses=analyses,
-            seed=seed,
-            checkpoint_override=checkpoint_override,
         )
         if status == "analyzed":
             print(f"[OK]   {detail}")
