@@ -117,7 +117,7 @@ from lmbase.utils.env_tools import get_device
 from nlcpV4.concept_builder import ConceptPyramidBuilder
 from nlcpV4.concept_predictor import ConceptPredictor, PredictorOutput
 from nlcpV4.data_loader import BuilderInput, NLCPV4DataLoader
-from nlcpV4.eval_builder import _strip_solutions, _tokenize_qs
+from nlcpV4.eval_predictor import _strip_solutions, _tokenize_qs
 from nlcpV4.train_predictor import (
     _inherit_pyramid_from_builder,
     _load_frozen_builder,

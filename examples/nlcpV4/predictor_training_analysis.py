@@ -75,23 +75,14 @@ IGNORE_LEGEND_LIST = [
     # "GSM8K_Qwen2.5-0.5B_6level_independent_AutoWeighted",
 ]
 
-# Configs whose plot titles should replace the model-name substring
-# (e.g. ``Qwen2.5-0.5B_``) with a different label for presentation.
-# Matched against ``log_dir.parent.name`` — same key as IGNORE_LEGEND_LIST.
-STRIP_MODEL_IN_TITLE_LIST = [
+# Configs whose plot titles should have the model-name token replaced.
+RENAME_MODEL_IN_TITLE_LIST = [
     "GSM8K_Qwen2.5-0.5B_2level_independent_AutoWeighted",
     "GSM8K_Qwen2.5-0.5B_4level_independent_AutoWeighted",
     "GSM8K_Qwen2.5-0.5B_6level_independent_AutoWeighted",
 ]
-
-# Matches model-name tokens like ``Qwen2.5-0.5B_`` / ``Qwen3-8B_``
-# that appear in experiment names; used to rename them when the
-# parent dir is listed in STRIP_MODEL_IN_TITLE_LIST.
-_MODEL_NAME_RE = re.compile(r"Qwen[\d.]+-[\d.]+B_")
-
-# Replacement label for titles matched by STRIP_MODEL_IN_TITLE_LIST
-# (set to empty string to strip instead of rename).
-TITLE_MODEL_REPLACEMENT = "Llama-2-7B-chat_"
+RENAME_MODEL_TO = "Llama-2-7B-chat"
+_MODEL_NAME_RE = re.compile(r"Qwen[\d.]+-[\d.]+B")
 
 ANALYSIS_OUTPUTS = (
     "training_losses.png",
@@ -330,7 +321,8 @@ def run_checkpoint_eval(config: dict) -> dict | None:
     from nlcpV4.concept_builder import ConceptPyramidBuilder
     from nlcpV4.concept_predictor import ConceptPredictor
     from nlcpV4.data_loader import NLCPV4DataLoader
-    from nlcpV4.eval_builder import evaluate_predictor
+    from nlcpV4.eval_predictor import evaluate_predictor
+    from nlcpV4.eval_builder import MODE_TEACHER_FORCED
 
     checkpoint_dir = Path(config["log"]["checkpoint_path"]).expanduser()
 
@@ -400,6 +392,10 @@ def run_checkpoint_eval(config: dict) -> dict | None:
         max_length=max_length,
         device=device,
         max_batches=0,
+        mode=MODE_TEACHER_FORCED,
+        generation_max_tokens=0,
+        output_root=None,
+        dump_artifacts=False,
     )
 
     logger.info(
@@ -988,12 +984,8 @@ def _run_predictor_analysis(
     if _stem.startswith("train_"):
         _stem = _stem[len("train_") :]
     experiment_name = _stem
-
-    # Optionally rename the model-name token (e.g. ``Qwen2.5-0.5B_`` ->
-    # ``Llama-2-7B-chat_``) in the title for configs listed in
-    # STRIP_MODEL_IN_TITLE_LIST.
-    if log_dir.parent.name in STRIP_MODEL_IN_TITLE_LIST:
-        experiment_name = _MODEL_NAME_RE.sub(TITLE_MODEL_REPLACEMENT, experiment_name)
+    if log_dir.parent.name in RENAME_MODEL_IN_TITLE_LIST:
+        experiment_name = _MODEL_NAME_RE.sub(RENAME_MODEL_TO, experiment_name)
 
     # ── Load data ─────────────────────────────────────────────────
     history = load_training_history(log_dir)
@@ -1002,6 +994,8 @@ def _run_predictor_analysis(
 
     # Apply --cut-step filter
     if cut_step is not None:
+        if log_dir.parent.name not in RENAME_MODEL_IN_TITLE_LIST:
+            cut_step = 10000000
         history = [r for r in history if r["step"] <= cut_step]
         terminal = [r for r in terminal if r.get("step", 0) <= cut_step]
         eval_hist = [r for r in eval_hist if r["step"] <= cut_step]

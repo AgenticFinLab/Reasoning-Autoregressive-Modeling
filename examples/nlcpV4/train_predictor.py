@@ -85,12 +85,12 @@ from nlcpV4 import _resume_io
 from nlcpV4.concept_builder import ConceptPyramidBuilder
 from nlcpV4.concept_predictor import ConceptPredictor
 from nlcpV4.data_loader import BuilderInput, NLCPV4DataLoader
-from nlcpV4.eval_builder import (
+from nlcpV4.eval_builder import log_terminal_entry
+from nlcpV4.eval_predictor import (
     _strip_solutions,
     _tokenize_qs,
     evaluate_predictor,
     log_eval_results_predictor,
-    log_terminal_entry,
 )
 from nlcpV4.losses import compute_predictor_loss
 from ram.utils import apply_storage_root, load_config, print_storage_paths
@@ -725,10 +725,10 @@ def train_predictor(
     eval_interval = eval_cfg["eval_step_interval"]
     eval_enabled = eval_interval > 0
     eval_dataloader = None
-    # Reasoning text recording flags (default: teacher-forced ON, generation OFF)
-    tf_reasoning = eval_cfg.get("teacher_force_reasoning", True)
-    gen_reasoning = eval_cfg.get("generation_reasoning", False)
-    gen_max_tokens = eval_cfg.get("generation_max_tokens", 256)
+    # Single ``mode`` selector replaces legacy teacher_force/generation flags.
+    # Valid values are declared in ``nlcpV4.eval_builder.VALID_MODES``.
+    eval_mode = eval_cfg["mode"]
+    gen_max_tokens = eval_cfg["generation_max_tokens"]
     eval_history: list[dict] = []
     eval_sample_history: list[dict] = []
     quick_eval_batches = 0
@@ -947,9 +947,10 @@ def train_predictor(
                         max_length,
                         device,
                         max_batches=quick_eval_batches,
-                        teacher_force_reasoning=tf_reasoning,
-                        generation_reasoning=gen_reasoning,
+                        mode=eval_mode,
                         generation_max_tokens=gen_max_tokens,
+                        output_root=None,
+                        dump_artifacts=False,
                     )
                     log_eval_results_predictor(
                         eval_losses,
@@ -1020,9 +1021,10 @@ def train_predictor(
                     max_length,
                     device,
                     max_batches=full_eval_batches,
-                    teacher_force_reasoning=tf_reasoning,
-                    generation_reasoning=gen_reasoning,
+                    mode=eval_mode,
                     generation_max_tokens=gen_max_tokens,
+                    output_root=None,
+                    dump_artifacts=False,
                 )
                 log_eval_results_predictor(
                     eval_losses,

@@ -75,7 +75,11 @@ sys.path.insert(0, str(PROJECT_ROOT / "examples"))
 from lmbase.utils.env_tools import get_device
 from nlcpV4.concept_builder import ConceptPyramidBuilder
 from nlcpV4.data_loader import NLCPV4DataLoader
-from nlcpV4.eval_builder import compute_reasoning_accuracy, evaluate_builder
+from nlcpV4.eval_builder import (
+    MODE_TEACHER_FORCED,
+    compute_reasoning_accuracy,
+    evaluate_builder,
+)
 from ram.utils import apply_storage_root, load_config, print_storage_paths
 
 logger = logging.getLogger(__name__)
@@ -88,6 +92,13 @@ ALL_KEYWORD = "all"
 # Presence of ALL six is treated as "already analyzed". They live in
 # <experiment>/train_analysis/, not in the logs/ directory.
 ANALYSIS_OUTPUT_DIR_NAME = "train_analysis"
+
+# Configs whose eval_losses_overlay figures should suppress the legend
+# (e.g. too many overlapping entries make the legend unreadable).
+IGNORE_LEGEND_LIST: list[str] = [
+    # "GSM8K_Qwen2.5-0.5B_6level_AutoWeighted",
+]
+
 ANALYSIS_OUTPUTS = (
     "training_losses.png",
     "training_losses_overlay.png",
@@ -152,6 +163,15 @@ def parse_args():
         help=(
             "If true (default), overwrite existing analysis outputs. "
             "Pass --no-overlap to skip configs whose outputs already exist."
+        ),
+    )
+    parser.add_argument(
+        "--cut-step",
+        type=int,
+        default=None,
+        help=(
+            "If set, only plot data up to this training step. "
+            "Useful for zooming into early training."
         ),
     )
     return parser.parse_args()
@@ -431,6 +451,10 @@ def run_checkpoint_eval(config: dict) -> dict | None:
         ordering_loss_type=ordering_loss_type,
         # Evaluate all batches
         max_batches=0,
+        mode=MODE_TEACHER_FORCED,
+        generation_max_tokens=0,
+        output_root=None,
+        dump_artifacts=False,
     )
 
     logger.info(
@@ -604,6 +628,7 @@ def _build_figures(
     ckpt_eval,
     lr_steps,
     lr_values,
+    suppress_eval_legend: bool = False,
 ) -> None:
     """Build the 3 PNGs for one loss mode and save them under ``output_dir``.
 
@@ -648,7 +673,7 @@ def _build_figures(
 
     # ── Figure 1: 3x2 grid of component losses + LR ──────────────
     fig, axes = plt.subplots(3, 2, figsize=(16, 14))
-    fig.suptitle(f"Builder Training Analysis ({mode_label}): {experiment_name}", y=0.98)
+    fig.suptitle(f"{experiment_name}", y=0.98, fontsize=22)
 
     # Total loss (weighted-sum or raw-sum depending on mode)
     ax = axes[0, 0]
@@ -725,7 +750,7 @@ def _build_figures(
 
     # ── Figure 2: overlay ─────────────────────────────────────────
     fig2, ax2 = plt.subplots(figsize=(14, 6))
-    ax2.set_title(overlay_title)
+    ax2.set_title(experiment_name)
 
     overlay_items = [
         ("recon", comp_arrays["recon"], "tab:blue"),
@@ -772,7 +797,7 @@ def _build_figures(
 
     # ── Figure 3: eval overlay ────────────────────────────────────
     fig3, ax3 = plt.subplots(figsize=(14, 6))
-    ax3.set_title(eval_overlay_title)
+    ax3.set_title(experiment_name)
 
     eval_plot_items = [
         ("recon", "tab:blue"),
@@ -837,7 +862,8 @@ def _build_figures(
     ax3.set_xlabel("Step")
     ax3.set_ylabel("Loss")
     if has_any_eval or ckpt_eval is not None:
-        ax3.legend(ncol=2)
+        if not suppress_eval_legend:
+            ax3.legend(ncol=2)
     ax3.grid(True, alpha=0.3)
     # Robust ylim based on the exact same values drawn on ax3
     # (quick / full eval per-component and per-total, plus the ckpt
@@ -899,7 +925,7 @@ def _build_accuracy_figure(
     created but will be empty with a note.
     """
     fig, ax = plt.subplots(figsize=(14, 6))
-    ax.set_title(f"Reasoning Accuracy (Exact-Match): {experiment_name}")
+    ax.set_title(experiment_name)
 
     has_data = False
 
@@ -988,7 +1014,9 @@ def _build_accuracy_figure(
     plt.close(fig)
 
 
-def _run_builder_analysis(config_path: Path, storage_root: str) -> None:
+def _run_builder_analysis(
+    config_path: Path, storage_root: str, cut_step: int | None = None
+) -> None:
     """Run the full analysis for a single config and write 6 PNGs to
     ``<experiment>/train_analysis/`` (sibling of ``logs/``).
 
@@ -1008,15 +1036,15 @@ def _run_builder_analysis(config_path: Path, storage_root: str) -> None:
     plt.rcParams.update(
         {
             "font.weight": "bold",
-            "axes.titlesize": 15,
+            "axes.titlesize": 28,
             "axes.titleweight": "bold",
-            "axes.labelsize": 14,
+            "axes.labelsize": 22,
             "axes.labelweight": "bold",
-            "figure.titlesize": 18,
+            "figure.titlesize": 30,
             "figure.titleweight": "bold",
-            "legend.fontsize": 12,
-            "xtick.labelsize": 12,
-            "ytick.labelsize": 12,
+            "legend.fontsize": 28,
+            "xtick.labelsize": 20,
+            "ytick.labelsize": 20,
             # Strip top and right border on every Axes (applies to
             # fig's subplots as well as ax2 / ax3 created later).
             "axes.spines.top": False,
@@ -1041,6 +1069,16 @@ def _run_builder_analysis(config_path: Path, storage_root: str) -> None:
     history = load_training_history(log_dir)
     terminal = load_terminal_output(log_dir)
     eval_hist = load_eval_history(log_dir)
+
+    # Apply --cut-step filter
+    if cut_step is not None:
+        history = [r for r in history if r["step"] <= cut_step]
+        terminal = [r for r in terminal if r.get("step", 0) <= cut_step]
+        eval_hist = [r for r in eval_hist if r["step"] <= cut_step]
+
+    if not history:
+        print(f"[SKIP] No training data within cut_step={cut_step}")
+        return
 
     # Backfill reasoning_accuracy from reasoning texts + sample history
     # for older runs that didn't compute it during training.
@@ -1080,6 +1118,9 @@ def _run_builder_analysis(config_path: Path, storage_root: str) -> None:
     output_dir = log_dir.parent / ANALYSIS_OUTPUT_DIR_NAME
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    # Check if this config should suppress eval overlay legend
+    suppress_eval_legend = log_dir.parent.name in IGNORE_LEGEND_LIST
+
     # ── Raw component arrays (mirror the weighted arrays) ─────────
     recon_raw = np.array([r["recon"] for r in history])
     ordering_raw = np.array([r["ordering"] for r in history])
@@ -1117,6 +1158,7 @@ def _run_builder_analysis(config_path: Path, storage_root: str) -> None:
         ckpt_eval=ckpt_eval,
         lr_steps=lr_steps,
         lr_values=lr_values,
+        suppress_eval_legend=suppress_eval_legend,
     )
 
     # ── Raw pass ─────────────────────────────────────────────
@@ -1141,6 +1183,7 @@ def _run_builder_analysis(config_path: Path, storage_root: str) -> None:
         ckpt_eval=ckpt_eval,
         lr_steps=lr_steps,
         lr_values=lr_values,
+        suppress_eval_legend=suppress_eval_legend,
     )
 
     # ── Reasoning accuracy figure ─────────────────────────────
@@ -1161,6 +1204,7 @@ def analyze_one(
     *,
     overlap: bool,
     storage_root: str,
+    cut_step: int | None = None,
 ) -> tuple[str, str]:
     """Analyze a single config. Returns (status, detail) tuple.
 
@@ -1200,7 +1244,7 @@ def analyze_one(
     if not overlap and all((output_dir / name).is_file() for name in ANALYSIS_OUTPUTS):
         return "skip_exists", f"all outputs already exist at {output_dir}"
     try:
-        _run_builder_analysis(config_path, storage_root=storage_root)
+        _run_builder_analysis(config_path, storage_root=storage_root, cut_step=cut_step)
     except Exception as exc:  # noqa: BLE001
         # Close any half-drawn figures to avoid leaks in batch mode.
         plt.close("all")
@@ -1244,13 +1288,15 @@ def main():
     overlap: bool = args.overlap
     storage_root: str = args.storage_root
 
+    cut_step: int | None = args.cut_step
+
     configs = discover_configs(module, dataset, experiment)
     if not configs:
         return 1
 
     print(
         f"[ANALYZE] module={module} dataset={dataset} "
-        f"experiment={experiment} overlap={overlap}  "
+        f"experiment={experiment} overlap={overlap} cut_step={cut_step}  "
         f"({len(configs)} config file(s))"
     )
     for p in configs:
@@ -1265,7 +1311,7 @@ def main():
         print(f"[CONFIG] {cfg_path.name}")
         print("=" * 70)
         status, detail = analyze_one(
-            cfg_path, overlap=overlap, storage_root=storage_root
+            cfg_path, overlap=overlap, storage_root=storage_root, cut_step=cut_step
         )
         if status == "analyzed":
             print(f"[OK]   {detail}")

@@ -31,7 +31,8 @@ MODULE STRUCTURE:
     - concept_builder: Phase 1 — ConceptPyramidBuilder (training only)
     - concept_predictor: Phase 2 — ConceptPredictor (next-level prediction)
     - losses: Loss functions (reconstruction, ordering, residual, reasoning)
-    - eval_builder: Evaluation loop and logging
+    - eval_builder: Builder evaluation loop, logging, and standalone CLI
+    - eval_predictor: Predictor evaluation loop, logging, and standalone CLI
     - data_loader: DataLoader for Builder training
     - train_builder: Training script for ConceptPyramidBuilder
     - builder_training_analysis: Post-training analysis and visualization
@@ -46,9 +47,8 @@ from nlcpV4.concept_builder import (
 from nlcpV4.concept_predictor import ConceptPredictor
 from nlcpV4.concept_predictor_parallel import ConceptPredictorParallel
 from nlcpV4.data_loader import BuilderInput, NLCPV4DataLoader
-from nlcpV4.eval_builder import (
-    evaluate_builder,
-)
+from nlcpV4.eval_builder import evaluate_builder
+from nlcpV4.eval_predictor import evaluate_predictor
 from nlcpV4.losses import compute_builder_loss
 
 __all__ = [
@@ -67,4 +67,5 @@ __all__ = [
     # Evaluation / loss computation
     "compute_builder_loss",
     "evaluate_builder",
+    "evaluate_predictor",
 ]

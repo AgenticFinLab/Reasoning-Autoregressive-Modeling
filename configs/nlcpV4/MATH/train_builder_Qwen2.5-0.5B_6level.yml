@@ -159,9 +159,9 @@ log:
 # -----------------------------------------------------------------------------
 evaluation:
   eval_step_interval: 500   # -1 = disabled
-  teacher_force_reasoning: true   # record teacher-forced argmax decoded texts
-  generation_reasoning: false     # record free autoregressive generation texts
+  mode: teacher_forced  # one of: teacher_forced | free_generation | both
   generation_max_tokens: 512      # max new tokens for free generation
+  intermediate_vector_save: 1  # 0 = skip vector dumps (e.g. pyramid.pt), 1 = save intermediate vectors
   data:
     data_name: math
     data_path: EXPERIMENT/data/MATH
