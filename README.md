@@ -2,14 +2,45 @@
 
 # Reasoning Autoregressive Modeling (RAM)
 
-A research codebase for **coarse-to-fine reasoning in LLMs**, inspired by
-[VAR: Visual Autoregressive Modeling](https://arxiv.org/abs/2404.02905).
-RAM treats a Chain-of-Thought (CoT) as a *multi-scale generative process*: a
-compact, high-level plan is produced first, then progressively refined into
-full natural-language reasoning. The core package `ram/` exposes reusable
-building blocks (encoder / decoder / quantizer / VQ-VAE, losses, training
-utilities, evaluation), and the experiments live under `examples/` with
-configuration files under `configs/`.
+**RAM models Chain-of-Thought as a coarse-to-fine generative process.**
+Instead of flat left-to-right token generation, RAM compresses a CoT into a
+**Concept Pyramid** `C = [C_0, C_1, …, C_{K-1}]` — the *same* reasoning
+re-expressed at `K` granularities with `L_k = 2^k` slots per level — and
+generates it **scale-by-scale** (parallel within a level, autoregressive
+across levels), in the spirit of
+[VAR](https://arxiv.org/abs/2404.02905) for images. Each level is
+built **purely residually** over the hidden states the coarser levels
+have not yet explained, so the pyramid is a multi-scale residual code
+rather than a redundant encoder stack. The realised system (`nlcpV4`)
+splits training into a **Builder** that extracts this pyramid from
+ground-truth CoT and a **Predictor** that generates the next level given
+the coarser ones — so inference is a short autoregression *across
+scales*, not a long one across tokens.
+
+```
+CoT: "Let me solve this. First, 2+3=5. Then, 5×4=20. So the answer is 20."
+
+Level 0 (1 concept) : [■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■]  — "solving a math problem"
+Level 1 (2 concepts): [■■■■■■■■■■■■■■■■■■■|■■■■■■■■■■■■■■■■■■■]  — "setup | computation"
+Level 2 (4 concepts): [■■■■■■■■■|■■■■■■■■■|■■■■■■■■■|■■■■■■■■■]  — "intro | step1 | step2 | answer"
+…                                                                                                                          …
+Level K-1            : [■|■|…|■]                                                     — fine-grained segment-level concepts
+```
+
+All levels describe **the same CoT** at different segment granularities;
+an outer level is not a continuation of the previous one, but a finer
+re-description of the same thought — the direct analogue of VAR's
+multi-scale image tokens, applied to natural-language reasoning.
+
+---
+
+## About this Codebase
+
+The core package `ram/` exposes reusable building blocks — encoder /
+decoder / quantizer / VQ-VAE, losses, training utilities, evaluation —
+that the experiments build on. The experiments themselves live under
+`examples/` with configuration files under `configs/`, and design notes
+plus reference papers are collected under `docs/`.
 
 ---
 
