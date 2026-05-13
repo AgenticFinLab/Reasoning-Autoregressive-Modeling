@@ -1,4 +1,6 @@
-[![](https://raw.githubusercontent.com/SwanHubX/assets/main/badge1.svg)](https://swanlab.cn/@AfLab/ReasoningAR/overview)
+<a href="https://swanlab.cn/@AfLab/ReasoningAR/overview">
+  <img src="https://raw.githubusercontent.com/SwanHubX/assets/main/badge1.svg" alt="SwanLab" width="220">
+</a>
 
 # Reasoning Autoregressive Modeling (RAM)
 
@@ -6,7 +8,7 @@
 Instead of flat left-to-right token generation, RAM compresses a CoT into a
 **Concept Pyramid** `C = [C_0, C_1, …, C_{K-1}]` — the *same* reasoning
 re-expressed at `K` granularities with `L_k = 2^k` slots per level — and
-generates it **scale-by-scale** (parallel within a level, autoregressive
+generates it **level-by-level** (parallel within a level, autoregressive
 across levels), in the spirit of
 [VAR](https://arxiv.org/abs/2404.02905) for images. Each level is
 built **purely residually** over the hidden states the coarser levels
