@@ -81,7 +81,7 @@ REFERENCES:
     - VAR.md Section 5.2.2: Residual decomposition (f_hat + f_rest)
 
 FUTURE NOTE — Level embeddings for reasoning-loss concept tokens:
-    Per `examples/nlcpV4/nlcpV4-explain.md §2.5`, each C_k is a rank-L_k
+    Per `examples/lcp/lcp-explain.md §2.5`, each C_k is a rank-L_k
     compressed summary of the *residual* H_rest_k, not a standalone
     representation of "level k". When `_prepare_reasoning` concatenates
     [Q_embeds, back_proj([C_0; …; C_{K-1}]), S_embeds] and feeds it to
@@ -126,8 +126,8 @@ import torch.nn.functional as F
 from peft import LoraConfig, get_peft_model
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from nlcpV4.data_loader import BuilderInput
-from nlcpV4.utils import pack_qcs_sequences
+from lcp.data_loader import BuilderInput
+from lcp.utils import pack_qcs_sequences
 
 # =========================================================================
 # Output Dataclasses — structured outputs for each Builder stage

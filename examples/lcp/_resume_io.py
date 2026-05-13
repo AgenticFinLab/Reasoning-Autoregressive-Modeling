@@ -1,4 +1,4 @@
-"""Resume I/O helpers for nlcpV4 training scripts.
+"""Resume I/O helpers for lcp training scripts.
 
 This module is the single place that knows how to preserve the
 observability artefacts of a previous training run when a new run
@@ -49,7 +49,7 @@ SWANLAB_META_FILENAME = "swanlab.json"
 # checkpoint naming variant only needs to keep the trailing tag.
 _CKPT_PATTERN = re.compile(r"^checkpoint.*-epoch(\d+)-step(\d+)\.pt$")
 
-# Keys every nlcpV4 trainer-written checkpoint MUST carry for
+# Keys every lcp trainer-written checkpoint MUST carry for
 # ``load_checkpoint`` to be able to fully restore (model + optimizer +
 # scheduler + position). ``loss`` is intentionally NOT in this list:
 # legacy ``checkpoint_best_eval-*.pt`` files (commit 1a510ef) wrote

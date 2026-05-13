@@ -17,9 +17,9 @@ Predictor losses (Stage 2):
   - compute_predictor_loss: weighted combination of the two above.
 
 Used by:
-    examples/nlcpV4/eval_builder.py     (evaluation loop)
-    examples/nlcpV4/train_builder.py    (training loop)
-    examples/nlcpV4/train_predictor.py  (predictor training, when added)
+    examples/lcp/eval_builder.py     (evaluation loop)
+    examples/lcp/train_builder.py    (training loop)
+    examples/lcp/train_predictor.py  (predictor training, when added)
 """
 
 from typing import List, Tuple
@@ -27,8 +27,8 @@ from typing import List, Tuple
 import torch
 import torch.nn.functional as F
 
-from nlcpV4.concept_builder import PyramidOutput
-from nlcpV4.concept_predictor import PredictorOutput
+from lcp.concept_builder import PyramidOutput
+from lcp.concept_predictor import PredictorOutput
 
 # ── Ordering loss implementations ────────────────────────────────────
 
@@ -213,7 +213,7 @@ def compute_builder_loss(
 # ── Predictor loss computation ───────────────────────────────────────
 #
 # Stage 2 (ConceptPredictor) has two loss components, aligned with
-# examples/nlcpV4/concept_predictor.py outputs:
+# examples/lcp/concept_predictor.py outputs:
 #
 #   (1) Concept reconstruction loss — per-level MSE (or cosine) between
 #       predicted concepts and ground-truth concepts from the frozen

@@ -1,12 +1,12 @@
 """ConceptPyramidBuilder end-to-end pipeline test with real GSM8K data.
 
 Run with:
-    python3 examples/nlcpV4/utest/test_concept_builder.py \
-        -c configs/nlcpV4/GSM8K/train_builder_Qwen2.5-0.5B_6level.yml
+    python3 examples/lcp/utest/test_concept_builder.py \
+        -c configs/lcp/GSM8K/train_builder_Qwen2.5-0.5B_6level.yml
 
 DESIGN PHILOSOPHY:
     Single end-to-end pipeline driven by real GSM8K CoT data.
-    Uses the same config files as real training (configs/nlcpV4/GSM8K/).
+    Uses the same config files as real training (configs/lcp/GSM8K/).
     Each pipeline step is verified and logged in detail.
     Diagnostic (log-based), not assertion-based — randomly initialized
     weights produce stochastic outputs before training.
@@ -23,14 +23,14 @@ PROJECT_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(PROJECT_ROOT / "examples"))
 
-from nlcpV4.concept_builder import (
+from lcp.concept_builder import (
     ConceptPyramidBuilder,
     EncoderOutput,
     LevelOutput,
     PyramidOutput,
 )
-from nlcpV4.data_loader import NLCPV4DataLoader
-from nlcpV4.losses import compute_builder_loss
+from lcp.data_loader import NLCPV4DataLoader
+from lcp.losses import compute_builder_loss
 from lmbase.utils.env_tools import get_device
 from ram.utils import load_config
 

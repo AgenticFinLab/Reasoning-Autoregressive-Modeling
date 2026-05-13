@@ -11,7 +11,7 @@ This module owns everything Predictor-specific:
   - Per-sample artifact dumper (``_dump_predictor_sample``) that writes
     a self-contained folder per eval sample.
   - ``main()`` entry point so the module can be invoked directly:
-        python examples/nlcpV4/eval_predictor.py -c <config> -s <root> --mode <mode>
+        python examples/lcp/eval_predictor.py -c <config> -s <root> --mode <mode>
 
 Mode constants and generic helpers (``_safe_main_id``, ``_tensor_to_cpu``,
 ``_loss_dict_to_json``, ``log_terminal_entry``, reasoning accuracy) are
@@ -48,10 +48,10 @@ sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(PROJECT_ROOT / "examples"))
 
 from lmbase.utils.env_tools import get_device
-from nlcpV4.concept_builder import ConceptPyramidBuilder
-from nlcpV4.concept_predictor import ConceptPredictor
-from nlcpV4.data_loader import BuilderInput, NLCPV4DataLoader
-from nlcpV4.eval_builder import (
+from lcp.concept_builder import ConceptPyramidBuilder
+from lcp.concept_predictor import ConceptPredictor
+from lcp.data_loader import BuilderInput, NLCPV4DataLoader
+from lcp.eval_builder import (
     MODE_BOTH,
     MODE_FREE_GENERATION,
     MODE_TEACHER_FORCED,
@@ -64,7 +64,7 @@ from nlcpV4.eval_builder import (
     compute_reasoning_accuracy,
     log_terminal_entry,
 )
-from nlcpV4.losses import compute_predictor_loss
+from lcp.losses import compute_predictor_loss
 from ram.utils import apply_storage_root, load_config
 
 logger = logging.getLogger(__name__)
@@ -782,7 +782,7 @@ def _build_eval_dataloader(config: dict) -> NLCPV4DataLoader:
 
 
 def main() -> None:
-    """Entry point for ``python examples/nlcpV4/eval_predictor.py``."""
+    """Entry point for ``python examples/lcp/eval_predictor.py``."""
     args = parse_args()
 
     predictor_config_path = Path(args.config)

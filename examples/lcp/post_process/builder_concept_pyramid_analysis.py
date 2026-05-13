@@ -11,7 +11,7 @@ Storage layout
 Given a builder config (e.g. the AutoWeighted 4-level GSM8K run), the
 resolved tree is::
 
-    <storage_root>/EXPERIMENT/nlcpV4/builder/
+    <storage_root>/EXPERIMENT/lcp/builder/
         GSM8K_Qwen2.5-0.5B_4level_AutoWeighted/logs/eval_builder/<mode>/
             # ----- aggregate figures pooling ALL samples (written here) -----
             aggregate_concept_pca_level{k}.{png,pdf}                    # per level k
@@ -51,7 +51,7 @@ You MUST have run ``eval_builder.py`` for this config first, with
 ``-v 1`` (i.e. ``intermediate_vector_save: 1`` in the YAML) so that
 ``pyramid.pt`` files exist. Example::
 
-    python3 examples/nlcpV4/eval_builder.py -c configs/nlcpV4/GSM8K/AutoWeighted/train_builder_Qwen2.5-0.5B_4level.yml -s /Data/ReasoningNLCP --mode teacher_forced --max-samples 50 -v 1
+    python3 examples/lcp/eval_builder.py -c configs/lcp/GSM8K/AutoWeighted/train_builder_Qwen2.5-0.5B_4level.yml -s /Data/ReasoningNLCP --mode teacher_forced --max-samples 50 -v 1
 
 WHAT IS ANALYZED
 ================
@@ -111,15 +111,15 @@ Usage
 Single config (reads every ``sample_*/pyramid.pt`` under the eval_builder
 tree for the chosen mode, plots in place)::
 
-    python3 examples/nlcpV4/builder_concept_pyramid_analysis.py -c configs/nlcpV4/GSM8K/AutoWeighted/train_builder_Qwen2.5-0.5B_4level.yml --mode teacher_forced
+    python3 examples/lcp/builder_concept_pyramid_analysis.py -c configs/lcp/GSM8K/AutoWeighted/train_builder_Qwen2.5-0.5B_4level.yml --mode teacher_forced
 
 Batch over an entire dataset dir (every ``train_builder_*.yml`` under it)::
 
-    python3 examples/nlcpV4/builder_concept_pyramid_analysis.py -d GSM8K/AutoWeighted -e all --mode teacher_forced
+    python3 examples/lcp/builder_concept_pyramid_analysis.py -d GSM8K/AutoWeighted -e all --mode teacher_forced
 
 Select a subset of analyses::
 
-    python3 examples/nlcpV4/builder_concept_pyramid_analysis.py -c configs/nlcpV4/GSM8K/AutoWeighted/train_builder_Qwen2.5-0.5B_4level.yml --analyses attention_heatmaps,attention_text_overlay,concept_norms
+    python3 examples/lcp/builder_concept_pyramid_analysis.py -c configs/lcp/GSM8K/AutoWeighted/train_builder_Qwen2.5-0.5B_4level.yml --analyses attention_heatmaps,attention_text_overlay,concept_norms
 
 Arguments
 ---------
@@ -128,7 +128,7 @@ Arguments
                           Default: ``./`` (current working directory).
     -c / --config         Direct path to a single ``train_builder_*.yml``.
                           Mutually exclusive with ``-d``/``-e``.
-    -d / --dataset        Dataset dir under ``configs/nlcpV4/`` (may be
+    -d / --dataset        Dataset dir under ``configs/lcp/`` (may be
                           nested, e.g. ``GSM8K/AutoWeighted``). Required when
                           ``-c`` is not given.
     -e / --experiment     Config stem after ``train_builder_`` or ``all`` to
@@ -167,7 +167,7 @@ from ram.utils import apply_storage_root, load_config, print_storage_paths
 logger = logging.getLogger(__name__)
 
 # --- Batch-mode constants ------------------------------------------
-CONFIGS_ROOT = PROJECT_ROOT / "configs" / "nlcpV4"
+CONFIGS_ROOT = PROJECT_ROOT / "configs" / "lcp"
 ALL_KEYWORD = "all"
 # eval_builder.py writes per-sample dumps under
 #   <log_path>/eval_builder/<mode>/sample_<main_id>/{input,pyramid,reasoning,\u2026}.
@@ -269,7 +269,7 @@ def parse_args() -> argparse.Namespace:
         "--dataset",
         default=None,
         help=(
-            "Dataset dir under configs/nlcpV4/ (may be nested, e.g. "
+            "Dataset dir under configs/lcp/ (may be nested, e.g. "
             "'GSM8K/AutoWeighted'). Required when -c is not given."
         ),
     )
@@ -360,7 +360,7 @@ def discover_configs(dataset: str, experiment: str) -> List[Path]:
     """Resolve (-d, -e) to a list of ``train_builder_*.yml`` paths.
 
     Shares the layout convention of :mod:`builder_training_analysis`:
-    ``configs/nlcpV4/{dataset}/train_builder_{experiment}.yml``; ``dataset``
+    ``configs/lcp/{dataset}/train_builder_{experiment}.yml``; ``dataset``
     may be nested and ``experiment`` may be ``'all'`` for recursive match.
     """
     dataset_dir = CONFIGS_ROOT / dataset

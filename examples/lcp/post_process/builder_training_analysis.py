@@ -2,23 +2,23 @@
 
 Usage:
     # Single experiment — reads artifacts from the project-local EXPERIMENT/ tree.
-    python3 examples/nlcpV4/builder_training_analysis.py -m builder -d GSM8K -e Qwen2.5-0.5B_6level
+    python3 examples/lcp/builder_training_analysis.py -m builder -d GSM8K -e Qwen2.5-0.5B_6level
 
     # All experiments for a module + dataset (baseline + nested variants).
-    python3 examples/nlcpV4/builder_training_analysis.py -m builder -d GSM8K -e all
+    python3 examples/lcp/builder_training_analysis.py -m builder -d GSM8K -e all
 
     # Variant subtree (e.g. AutoWeighted/). Note the path has to be
-    # given to -d exactly as it appears under configs/nlcpV4/.
-    python3 examples/nlcpV4/builder_training_analysis.py -m builder -d GSM8K/AutoWeighted -e all
+    # given to -d exactly as it appears under configs/lcp/.
+    python3 examples/lcp/builder_training_analysis.py -m builder -d GSM8K/AutoWeighted -e all
 
     # Read training artifacts from a non-default storage root.
     # MUST match the -s value that train_builder.py / run_experiments.py
     # was launched with — otherwise this script looks at the wrong
     # checkpoints / log_path directories and reports [SKIP NO-DATA].
-    python3 examples/nlcpV4/builder_training_analysis.py -m builder -d GSM8K -e all -s /Data/<proj>
+    python3 examples/lcp/builder_training_analysis.py -m builder -d GSM8K -e all -s /Data/<proj>
 
     # Skip already-analyzed configs (by default existing PNGs are overwritten).
-    python3 examples/nlcpV4/builder_training_analysis.py -m builder -d GSM8K -e all --no-overlap
+    python3 examples/lcp/builder_training_analysis.py -m builder -d GSM8K -e all --no-overlap
 
 Arguments:
     -s / --storage-root   Prefix prepended to RELATIVE log paths in the
@@ -31,7 +31,7 @@ Arguments:
                           project root. The resolved paths are printed
                           as a ``[STORAGE]`` block per config at startup.
     -m / --module         Module name: 'builder' or 'predictor'.
-    -d / --dataset        Dataset name (directory under configs/nlcpV4/).
+    -d / --dataset        Dataset name (directory under configs/lcp/).
                           May be a nested path like 'GSM8K/AutoWeighted'.
     -e / --experiment     Config stem after 'train_{module}_'
                           (e.g. 'Qwen2.5-0.5B_6level') or 'all' to process
@@ -73,9 +73,9 @@ sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(PROJECT_ROOT / "examples"))
 
 from lmbase.utils.env_tools import get_device
-from nlcpV4.concept_builder import ConceptPyramidBuilder
-from nlcpV4.data_loader import NLCPV4DataLoader
-from nlcpV4.eval_builder import (
+from lcp.concept_builder import ConceptPyramidBuilder
+from lcp.data_loader import NLCPV4DataLoader
+from lcp.eval_builder import (
     MODE_TEACHER_FORCED,
     compute_reasoning_accuracy,
     evaluate_builder,
@@ -85,7 +85,7 @@ from ram.utils import apply_storage_root, load_config, print_storage_paths
 logger = logging.getLogger(__name__)
 
 # --- Batch-mode constants ------------------------------------------
-CONFIGS_ROOT = PROJECT_ROOT / "configs" / "nlcpV4"
+CONFIGS_ROOT = PROJECT_ROOT / "configs" / "lcp"
 VALID_MODULES = {"builder", "predictor"}
 ALL_KEYWORD = "all"
 # The six PNGs produced by a successful analysis run (weighted + raw).
@@ -144,7 +144,7 @@ def parse_args():
         "-d",
         "--dataset",
         required=True,
-        help="Dataset name (directory under configs/nlcpV4/).",
+        help="Dataset name (directory under configs/lcp/).",
     )
     parser.add_argument(
         "-e",
@@ -181,7 +181,7 @@ def discover_configs(module: str, dataset: str, experiment: str) -> list[Path]:
     """Resolve (-m, -d, -e) into a list of config paths.
 
     Config file path convention:
-        configs/nlcpV4/{dataset}/train_{module}_{experiment}.yml
+        configs/lcp/{dataset}/train_{module}_{experiment}.yml
 
     ``dataset`` may include nested subdirectories (e.g. ``GSM8K/AutoWeighted``)
     to discover configs under a variant folder — ``Path`` division handles
@@ -212,13 +212,13 @@ def discover_configs(module: str, dataset: str, experiment: str) -> list[Path]:
 def _derive_experiment_name(config_path: Path) -> str:
     """Self-describing experiment name from the config's path under ``CONFIGS_ROOT``.
 
-    Joins all path segments between ``configs/nlcpV4/`` and the YAML
+    Joins all path segments between ``configs/lcp/`` and the YAML
     file with ``-`` plus the filename stem, so nested variants keep
     the dataset name visible in SwanLab and plot titles:
 
-        configs/nlcpV4/GSM8K/train_builder_Qwen2.5-0.5B_6level.yml
+        configs/lcp/GSM8K/train_builder_Qwen2.5-0.5B_6level.yml
           -> "GSM8K-train_builder_Qwen2.5-0.5B_6level"
-        configs/nlcpV4/GSM8K/AutoWeighted/train_builder_Qwen2.5-0.5B_6level.yml
+        configs/lcp/GSM8K/AutoWeighted/train_builder_Qwen2.5-0.5B_6level.yml
           -> "GSM8K-AutoWeighted-train_builder_Qwen2.5-0.5B_6level"
 
     Falls back to the legacy single-parent form when the file lives

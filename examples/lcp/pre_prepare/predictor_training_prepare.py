@@ -28,7 +28,7 @@ taken from ``-M/--mode``. ``loss_predictor_prepare.py`` always routes
 each mode into its own JSON file, so a single input never mixes modes.
 
 Generated outputs (under
-``<storage>/EXPERIMENT/nlcpV4/predictor/<dataset>_<mode>_training_prepare/``)::
+``<storage>/EXPERIMENT/lcp/predictor/<dataset>_<mode>_training_prepare/``)::
 
     loss_by_level_per_model_raw.png        # same model x different levels
     loss_by_level_per_model_weighted.png
@@ -54,24 +54,24 @@ matching weight that brings it to the same target contribution.
 Usage::
 
     # SHARED mode (default paths — only --dataset and -M required):
-    #   -i: <storage>/EXPERIMENT/nlcpV4/predictor/GSM8K_Loss_prepare_shared.json
-    #   -o: <storage>/EXPERIMENT/nlcpV4/predictor/GSM8K_shared_training_prepare/
-    python3 examples/nlcpV4/predictor_training_prepare.py --dataset GSM8K -M shared
+    #   -i: <storage>/EXPERIMENT/lcp/predictor/GSM8K_Loss_prepare_shared.json
+    #   -o: <storage>/EXPERIMENT/lcp/predictor/GSM8K_shared_training_prepare/
+    python3 examples/lcp/predictor_training_prepare.py --dataset GSM8K -M shared
 
     # INDEPENDENT mode:
-    python3 examples/nlcpV4/predictor_training_prepare.py --dataset GSM8K -M independent
+    python3 examples/lcp/predictor_training_prepare.py --dataset GSM8K -M independent
 
     # Tune the recommendation target (target weighted contribution per comp).
-    python3 examples/nlcpV4/predictor_training_prepare.py --dataset GSM8K -M shared --target 2.0
+    python3 examples/lcp/predictor_training_prepare.py --dataset GSM8K -M shared --target 2.0
 
     # Override -i / -o explicitly when the file lives outside the default tree.
-    python3 examples/nlcpV4/predictor_training_prepare.py -M independent -i path/to/GSM8K_Loss_prepare_independent.json -o path/to/output_dir
+    python3 examples/lcp/predictor_training_prepare.py -M independent -i path/to/GSM8K_Loss_prepare_independent.json -o path/to/output_dir
 
     # Pull the same default paths but rebased under a storage root. MUST
     # match the ``-s`` that ``loss_predictor_prepare.py`` was launched with
     # so this tool reads the exact JSON just written.
-    python3 examples/nlcpV4/predictor_training_prepare.py -s /Data/ReasoningNLCP --dataset GSM8K -M shared
-    python3 examples/nlcpV4/predictor_training_prepare.py -s /Data/ReasoningNLCP --dataset GSM8K -M independent
+    python3 examples/lcp/predictor_training_prepare.py -s /Data/ReasoningNLCP --dataset GSM8K -M shared
+    python3 examples/lcp/predictor_training_prepare.py -s /Data/ReasoningNLCP --dataset GSM8K -M independent
 
 Arguments:
     -s / --storage-root   Prefix used to compute the DEFAULT ``-i`` /
@@ -83,10 +83,10 @@ Arguments:
                           ``-s`` used when running
                           ``loss_predictor_prepare.py``.
     -i / --input          Path to <dataset>_Loss_prepare_<mode>.json.
-                          Default: <storage_root>/EXPERIMENT/nlcpV4/
+                          Default: <storage_root>/EXPERIMENT/lcp/
                           predictor/<dataset>_Loss_prepare_<mode>.json.
     -o / --output-dir     Output directory for plots + CSV. Default:
-                          <storage_root>/EXPERIMENT/nlcpV4/predictor/
+                          <storage_root>/EXPERIMENT/lcp/predictor/
                           <dataset>_<mode>_training_prepare/.
     --target              Target weighted-contribution per component for
                           the recommender (default: 1.0).
@@ -572,7 +572,7 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help=(
             "Path to <dataset>_Loss_prepare_<mode>.json. Default: "
-            "<storage_root>/EXPERIMENT/nlcpV4/predictor/"
+            "<storage_root>/EXPERIMENT/lcp/predictor/"
             "<dataset>_Loss_prepare_<mode>.json. --dataset and -M are "
             "required when -i is omitted."
         ),
@@ -583,7 +583,7 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help=(
             "Output directory. Default: "
-            "<storage_root>/EXPERIMENT/nlcpV4/predictor/"
+            "<storage_root>/EXPERIMENT/lcp/predictor/"
             "<dataset>_<mode>_training_prepare/. --dataset and -M are "
             "required when -o is omitted."
         ),
@@ -654,14 +654,14 @@ def main() -> int:
             print(
                 "[ERROR] --dataset and -M/--mode are required when -i is "
                 "omitted. Default input is "
-                "<storage>/EXPERIMENT/nlcpV4/predictor/"
+                "<storage>/EXPERIMENT/lcp/predictor/"
                 "<dataset>_Loss_prepare_<mode>.json."
             )
             return 1
         input_path = (
             base
             / "EXPERIMENT"
-            / "nlcpV4"
+            / "lcp"
             / "predictor"
             / f"{args.dataset}_Loss_prepare_{args.mode}.json"
         )
@@ -679,7 +679,7 @@ def main() -> int:
         output_dir = (
             base
             / "EXPERIMENT"
-            / "nlcpV4"
+            / "lcp"
             / "predictor"
             / f"{args.dataset}_{args.mode}_training_prepare"
         )

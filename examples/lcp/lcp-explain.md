@@ -19,7 +19,7 @@ Level configuration (K=6): L_0=1, L_1=2, L_2=4, L_3=8, L_4=16, L_5=32 (total: 63
 
 ### 1.1.1 Notation Convention
 
-Throughout this document, we use **our NLCP notation** C_{k,j} consistently, even
+Throughout this document, we use **our LCP notation** C_{k,j} consistently, even
 when describing other methods. When referencing DLCM's single-level concepts
 (written as c_k in the DLCM paper), we write them as C_{k,j} and add a note
 explaining the mapping. This is because:
@@ -87,7 +87,7 @@ This section provides a high-level overview of how the hybrid design achieves th
 
 #### 1.4.1 The Two-Stage Pipeline
 
-NLCP V4 is organised as **two sequential training stages** and a single
+LCP is organised as **two sequential training stages** and a single
 autoregressive inference path. The two stages share a common notion of a
 "concept pyramid" C = [C_0, C_1, ..., C_{K-1}], but train disjoint modules
 with disjoint objectives.
@@ -133,7 +133,7 @@ with disjoint objectives.
                  │                        │                       │
                  ▼                        ▼                       ▼
     ┌─────────────────────────────────────────────────────────────────────┐
-    │  back_proj(C_gt)  +  level_emb  +  position_emb        (slot markers)│
+    │  back_proj(C_gt)  +  level_embedding  +  position_embedding         │
     │                                                                     │
     │  pack_qcs_sequences → one contiguous row per sample:                │
     │                                                                     │
@@ -184,7 +184,7 @@ The three boxes above correspond to the three operating modes of the codebase:
 boundaries are the **only** places where gradients do NOT flow:
 `C_gt` is `detach()`ed and the Builder is frozen during Stage 2.
 
-**Stage 1 — ConceptPyramidBuilder** (`examples/nlcpV4/concept_builder.py`)
+**Stage 1 — ConceptPyramidBuilder** (`examples/lcp/concept_builder.py`)
 
 ```
 Input : (Q, CoT, S)                         # Q = question, S = solution
@@ -213,14 +213,14 @@ Loss    : L_builder = w_recon·L_recon + w_order·L_order
 Only the encode/attend/residual modules and `back_proj` are trainable. The
 backbone `reason_model` is **frozen** throughout Stage 1 (optionally LoRA-adapted).
 
-**Stage 2 — ConceptPredictor** (`examples/nlcpV4/concept_predictor.py`)
+**Stage 2 — ConceptPredictor** (`examples/lcp/concept_predictor.py`)
 
 ```
 Input : (Q, C_gt = [C_0, ..., C_{K-1}], S)  # C_gt comes from frozen Builder
 Forward (teacher-forced, ONE backbone pass):
     # 1. back-decode groundtruth concepts to encoder space
     X_cat   = back_proj(concat(C_0, ..., C_{K-1}))           # (B, Σ L_k, D_enc)
-    # 2. add slot markers
+    # 2. add level embedding and within-level position embedding
     X_cat  += level_embeddings(_level_ids_flat)
     X_cat  += position_embeddings(_pos_ids_flat)
     # 3. pack [Q_b; X_cat_b; S_b] row-by-row (no internal padding)
@@ -340,13 +340,13 @@ mathematical reason why coarse levels capture coarse structure.
 
 ### 2.2 Analogy with VAR Scale Bottleneck
 
-| VAR Scale | Tokens | Information Capacity  | NLCP Level | Concepts | Information Capacity  |
-|-----------|--------|-----------------------|------------|----------|-----------------------|
-| 1×1       | 1      | Global color/tone     | Level 0    | 1        | Global CoT structure  |
-| 2×2       | 4      | Coarse spatial layout | Level 1    | 2        | Two major segments    |
-| 4×4       | 16     | Medium structure      | Level 2    | 4        | Four sub-segments     |
-| ...       | ...    | ...                   | ...        | ...      | ...                   |
-| 32×32     | 1024   | Fine details          | Level 5    | 32       | Fine-grained segments |
+| VAR Scale | Tokens | Information Capacity  | LCP Level | Concepts | Information Capacity  |
+|-----------|--------|-----------------------|-----------|----------|-----------------------|
+| 1×1       | 1      | Global color/tone     | Level 0   | 1        | Global CoT structure  |
+| 2×2       | 4      | Coarse spatial layout | Level 1   | 2        | Two major segments    |
+| 4×4       | 16     | Medium structure      | Level 2   | 4        | Four sub-segments     |
+| ...       | ...    | ...                   | ...       | ...      | ...                   |
+| 32×32     | 1024   | Fine details          | Level 5   | 32       | Fine-grained segments |
 
 In VAR, each scale is independently quantized (VQ lookup), which naturally partitions information across scales. In our design, the residual flow serves the same purpose: H_rest_{k+1} = H_rest_k - R_k ensures that information captured at level k is no longer available at level k+1.
 
@@ -362,7 +362,7 @@ An image of a cat:
 All scales describe THE SAME cat, just at different pixel resolutions.
 ```
 
-**Same CoT, different segmentations** (NLCP):
+**Same CoT, different segmentations** (LCP):
 ```
 CoT: "Let me solve this. First, 2+3=5. Then, 5×4=20. So the answer is 20."
 
@@ -411,29 +411,29 @@ However, `level_proj` is a linear layer that can amplify the magnitude of C_{0,0
 **Mitigation strategies** (for future consideration, not current implementation):
 1. Per-level reconstruction loss: L_balanced = Σ_k ||R_k||² / ||H_proj||² (encourage each level to contribute)
 2. Information-proportional initialization (already available via `use_positional_query_init`)
-3. End-to-end NTP loss from the full NLCP pipeline (strongest signal)
+3. End-to-end NTP loss from the full LCP pipeline (strongest signal)
 
-**Current assessment**: The greedy extraction concern is theoretically valid but likely manageable in practice. The rank bottleneck provides a hard constraint, and the full NLCP training pipeline with NTP loss will provide the strongest corrective signal.
+**Current assessment**: The greedy extraction concern is theoretically valid but likely manageable in practice. The rank bottleneck provides a hard constraint, and the full LCP training pipeline with NTP loss will provide the strongest corrective signal.
 
 ---
 
 ## 2.5 Deep Dive: The Rank-Constrained Residual Decomposition Principle
 
-This section synthesizes §2.1–§2.4 and the VAR comparison of §7 into a single, mechanistic statement of what the Builder actually does. It is the most important section of this document — every downstream design choice (Predictor teacher forcing, loss weights, level schedule) flows from here. It is the nlcpV4 counterpart of `docs/VAR.md §5.3.2.1` (which established the dual fact for VAR: *codebook entries are residuals*).
+This section synthesizes §2.1–§2.4 and the VAR comparison of §7 into a single, mechanistic statement of what the Builder actually does. It is the most important section of this document — every downstream design choice (Predictor teacher forcing, loss weights, level schedule) flows from here. It is the lcp counterpart of `docs/VAR.md §5.3.2.1` (which established the dual fact for VAR: *codebook entries are residuals*).
 
 ### 2.5.0 Relationship to VAR.md §6 — No Contradiction, Two Layers of Description
 
-Readers coming from [docs/VAR.md](file:///Users/sjia/Documents/AgenticFinLab/Projects/Reasoning-Autoregressive-Modeling/docs/VAR.md) §6 — which declared that nlcpV4's Builder "follows VAR's residual philosophy" and that `C_k` "expresses the semantic remainder scales 0..k-1 cannot cover" — may wonder whether §2.5's emphasis on a *rank-bounded softmax bottleneck* (contrasted with VAR's *discrete codebook bottleneck*) contradicts that claim, **or** whether §2.5's phrase "`C_k` is the best low-rank expression of the residual" is a third, different statement. **Neither is a contradiction.** The three statements operate at three different layers of abstraction and are mutually consistent. This subsection makes the layering explicit.
+Readers coming from [docs/VAR.md](file:///Users/sjia/Documents/AgenticFinLab/Projects/Reasoning-Autoregressive-Modeling/docs/VAR.md) §6 — which declared that lcp's Builder "follows VAR's residual philosophy" and that `C_k` "expresses the semantic remainder scales 0..k-1 cannot cover" — may wonder whether §2.5's emphasis on a *rank-bounded softmax bottleneck* (contrasted with VAR's *discrete codebook bottleneck*) contradicts that claim, **or** whether §2.5's phrase "`C_k` is the best low-rank expression of the residual" is a third, different statement. **Neither is a contradiction.** The three statements operate at three different layers of abstraction and are mutually consistent. This subsection makes the layering explicit.
 
 #### Two layers of architectural description
 
-| Layer           | What it describes                                            | Same in VAR and nlcpV4? | Discussed in                                    |
-|-----------------|--------------------------------------------------------------|-------------------------|-------------------------------------------------|
-| **Outer loop**  | The `H_rest / H_hat` residual-accumulation skeleton          | ✅ **YES — identical**   | VAR.md §6; nlcpV4-explain.md §2.5.5             |
-| **Inner joint** | How each level produces its per-level output from `H_rest_k` | ❌ **NO — different**    | VAR.md §5.3.2.1; nlcpV4-explain.md §2.5.2–2.5.6 |
+| Layer           | What it describes                                            | Same in VAR and lcp?  | Discussed in                                 |
+|-----------------|--------------------------------------------------------------|-----------------------|----------------------------------------------|
+| **Outer loop**  | The `H_rest / H_hat` residual-accumulation skeleton          | ✅ **YES — identical** | VAR.md §6; lcp-explain.md §2.5.5             |
+| **Inner joint** | How each level produces its per-level output from `H_rest_k` | ❌ **NO — different**  | VAR.md §5.3.2.1; lcp-explain.md §2.5.2–2.5.6 |
 
 ```
-┌─── OUTER LOOP (shared by VAR and nlcpV4) ─────────────────────────────┐
+┌─── OUTER LOOP (shared by VAR and lcp) ─────────────────────────────┐
 │  for k in 0..K-1:                                                      │
 │      level-k output  ←──── [INNER JOINT: differs] ────  H_rest_k       │
 │      R_k             ←  smear level-k output to sequence length        │
@@ -443,14 +443,14 @@ Readers coming from [docs/VAR.md](file:///Users/sjia/Documents/AgenticFinLab/Pro
 │    ┌── INNER JOINT (differs) ────────────────────────────────┐         │
 │    │  VAR:     level-k output  =  embedding(argmin_V ‖·‖)     │         │
 │    │           (discrete codebook lookup, V hard options)     │         │
-│    │  nlcpV4:  level-k output  =  level_proj(A_k @ H_rest_k)  │         │
+│    │  lcp:  level-k output  =  level_proj(A_k @ H_rest_k)  │         │
 │    │           (rank-L_k soft summary, softmax weights)       │         │
 │    └───────────────────────────────────────────────────────────┘        │
 └────────────────────────────────────────────────────────────────────────┘
 ```
 
 **VAR.md §6** is a statement about the **outer loop** — it's why the Predictor must replay the cumulative canvas `H_hat_k` (identical requirement in both systems).  
-**nlcpV4-explain.md §2.5** is a zoom-in on the **inner joint** — it explains that we swap discrete-argmin for rank-bounded-softmax while leaving the outer loop untouched.
+**lcp-explain.md §2.5** is a zoom-in on the **inner joint** — it explains that we swap discrete-argmin for rank-bounded-softmax while leaving the outer loop untouched.
 
 #### Reconciling "residual in nature" vs "best low-rank summary"
 
@@ -507,13 +507,13 @@ So three distinct tensors are about the residual, each playing a different role:
 
 #### Summary table — which statement lives at which layer
 
-| Claim                                                              | Layer        | Tensor level | Relationship to other claims           |
-|--------------------------------------------------------------------|--------------|--------------|----------------------------------------|
-| "Predictor must replay cumulative `H_hat_k`" (VAR.md §6)           | Outer loop   | `H_hat`      | Shared by VAR and nlcpV4               |
-| "VAR uses discrete codebook, nlcpV4 uses rank bottleneck" (§2.5.6) | Inner joint  | per-level op | The only structural difference         |
-| "`C_k` is residual in nature" (VAR.md §6)                          | Semantic     | `C_k`        | Equivalent to §2.5.3 at semantic zoom  |
-| "`C_k` is best rank-`L_k` summary of `H_rest_k`" (§2.5.3)          | Mathematical | `C_k`        | The precise form of the semantic claim |
-| "`R_k` is subtracted from `H_rest_k`" (both docs)                  | Operational  | `R_k`        | The canvas-debit step; shared in both  |
+| Claim                                                           | Layer        | Tensor level | Relationship to other claims           |
+|-----------------------------------------------------------------|--------------|--------------|----------------------------------------|
+| "Predictor must replay cumulative `H_hat_k`" (VAR.md §6)        | Outer loop   | `H_hat`      | Shared by VAR and lcp                  |
+| "VAR uses discrete codebook, lcp uses rank bottleneck" (§2.5.6) | Inner joint  | per-level op | The only structural difference         |
+| "`C_k` is residual in nature" (VAR.md §6)                       | Semantic     | `C_k`        | Equivalent to §2.5.3 at semantic zoom  |
+| "`C_k` is best rank-`L_k` summary of `H_rest_k`" (§2.5.3)       | Mathematical | `C_k`        | The precise form of the semantic claim |
+| "`R_k` is subtracted from `H_rest_k`" (both docs)               | Operational  | `R_k`        | The canvas-debit step; shared in both  |
 
 All five statements are simultaneously true. They describe different faces of the same architecture.
 
@@ -525,11 +525,11 @@ All five statements are simultaneously true. They describe different faces of th
 >
 > **我们每一层都基于当前残差 `H_rest_k`，用 `L_k` 条可学习查询构造一个秩受 `L_k` 约束的最佳低秩摘要 `C_k`，然后把它 smear 回序列长度得到 `R_k`，加入画布、从残差里扣掉，留下的信息交给下一层用 2 倍宽的查询再捞一次。**
 
-Every clause in this sentence corresponds to an architectural commitment that can be read directly off the code in [concept_builder.py](file:///Users/sjia/Documents/AgenticFinLab/Projects/Reasoning-Autoregressive-Modeling/examples/nlcpV4/concept_builder.py). The rest of §2.5 unpacks it.
+Every clause in this sentence corresponds to an architectural commitment that can be read directly off the code in [concept_builder.py](file:///Users/sjia/Documents/AgenticFinLab/Projects/Reasoning-Autoregressive-Modeling/examples/lcp/concept_builder.py). The rest of §2.5 unpacks it.
 
-### 2.5.2 The Rank Inequality as nlcpV4's "Invisible Codebook"
+### 2.5.2 The Rank Inequality as lcp's "Invisible Codebook"
 
-VAR bottlenecks information flow with a **discrete codebook** (hard argmin lookup against V learned centroids). nlcpV4 has no codebook — so what prevents the model from cheating and dumping all information into a single level? Answer: **a linear-algebraic rank constraint** just as unforgiving as a codebook, only expressed in the language of matrix factorization rather than nearest-neighbor search.
+VAR bottlenecks information flow with a **discrete codebook** (hard argmin lookup against V learned centroids). lcp has no codebook — so what prevents the model from cheating and dumping all information into a single level? Answer: **a linear-algebraic rank constraint** just as unforgiving as a codebook, only expressed in the language of matrix factorization rather than nearest-neighbor search.
 
 Formal statement. At level `k`, the reconstruction is assembled by matmul:
 
@@ -555,9 +555,9 @@ rank(R_k)  ≤  L_k     (since L_k ≪ L and L_k ≪ D by construction)
 
 This inequality is **strict and mechanical** — no clever initialization or loss can raise it. It is enforced at graph-construction time by setting `num_queries = L_k`. The rank upper bound **is** the bottleneck.
 
-**Why this equals "a codebook of invisible size"**: VAR's codebook has `V` entries of dimension `Cvae`; `embedding(idx_k)` at each spatial position is one of at most `V` possible vectors. nlcpV4's level-k output lives in a continuous rank-`L_k` subspace of `R^{L×D}`; `R_k` is one of infinitely many tensors in this subspace. Both are information-capacity ceilings, merely expressed in different bases:
+**Why this equals "a codebook of invisible size"**: VAR's codebook has `V` entries of dimension `Cvae`; `embedding(idx_k)` at each spatial position is one of at most `V` possible vectors. lcp's level-k output lives in a continuous rank-`L_k` subspace of `R^{L×D}`; `R_k` is one of infinitely many tensors in this subspace. Both are information-capacity ceilings, merely expressed in different bases:
 
-| Bottleneck shape | VAR                                 | nlcpV4                            |
+| Bottleneck shape | VAR                                 | lcp                               |
 |------------------|-------------------------------------|-----------------------------------|
 | Capacity unit    | Discrete codebook entry (V options) | Continuous rank-1 direction       |
 | Budget per level | `L_k^2` patches × V choices each    | `L_k` ranks, continuous           |
@@ -585,12 +585,12 @@ Multiplying `A_k^T ∈ R^{L×L_k}` by `C_k ∈ R^{L_k × D}` produces `R_k ∈ R
 
 The composition `A_k^T @ A_k ∈ R^{L×L}` is a **rank-`L_k` soft-clustering smoother**: it replaces each position's feature with a soft-cluster-mean of its neighbors. Analogous operations across fields:
 
-| Field          | Compression step       | Smear-back step              | Rank bound             |
-|----------------|------------------------|------------------------------|------------------------|
-| PCA            | project to top-k axes  | reconstruct via `V_k V_k^T`  | rank ≤ k               |
-| K-means        | assign to centroid     | broadcast centroid to points | rank ≤ K               |
-| nlcpV4 Builder | `A_k @ H_rest_k`       | `A_k^T @ C_k`                | rank ≤ L_k             |
-| VAR VQ-VAE     | `argmin` over codebook | `embedding(idx_k)` + upscale | ≤ V discrete centroids |
+| Field       | Compression step       | Smear-back step              | Rank bound             |
+|-------------|------------------------|------------------------------|------------------------|
+| PCA         | project to top-k axes  | reconstruct via `V_k V_k^T`  | rank ≤ k               |
+| K-means     | assign to centroid     | broadcast centroid to points | rank ≤ K               |
+| lcp Builder | `A_k @ H_rest_k`       | `A_k^T @ C_k`                | rank ≤ L_k             |
+| VAR VQ-VAE  | `argmin` over codebook | `embedding(idx_k)` + upscale | ≤ V discrete centroids |
 
 ### 2.5.5 "Paint on the Canvas, Subtract from the Residual" — The Two Ledgers
 
@@ -637,7 +637,7 @@ cum. rank(H_hat): 1    ≤   3       ≤   7      ≤  15    ≤  31   ≤  63
 
 The statement "VAR has a codebook, we don't" is true but misses the structural parallel. Here is the precise correspondence:
 
-| Aspect                    | VAR Stage-1 (VQ-VAE)                              | nlcpV4 Builder                                   |
+| Aspect                    | VAR Stage-1 (VQ-VAE)                              | lcp Builder                                      |
 |---------------------------|---------------------------------------------------|--------------------------------------------------|
 | Residual tensor           | `f_rest`, shape `[B, Cvae, H, W]`                 | `H_rest`, shape `[B, L, D]`                      |
 | Canvas tensor             | `f_hat`                                           | `H_hat`                                          |
@@ -654,12 +654,12 @@ The statement "VAR has a codebook, we don't" is true but misses the structural p
 | Failure mode              | Codebook collapse (few entries used)              | Attention collapse (queries attend uniformly)    |
 | Zero residual achievable? | In practice yes (codebook spans the space)        | Yes iff `Σ L_k ≥ min(L, D)`                      |
 
-**Key insight**: VAR's and nlcpV4's bottlenecks are **duals of each other in information-capacity space** — different shapes of the same constraint. VAR trades differentiability for a crisp discrete vocabulary; nlcpV4 trades the discrete vocabulary for end-to-end differentiable training. Neither is strictly more powerful; they are two fixed points on a bottleneck-shape axis:
+**Key insight**: VAR's and lcp's bottlenecks are **duals of each other in information-capacity space** — different shapes of the same constraint. VAR trades differentiability for a crisp discrete vocabulary; lcp trades the discrete vocabulary for end-to-end differentiable training. Neither is strictly more powerful; they are two fixed points on a bottleneck-shape axis:
 
 ```
          hard discrete            soft continuous
          ┌────────────┐          ┌────────────────┐
-         │ VAR VQ-VAE │ ◄──────► │ nlcpV4 Builder │
+         │ VAR VQ-VAE │ ◄──────► │ lcp Builder │
          │  codebook  │          │ rank-bounded   │
          │  (V entries│          │ attention      │
          │   per pos) │          │ (L_k ranks)    │
@@ -724,7 +724,7 @@ Iterating it K times with doubling `L_k` removes cumulatively rank `Σ L_k = 2^K
 
 ### 2.5.9 Implications for the Predictor (Stage 2)
 
-The §2.5 principle has a direct, non-negotiable consequence for ConceptPredictor teacher-forcing. This is the nlcpV4 analog of the warning in [docs/VAR.md §5.3.2.1](file:///Users/sjia/Documents/AgenticFinLab/Projects/Reasoning-Autoregressive-Modeling/docs/VAR.md) about using `embedding(idx_k)` naively.
+The §2.5 principle has a direct, non-negotiable consequence for ConceptPredictor teacher-forcing. This is the lcp analog of the warning in [docs/VAR.md §5.3.2.1](file:///Users/sjia/Documents/AgenticFinLab/Projects/Reasoning-Autoregressive-Modeling/docs/VAR.md) about using `embedding(idx_k)` naively.
 
 **Rule**: when predicting level k given levels `<k`, the context fed to the Predictor must represent the cumulative canvas `H_hat_k = Σ_{j<k} R_j`, **not raw concept stacks `[C_0, ..., C_{k-1}]`**.
 
@@ -748,7 +748,7 @@ Any Predictor that stacks concepts alone (without canvas reconstruction or a pro
 
 ### 2.5.10 One-Line Mnemonic (For Everyday Use)
 
-> **VAR constrains via a discrete codebook; nlcpV4 constrains via matrix rank. Both iteratively peel a residual, both enforce non-overlap through subtraction, both produce a coarse-to-fine pyramid. The only real difference is which algebraic structure (finite set vs. rank-bounded subspace) plays the role of "information capacity ceiling" at each level.**
+> **VAR constrains via a discrete codebook; lcp constrains via matrix rank. Both iteratively peel a residual, both enforce non-overlap through subtraction, both produce a coarse-to-fine pyramid. The only real difference is which algebraic structure (finite set vs. rank-bounded subspace) plays the role of "information capacity ceiling" at each level.**
 
 ---
 
@@ -991,15 +991,15 @@ the same sequence that the LLM already natively consumes.
 
 #### 4.2.1 Components (`ConceptPredictor.__init__`)
 
-| Component             | Shape / Type                                     | Role                                                                                     |
-|-----------------------|--------------------------------------------------|------------------------------------------------------------------------------------------|
-| `reason_model`        | HuggingFace causal LM                            | Shared backbone; processes `[Q; back-decoded concepts; S]` as ordinary `inputs_embeds`.  |
-| `back_proj`           | `Linear(D, D_enc, bias=False)`                   | Maps concept-space D to encoder/embedding-space D_enc so concepts can be fed to the LLM. |
-| `level_embeddings`    | `nn.Embedding(K, D_enc)`                         | Per-level marker k added to each concept slot; analogous to VAR's `lvl_emb`.             |
-| `position_embeddings` | `nn.Embedding(max_k L_k, D_enc)`                 | Within-level slot marker j; lets the backbone distinguish `C_{k,0}` from `C_{k,1}`.      |
-| `concept_head`        | `Linear(D_enc, D_enc) → GELU → Linear(D_enc, D)` | Maps backbone hidden state back to concept space to produce Ĉ.                           |
-| `_level_ids_flat`     | buffer `int64 [Σ L_k]`                           | Precomputed flat level ids `[0, 1,1, 2,2,2,2, ...]` for slot marker lookup.              |
-| `_pos_ids_flat`       | buffer `int64 [Σ L_k]`                           | Precomputed flat within-level ids `[0, 0,1, 0,1,2,3, ...]`.                              |
+| Component             | Shape / Type                                     | Role                                                                                                    |
+|-----------------------|--------------------------------------------------|---------------------------------------------------------------------------------------------------------|
+| `reason_model`        | HuggingFace causal LM                            | Shared backbone; processes `[Q; back-decoded concepts; S]` as ordinary `inputs_embeds`.                 |
+| `back_proj`           | `Linear(D, D_enc, bias=False)`                   | Maps concept-space D to encoder/embedding-space D_enc so concepts can be fed to the LLM.                |
+| `level_embeddings`    | `nn.Embedding(K, D_enc)`                         | Per-level embedding (index k = 0..K-1) added to every concept at level k; analogous to VAR's `lvl_emb`. |
+| `position_embeddings` | `nn.Embedding(max_k L_k, D_enc)`                 | Within-level position embedding for index j; lets the backbone distinguish `C_{k,0}` from `C_{k,1}`.    |
+| `concept_head`        | `Linear(D_enc, D_enc) → GELU → Linear(D_enc, D)` | Maps backbone hidden state back to concept space to produce Ĉ.                                          |
+| `_level_ids_flat`     | buffer `int64 [Σ L_k]`                           | Precomputed flat level ids `[0, 1,1, 2,2,2,2, ...]` for level-embedding lookup.                         |
+| `_pos_ids_flat`       | buffer `int64 [Σ L_k]`                           | Precomputed flat within-level ids `[0, 0,1, 0,1,2,3, ...]`.                                             |
 
 There is **no** `q_proj`, no `q_proj_norm`, no separate `concept_transformer`,
 and no `start_token`; the question is injected simply by running its token
@@ -1010,14 +1010,14 @@ embeddings through `reason_model` as the first part of the packed sequence.
 The Predictor supports two mutually exclusive backbone configurations,
 selected via `model.predictor.use_shared_model` in the YAML config:
 
-| Aspect                  | SHARED (`use_shared_model: true`)                                     | INDEPENDENT (`use_shared_model: false`)                                               |
-|-------------------------|-----------------------------------------------------------------------|---------------------------------------------------------------------------------------|
-| `reason_model`          | **Aliased** to `builder.reason_model` (no new weights)                | **Own copy**, loaded from `predictor_model_name`                                      |
-| `back_proj`             | **Aliased** to `builder.back_proj`                                    | **Own copy** (fresh, trainable)                                                       |
-| `tokenizer`             | **Aliased** to `builder.tokenizer`                                    | **Own instance** (from `predictor_model_name`)                                        |
-| LoRA on `reason_model`  | **Forbidden** (fail-fast: raises at init)                             | **Allowed** (default target_modules `[q_proj, v_proj]`, r=16, α=32)                   |
-| Extra trainable weights | `level_embeddings`, `position_embeddings`, `concept_head` only        | `back_proj`, `level_embeddings`, `position_embeddings`, `concept_head`, LoRA adapters |
-| Config example          | `configs/nlcpV4/GSM8K/train_predictor_Qwen2.5-0.5B_2level_shared.yml` | `configs/nlcpV4/GSM8K/train_predictor_Qwen2.5-0.5B_2level_independent.yml`            |
+| Aspect                  | SHARED (`use_shared_model: true`)                                  | INDEPENDENT (`use_shared_model: false`)                                               |
+|-------------------------|--------------------------------------------------------------------|---------------------------------------------------------------------------------------|
+| `reason_model`          | **Aliased** to `builder.reason_model` (no new weights)             | **Own copy**, loaded from `predictor_model_name`                                      |
+| `back_proj`             | **Aliased** to `builder.back_proj`                                 | **Own copy** (fresh, trainable)                                                       |
+| `tokenizer`             | **Aliased** to `builder.tokenizer`                                 | **Own instance** (from `predictor_model_name`)                                        |
+| LoRA on `reason_model`  | **Forbidden** (fail-fast: raises at init)                          | **Allowed** (default target_modules `[q_proj, v_proj]`, r=16, α=32)                   |
+| Extra trainable weights | `level_embeddings`, `position_embeddings`, `concept_head` only     | `back_proj`, `level_embeddings`, `position_embeddings`, `concept_head`, LoRA adapters |
+| Config example          | `configs/lcp/GSM8K/train_predictor_Qwen2.5-0.5B_2level_shared.yml` | `configs/lcp/GSM8K/train_predictor_Qwen2.5-0.5B_2level_independent.yml`               |
 
 **Design intent.** SHARED mode tests whether the *same* LLM that built the
 pyramid can also predict it, using only a small MLP head on top. INDEPENDENT
@@ -1061,7 +1061,7 @@ Given a batch of `(Q, C_gt = [C_0, ..., C_{K-1}], S)`, the Predictor does
 **one** teacher-forced pass through `reason_model`:
 
 ```
-# 1. Back-decode groundtruth concepts to encoder space and add slot markers
+# 1. Back-decode groundtruth concepts to encoder space, then add level and position embeddings
 C_flat   = concat_along_slots([C_0, ..., C_{K-1}])          # (B, Σ L_k, D)
 X_concept= back_proj(C_flat)                                 # (B, Σ L_k, D_enc)
 X_concept+= level_embeddings(_level_ids_flat)                # broadcast over batch
@@ -1151,7 +1151,7 @@ code.
 - **Teacher forcing at the concept slots.** Because `X_concept` is built
   from **groundtruth** `C_gt` (detached from Builder), every concept slot
   sees only past slots plus `Q`, exactly like NTP on text tokens.
-- **Slot identity via additive markers.** Inside a level, slots share the
+- **Slot identity via additive embeddings.** Inside a level, slots share the
   same causal context; the only way the backbone can distinguish
   `C_{k,0}` from `C_{k,1}` is through `position_embeddings`. Level identity
   across K levels is provided analogously by `level_embeddings`.
@@ -1280,7 +1280,7 @@ single model**:
 │  INTERNAL Stage 1: Content Backbone (LLM)                           │
 │                                                                     │
 │  Purpose: Contextualise ALL input content into rich hidden states   │
-│  Input:   [Q_embeds, back_decode(C_0..C_{K-1}) + slot_markers]      │
+│  Input:   [Q_embeds, back_decode(C_0..C_{K-1}) + level_emb + pos_emb] │
 │  Output:  Hidden states H [B, L_Q + 63, D_enc]                      │
 │                                                                     │
 │  ✓ Real content only (question tokens + concept embeddings)         │
@@ -1337,8 +1337,8 @@ hidden states of `[Q + previous levels]`.
 |-----------------------|--------------------------------------|--------------------------------------------------------------|
 | `reason_model`        | HuggingFace causal LM                | Content backbone; produces hidden states H                   |
 | `back_proj`           | Linear(D → D_enc)                    | Lifts concept-space to encoder-space for LLM input           |
-| `level_embeddings`    | Embedding(K, D_enc)                  | Per-slot level marker (k = 0..5)                             |
-| `position_embeddings` | Embedding(max(L_k), D_enc)           | Per-slot intra-level marker (j = 0..L_k-1)                   |
+| `level_embeddings`    | Embedding(K, D_enc)                  | Level embedding for index k (k = 0..5)                       |
+| `position_embeddings` | Embedding(max(L_k), D_enc)           | Within-level position embedding for index j (j = 0..L_k-1)   |
 | **`level_queries`**   | **ParameterList of K: [L_k, D_enc]** | **Core of Option Y — learnable queries for cross-attention** |
 | `query_norm`          | LayerNorm(D_enc)                     | Pre-norm on query side of cross-attention                    |
 | `context_norm`        | LayerNorm(D_enc)                     | Pre-norm on context (KV) side of cross-attention             |
@@ -1453,7 +1453,7 @@ Let `B = 4`, `L_Q = 40`, `K = 6`, `level_lengths = [1, 2, 4, 8, 16, 32]`,
 3. back_proj(concepts_flat):                  [4, 63, 896]
    (D = D_enc = 896, so this is a learned rotation, not a dim change)
 
-4. Slot markers added:
+4. Level and position embeddings added:
      level_ids_flat = [0, 1,1, 2,2,2,2, 3×8, 4×16, 5×32]
      pos_ids_flat   = [0, 0,1, 0,1,2,3, 0..7, 0..15, 0..31]
 
@@ -1643,7 +1643,7 @@ Pass 1 (feed Ĉ_0, predict level 1):
 
 Pass 2 (feed Ĉ_1 = 2 positions, predict level 2):
     ┌───────────────────────────────────────────────────────────┐
-    │ x = back_proj(Ĉ_1) + markers          [4, 2, 896]       │
+    │ x = back_proj(Ĉ_1) + level_emb + pos_emb  [4, 2, 896]    │
     │ out = LLM(x, past_key_values=pkv)                        │
     │ pkv updated                            (KV cache: 43 pos) │
     │ context = cat(context, out.hidden)     [4, 43, 896]      │
@@ -1654,7 +1654,7 @@ Pass 2 (feed Ĉ_1 = 2 positions, predict level 2):
 
 Pass 3 (feed Ĉ_2 = 4 positions, predict level 3):
     ┌───────────────────────────────────────────────────────────┐
-    │ x = back_proj(Ĉ_2) + markers          [4, 4, 896]       │
+    │ x = back_proj(Ĉ_2) + level_emb + pos_emb  [4, 4, 896]    │
     │ out = LLM(x, past_key_values=pkv)                        │
     │ pkv updated                            (KV cache: 47 pos) │
     │ context = cat(context, out.hidden)     [4, 47, 896]      │
@@ -1731,7 +1731,7 @@ context:
 │  Option Y (Per-Level Parallel)                                         │
 │                                                                        │
 │  Training:                                                             │
-│    [Q; back_decode(all C) + markers]  ← content backbone              │
+│    [Q; back_decode(all C) + level_emb + pos_emb]  ← content backbone │
 │    ONE backbone pass → K parallel cross-attentions                     │
 │                                                                        │
 │  Inference:                                                            │
@@ -1747,16 +1747,16 @@ context:
 
 ##### 4.3.8.2 Detailed Comparison Table
 
-| Aspect                      | Option X (Flat AR)                  | Option Y (Per-Level Parallel)       |
-|-----------------------------|-------------------------------------|-------------------------------------|
-| **Inference steps**         | Σ L_k = 63                          | K = 6                               |
-| **Intra-level dependency**  | Sequential (C_{k,j} depends on j-1) | None (all L_k concepts in parallel) |
-| **Inter-level dependency**  | Inherent via sequence order         | Explicit via context window cutoff  |
-| **Learnable queries**       | None (backbone hidden → head)       | level_queries[k]: [L_k, D_enc]      |
-| **Extra parameters**        | ~0 (just concept_head)              | ~56k (queries) + cross_attn weights |
-| **Training architecture**   | Pure causal LM                      | Causal LM + cross-attention head    |
-| **Concept differentiation** | Position in sequence + markers      | Separate query identity             |
-| **VAR analogy**             | Token-level AR                      | Scale-level AR (like VAR itself!)   |
+| Aspect                      | Option X (Flat AR)                   | Option Y (Per-Level Parallel)       |
+|-----------------------------|--------------------------------------|-------------------------------------|
+| **Inference steps**         | Σ L_k = 63                           | K = 6                               |
+| **Intra-level dependency**  | Sequential (C_{k,j} depends on j-1)  | None (all L_k concepts in parallel) |
+| **Inter-level dependency**  | Inherent via sequence order          | Explicit via context window cutoff  |
+| **Learnable queries**       | None (backbone hidden → head)        | level_queries[k]: [L_k, D_enc]      |
+| **Extra parameters**        | ~0 (just concept_head)               | ~56k (queries) + cross_attn weights |
+| **Training architecture**   | Pure causal LM                       | Causal LM + cross-attention head    |
+| **Concept differentiation** | Position in sequence + level/pos emb | Separate query identity             |
+| **VAR analogy**             | Token-level AR                       | Scale-level AR (like VAR itself!)   |
 
 ##### 4.3.8.3 The VAR Alignment Insight
 
@@ -1901,7 +1901,7 @@ Builder produces gt_concepts:
 ##### 4.3.11.2 Training Pass (Teacher-Forced)
 
 ```
-1. All 63 gt concepts → back_proj + markers → 63 embeddings
+1. All 63 gt concepts → back_proj + level/pos embeddings → 63 embeddings
 2. Concatenate with Q: [Q(40) | concepts(63)] = 103 positions
 3. LLM processes all 103 positions (causal mask):
      Position 0-39:   Q context builds up
@@ -1932,12 +1932,12 @@ Pass 0: LLM processes Q (40 tokens)
     → Ĉ_0 = cross_attn(level_queries[0], context)
     → Ĉ_0 ≈ "arithmetic addition" [1, 1, 896]
 
-Pass 1: Feed back_proj(Ĉ_0) + markers (1 new token)
+Pass 1: Feed back_proj(Ĉ_0) + level/pos embeddings (1 new token)
     → context grows to [1, 41, 896]
     → Ĉ_1 = cross_attn(level_queries[1], context)
     → Ĉ_1 ≈ ["setup", "compute"] [1, 2, 896]
 
-Pass 2: Feed back_proj(Ĉ_1) + markers (2 new tokens)
+Pass 2: Feed back_proj(Ĉ_1) + level/pos embeddings (2 new tokens)
     → context grows to [1, 43, 896]
     → Ĉ_2 = cross_attn(level_queries[2], context)
     → Ĉ_2 ≈ ["5 red", "3 blue", "add", "8"] [1, 4, 896]
@@ -2110,7 +2110,7 @@ L_builder = L_recon + λ_order × L_order + λ_residual × L_residual + λ_reaso
 The Predictor optimises **two** losses drawn from the same forward pass:
 a concept regression loss (Ĉ_k vs frozen groundtruth C_k) and a reasoning
 cross-entropy loss (NTP over solution tokens). See
-[`losses.py`](file:///Users/sjia/Documents/AgenticFinLab/Projects/Reasoning-Autoregressive-Modeling/examples/nlcpV4/losses.py)
+[`losses.py`](file:///Users/sjia/Documents/AgenticFinLab/Projects/Reasoning-Autoregressive-Modeling/examples/lcp/losses.py)
 `compute_predictor_loss` for the authoritative implementation.
 
 #### 5.2.1 Concept Loss (per-level, averaged over K)
@@ -2154,7 +2154,7 @@ Non-solution positions and padding are masked out via `-100` in the target.
    still carries the information needed to produce the correct solution.
 2. It provides a text-space training signal that is typically less noisy
    than the concept regression signal, stabilising training (see
-   [loss-desien-analysis.md](file:///Users/sjia/Documents/AgenticFinLab/Projects/Reasoning-Autoregressive-Modeling/examples/nlcpV4/loss-desien-analysis.md) §6.2).
+   [loss-desien-analysis.md](file:///Users/sjia/Documents/AgenticFinLab/Projects/Reasoning-Autoregressive-Modeling/examples/lcp/loss-desien-analysis.md) §6.2).
 
 #### 5.2.3 Total Predictor Loss
 
@@ -2376,7 +2376,7 @@ The Concept Pyramid design is architecturally sound. The ConceptPyramidBuilder u
 
 The main limitations — soft segment locality, potential extraction imbalance, and Q-only generalization — are inherent trade-offs of the soft attention approach. They are acceptable for our research goals because:
 1. The soft approach is strictly more expressive than hard segmentation
-2. The full NLCP training pipeline (with NTP loss) provides strong corrective signals
+2. The full LCP training pipeline (with NTP loss) provides strong corrective signals
 3. The design is fully differentiable and end-to-end trainable
 
 These limitations should be monitored during experiments but do not warrant architectural changes at this stage.

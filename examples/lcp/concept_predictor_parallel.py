@@ -168,7 +168,7 @@ import torch.nn as nn
 from peft import LoraConfig, get_peft_model
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from nlcpV4.utils import pack_qcs_sequences
+from lcp.utils import pack_qcs_sequences
 
 # =========================================================================
 # Output Dataclass (identical to Option X)

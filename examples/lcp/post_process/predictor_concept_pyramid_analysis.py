@@ -43,17 +43,17 @@ Usage
 -----
 Direct config path::
 
-    python3 examples/nlcpV4/predictor_concept_pyramid_analysis.py \\
-        -c configs/nlcpV4/GSM8K/train_predictor_Qwen2.5-0.5B_6level_independent.yml
+    python3 examples/lcp/predictor_concept_pyramid_analysis.py \\
+        -c configs/lcp/GSM8K/train_predictor_Qwen2.5-0.5B_6level_independent.yml
 
 Discovery::
 
-    python3 examples/nlcpV4/predictor_concept_pyramid_analysis.py \\
+    python3 examples/lcp/predictor_concept_pyramid_analysis.py \\
         -d GSM8K -e Qwen2.5-0.5B_6level_independent
 
 Override checkpoint (only ``evaluation.data`` is read from the YAML)::
 
-    python3 examples/nlcpV4/predictor_concept_pyramid_analysis.py \\
+    python3 examples/lcp/predictor_concept_pyramid_analysis.py \\
         -c <yaml> -p /path/to/checkpoint.pt
 
 Arguments
@@ -62,7 +62,7 @@ Arguments
                          the value used at training time.
     -c / --config        Direct path to a ``train_predictor_*.yml``.
                          Mutually exclusive with ``-d``/``-e``.
-    -d / --dataset       Dataset dir under ``configs/nlcpV4/``.
+    -d / --dataset       Dataset dir under ``configs/lcp/``.
     -e / --experiment    Config stem after ``train_predictor_`` or ``all``.
     -p / --checkpoint    Override the predictor checkpoint .pt file. When
                          set, this exact file is loaded; the rest of the
@@ -114,11 +114,11 @@ sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(PROJECT_ROOT / "examples"))
 
 from lmbase.utils.env_tools import get_device
-from nlcpV4.concept_builder import ConceptPyramidBuilder
-from nlcpV4.concept_predictor import ConceptPredictor, PredictorOutput
-from nlcpV4.data_loader import BuilderInput, NLCPV4DataLoader
-from nlcpV4.eval_predictor import _strip_solutions, _tokenize_qs
-from nlcpV4.train_predictor import (
+from lcp.concept_builder import ConceptPyramidBuilder
+from lcp.concept_predictor import ConceptPredictor, PredictorOutput
+from lcp.data_loader import BuilderInput, NLCPV4DataLoader
+from lcp.eval_predictor import _strip_solutions, _tokenize_qs
+from lcp.train_predictor import (
     _inherit_pyramid_from_builder,
     _load_frozen_builder,
     _resolve_builder_checkpoint_path,
@@ -129,7 +129,7 @@ from ram.utils import apply_storage_root, load_config, print_storage_paths
 logger = logging.getLogger(__name__)
 
 # --- Batch-mode constants ------------------------------------------
-CONFIGS_ROOT = PROJECT_ROOT / "configs" / "nlcpV4"
+CONFIGS_ROOT = PROJECT_ROOT / "configs" / "lcp"
 ALL_KEYWORD = "all"
 ANALYSIS_OUTPUT_DIR_NAME = "concept_pyramid_analysis"
 ALL_ANALYSES = (
@@ -198,7 +198,7 @@ def parse_args() -> argparse.Namespace:
         "--dataset",
         default=None,
         help=(
-            "Dataset dir under configs/nlcpV4/ (may be nested). "
+            "Dataset dir under configs/lcp/ (may be nested). "
             "Required when -c is not given."
         ),
     )

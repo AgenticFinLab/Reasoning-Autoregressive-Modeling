@@ -5,7 +5,7 @@
 > GSM8K matrix. Part II (§8–§12) defines the weight-design theory — the
 > objective, the mathematical formulation, the target effects, and the
 > implementation pipeline — and shows how the weights in every
-> [`configs/nlcpV4/GSM8K/AutoWeighted/`](file:///Users/sjia/Documents/AgenticFinLab/Projects/Reasoning-Autoregressive-Modeling/configs/nlcpV4/GSM8K/AutoWeighted)
+> [`configs/lcp/GSM8K/AutoWeighted/`](file:///Users/sjia/Documents/AgenticFinLab/Projects/Reasoning-Autoregressive-Modeling/configs/lcp/GSM8K/AutoWeighted)
 > config are derived from the empirical numbers in Part I.
 
 ---
@@ -20,7 +20,7 @@ across every available GSM8K Builder configuration, so that sensible
 `loss_weights` can be chosen from empirical evidence rather than
 guesswork. The concrete weights used in production follow in Part II.
 
-- **Data file**: `EXPERIMENT/nlcpV4/builder/Loss_prepare.json`
+- **Data file**: `EXPERIMENT/lcp/builder/Loss_prepare.json`
 - **Entries analyzed**: 36 configs (6 model sizes × 6 pyramid levels;
   Qwen3-8B configs were not yet recorded at the time of writing).
 - **Protocol**: each entry is the mean over a small number of forward
@@ -133,7 +133,7 @@ inside the Qwen3 family. Taken across both families, the ordering is
 not monotone in parameter count.
 
 **Mechanistic cause.** `recon_loss` is `MSE(pred, H_CoT) /
-(H_CoT.std() + eps)^2` (see [losses.py](file:///Users/sjia/Documents/AgenticFinLab/Projects/Reasoning-Autoregressive-Modeling/examples/nlcpV4/losses.py)). The numerator scales with the
+(H_CoT.std() + eps)^2` (see [losses.py](file:///Users/sjia/Documents/AgenticFinLab/Projects/Reasoning-Autoregressive-Modeling/examples/lcp/losses.py)). The numerator scales with the
 squared norm of the hidden states; the denominator normalizes by
 hidden-state spread. If a backbone has small `H_CoT.std()` relative to
 its mean norm — typical of older / less-regularized checkpoints — the
@@ -586,26 +586,26 @@ three components in the shared portions of the gradient.
 ### 11.1 Pipeline
 
 ```
-configs/nlcpV4/GSM8K/train_builder_*_*level.yml   (baseline recipes)
+configs/lcp/GSM8K/train_builder_*_*level.yml   (baseline recipes)
                 │
                 ▼  loss_prepare.py (10-batch warm-up, no grad)
-EXPERIMENT/nlcpV4/builder/Loss_prepare.json       (raw L̄_i per config)
+EXPERIMENT/lcp/builder/Loss_prepare.json       (raw L̄_i per config)
                 │
                 ▼  loss_weight_compute.py -f Loss_prepare.json
-EXPERIMENT/nlcpV4/builder/Loss_prepare_weights.csv (w_i*, L̃_i per config)
+EXPERIMENT/lcp/builder/Loss_prepare_weights.csv (w_i*, L̃_i per config)
                 │
                 ▼  AutoWeighted generator
-configs/nlcpV4/GSM8K/AutoWeighted/train_builder_*_*level.yml
+configs/lcp/GSM8K/AutoWeighted/train_builder_*_*level.yml
                 │
                 ▼  train_builder.py
-EXPERIMENT/nlcpV4/builder/GSM8K_<m>_<L>level_AutoWeighted/
+EXPERIMENT/lcp/builder/GSM8K_<m>_<L>level_AutoWeighted/
 ```
 
 ### 11.2 File artifacts
 
-- **[`examples/nlcpV4/loss_weight_compute.py`](file:///Users/sjia/Documents/AgenticFinLab/Projects/Reasoning-Autoregressive-Modeling/examples/nlcpV4/loss_weight_compute.py)** — implements §9.2 verbatim; emits the CSV.
-- **[`EXPERIMENT/nlcpV4/builder/Loss_prepare_weights.csv`](file:///Users/sjia/Documents/AgenticFinLab/Projects/Reasoning-Autoregressive-Modeling/EXPERIMENT/nlcpV4/builder/Loss_prepare_weights.csv)** — 36 rows × 18 columns: raw, weight, and weighted values per config.
-- **[`configs/nlcpV4/GSM8K/AutoWeighted/`](file:///Users/sjia/Documents/AgenticFinLab/Projects/Reasoning-Autoregressive-Modeling/configs/nlcpV4/GSM8K/AutoWeighted)** — 36 YAML recipes; each carries a provenance banner listing $\bar{\mathcal{L}}_i$, $w_i^{\star}$, and $\tilde{\mathcal{L}}_i$, and retargets `save_folder` / `checkpoint_path` / `log_path` with a `_AutoWeighted` suffix to avoid colliding with baseline outputs.
+- **[`examples/lcp/loss_weight_compute.py`](file:///Users/sjia/Documents/AgenticFinLab/Projects/Reasoning-Autoregressive-Modeling/examples/lcp/loss_weight_compute.py)** — implements §9.2 verbatim; emits the CSV.
+- **[`EXPERIMENT/lcp/builder/Loss_prepare_weights.csv`](file:///Users/sjia/Documents/AgenticFinLab/Projects/Reasoning-Autoregressive-Modeling/EXPERIMENT/lcp/builder/Loss_prepare_weights.csv)** — 36 rows × 18 columns: raw, weight, and weighted values per config.
+- **[`configs/lcp/GSM8K/AutoWeighted/`](file:///Users/sjia/Documents/AgenticFinLab/Projects/Reasoning-Autoregressive-Modeling/configs/lcp/GSM8K/AutoWeighted)** — 36 YAML recipes; each carries a provenance banner listing $\bar{\mathcal{L}}_i$, $w_i^{\star}$, and $\tilde{\mathcal{L}}_i$, and retargets `save_folder` / `checkpoint_path` / `log_path` with a `_AutoWeighted` suffix to avoid colliding with baseline outputs.
 
 ### 11.3 Regeneration
 
@@ -613,9 +613,9 @@ To refresh after re-measuring (e.g., after a backbone precision change or
 after adding Qwen3-8B entries):
 
 ```bash
-python3 examples/RunResults/loss_prepare.py -c configs/nlcpV4/GSM8K/
-python3 examples/nlcpV4/loss_weight_compute.py \
-    -f EXPERIMENT/nlcpV4/builder/Loss_prepare.json
+python3 examples/RunResults/loss_prepare.py -c configs/lcp/GSM8K/
+python3 examples/lcp/loss_weight_compute.py \
+    -f EXPERIMENT/lcp/builder/Loss_prepare.json
 # then re-run the AutoWeighted generator
 ```
 
@@ -631,7 +631,7 @@ python3 examples/nlcpV4/loss_weight_compute.py \
 
 ### 12.1 Escalation paths if a component stalls
 
-Monitor via [`builder_training_analysis.py`](file:///Users/sjia/Documents/AgenticFinLab/Projects/Reasoning-Autoregressive-Modeling/examples/nlcpV4/builder_training_analysis.py).
+Monitor via [`builder_training_analysis.py`](file:///Users/sjia/Documents/AgenticFinLab/Projects/Reasoning-Autoregressive-Modeling/examples/lcp/builder_training_analysis.py).
 The failure mode to watch is **a component whose loss plateaus
 immediately and refuses to decrease** — this is the symptom of
 over-suppression.
@@ -702,7 +702,7 @@ builder pyramid, so its magnitude depends on both the level
 schedule (how many tokens a level must summarize) and the
 backbone's hidden-state scale.
 
-- **Data file**: [`EXPERIMENT/nlcpV4/predictor/GSM8K_Loss_prepare_independent.json`](file:///Users/sjia/Documents/AgenticFinLab/Projects/Reasoning-Autoregressive-Modeling/EXPERIMENT/nlcpV4/predictor/GSM8K_Loss_prepare_independent.json)
+- **Data file**: [`EXPERIMENT/lcp/predictor/GSM8K_Loss_prepare_independent.json`](file:///Users/sjia/Documents/AgenticFinLab/Projects/Reasoning-Autoregressive-Modeling/EXPERIMENT/lcp/predictor/GSM8K_Loss_prepare_independent.json)
 - **Entries analyzed**: 12 configs (Qwen2.5-0.5B × {2,4,6,8}, Qwen2.5-1.5B × {2,3,6,8}, Qwen3-0.6B × {2,4,6,8}).
   The 6×6 matrix is partially filled; Qwen2.5-3B / Qwen3-1.7B / Qwen3-4B / Qwen3-8B and the remaining `(m, L)` cells are pending.
 - **Protocol**: `loss_predictor_prepare.py`, `batch_size = 4`, 10 no-grad forward passes; values are raw means, equal to weighted means (both weights are 1.0 at measurement time).
@@ -805,7 +805,7 @@ smaller `H_CoT.std()` (§4.1). Within Qwen2.5, 0.5B (446) and 1.5B
 **Mechanistic note.** Unlike the builder's `recon`, concept MSE is
 not divided by `H_CoT.std()^2`; it is plain MSE on the builder's
 already-trained concept targets (see
-[compute_predictor_loss](file:///Users/sjia/Documents/AgenticFinLab/Projects/Reasoning-Autoregressive-Modeling/examples/nlcpV4/losses.py)). This is why the concept magnitudes are
+[compute_predictor_loss](file:///Users/sjia/Documents/AgenticFinLab/Projects/Reasoning-Autoregressive-Modeling/examples/lcp/losses.py)). This is why the concept magnitudes are
 orders larger than builder recon (1000+ vs 77 at worst) and why a
 dedicated weight-capping strategy is essential.
 

@@ -1,4 +1,4 @@
-"""Pure-tensor unit tests for :mod:`nlcpV4.utils` packed-QCS helpers.
+"""Pure-tensor unit tests for :mod:`lcp.utils` packed-QCS helpers.
 
 Why this test exists:
     The packed-QCS helper is THE fix for the padding-geometry bug that
@@ -17,7 +17,7 @@ Toy batch (matches the design walkthrough):
         Row B: [Q0..Q7 | C0 C1 C2 | S0 S1 S2 S3]         positions 0..14
 
 Run:
-    python3 examples/nlcpV4/utest/test_packed_qcs.py
+    python3 examples/lcp/utest/test_packed_qcs.py
 """
 
 from __future__ import annotations
@@ -30,11 +30,11 @@ import torch
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
-# Load ``nlcpV4/utils.py`` DIRECTLY via importlib so this test does NOT
-# trigger ``nlcpV4/__init__.py`` (which eagerly pulls in eval_builder /
-# swanlab / data_loader / lmbase).  ``utils.py`` has zero nlcpV4-internal
+# Load ``lcp/utils.py`` DIRECTLY via importlib so this test does NOT
+# trigger ``lcp/__init__.py`` (which eagerly pulls in eval_builder /
+# swanlab / data_loader / lmbase).  ``utils.py`` has zero lcp-internal
 # dependencies, so a pure-tensor test can run on a bare ``torch`` install.
-_UTILS_PATH = PROJECT_ROOT / "examples" / "nlcpV4" / "utils.py"
+_UTILS_PATH = PROJECT_ROOT / "examples" / "lcp" / "utils.py"
 _MOD_NAME = "_nlcpv4_utils_under_test"
 _spec = importlib.util.spec_from_file_location(_MOD_NAME, str(_UTILS_PATH))
 _utils = importlib.util.module_from_spec(_spec)

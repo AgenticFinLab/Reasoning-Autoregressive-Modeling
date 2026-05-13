@@ -12,7 +12,7 @@ dual-purpose:
        ``MODE_*`` constants directly. No duplication; the same code path
        runs at every training-time eval and at every standalone run.
 
-    2. CLI      -- ``python examples/nlcpV4/eval_builder.py -c <yaml>``
+    2. CLI      -- ``python examples/lcp/eval_builder.py -c <yaml>``
        loads a checkpoint, runs eval on the configured eval split, and
        writes a self-contained ``sample_<id>/`` folder per row plus an
        aggregate ``eval_summary.json``.
@@ -24,7 +24,7 @@ imports from the other.
   LIBRARY USAGE  (called from training / analysis code)
 ================================================================================
 
-    from nlcpV4.eval_builder import (
+    from lcp.eval_builder import (
         evaluate_builder,            # main eval loop
         log_eval_results,            # console + SwanLab + JSON history
         log_terminal_entry,          # one JSONL row
@@ -53,7 +53,7 @@ imports from the other.
     avg_losses, texts_dict, samples = evaluate_builder(
         ...,
         output_root=Path(
-            "/Data/ReasoningNLCP/EXPERIMENT/nlcpV4/builder/"
+            "/Data/ReasoningNLCP/EXPERIMENT/lcp/builder/"
             "GSM8K_Qwen2.5-0.5B_3level_AutoWeighted/logs/eval_builder/teacher_forced"
         ),
         dump_artifacts=True,
@@ -64,7 +64,7 @@ imports from the other.
   CLI TEMPLATE
 ================================================================================
 
-    python examples/nlcpV4/eval_builder.py \
+    python examples/lcp/eval_builder.py \
         -c <path/to/train_builder_*.yml> \
         -s <storage-root> \
         --mode <teacher_forced | free_generation | both> \
@@ -121,21 +121,21 @@ suffix and ``training.loss_weights`` values are auto-tuned.
 A. Quick check on 10 samples, teacher-forced, defaults from YAML
    (vector dump comes from ``evaluation.intermediate_vector_save``):
 
-       python examples/nlcpV4/eval_builder.py -c configs/nlcpV4/GSM8K/AutoWeighted/train_builder_Qwen2.5-0.5B_3level.yml -s /Data/ReasoningNLCP --mode teacher_forced --max-samples 10
+       python examples/lcp/eval_builder.py -c configs/lcp/GSM8K/AutoWeighted/train_builder_Qwen2.5-0.5B_3level.yml -s /Data/ReasoningNLCP --mode teacher_forced --max-samples 10
 
 B. Free-generation only, full eval split, vectors disabled to save disk:
 
-       python examples/nlcpV4/eval_builder.py -c configs/nlcpV4/GSM8K/AutoWeighted/train_builder_Qwen2.5-0.5B_3level.yml -s /Data/ReasoningNLCP --mode free_generation --max-samples 0 -v 0
+       python examples/lcp/eval_builder.py -c configs/lcp/GSM8K/AutoWeighted/train_builder_Qwen2.5-0.5B_3level.yml -s /Data/ReasoningNLCP --mode free_generation --max-samples 0 -v 0
 
 C. Run BOTH paths and compare, with explicit checkpoint and custom output:
 
-       python examples/nlcpV4/eval_builder.py -c configs/nlcpV4/GSM8K/AutoWeighted/train_builder_Qwen2.5-0.5B_3level.yml -s /Data/ReasoningNLCP --mode both --max-samples 200 --ckpt /Data/ReasoningNLCP/EXPERIMENT/nlcpV4/builder/GSM8K_Qwen2.5-0.5B_3level_AutoWeighted/checkpoints/checkpoint_best_eval-step5000.pt -o /tmp/eval_out -v 1
+       python examples/lcp/eval_builder.py -c configs/lcp/GSM8K/AutoWeighted/train_builder_Qwen2.5-0.5B_3level.yml -s /Data/ReasoningNLCP --mode both --max-samples 200 --ckpt /Data/ReasoningNLCP/EXPERIMENT/lcp/builder/GSM8K_Qwen2.5-0.5B_3level_AutoWeighted/checkpoints/checkpoint_best_eval-step5000.pt -o /tmp/eval_out -v 1
 
 D. Reuse training output tree (no -o): writes to
    ``<log_path>/eval_builder/<mode>/sample_<id>/`` plus ``eval.log`` and
    ``eval_summary.json`` at that root. For the AutoWeighted 3-level
    config above, that resolves to
-   ``/Data/ReasoningNLCP/EXPERIMENT/nlcpV4/builder/GSM8K_Qwen2.5-0.5B_3level_AutoWeighted/logs/eval_builder/<mode>/``.
+   ``/Data/ReasoningNLCP/EXPERIMENT/lcp/builder/GSM8K_Qwen2.5-0.5B_3level_AutoWeighted/logs/eval_builder/<mode>/``.
 
 ================================================================================
   OUTPUT LAYOUT
@@ -177,9 +177,9 @@ sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(PROJECT_ROOT / "examples"))
 
 from lmbase.utils.env_tools import get_device
-from nlcpV4.concept_builder import ConceptPyramidBuilder
-from nlcpV4.data_loader import BuilderInput, NLCPV4DataLoader
-from nlcpV4.losses import compute_builder_loss
+from lcp.concept_builder import ConceptPyramidBuilder
+from lcp.data_loader import BuilderInput, NLCPV4DataLoader
+from lcp.losses import compute_builder_loss
 from ram.utils import apply_storage_root, load_config
 
 logger = logging.getLogger(__name__)
@@ -1003,7 +1003,7 @@ def _build_eval_dataloader(config: dict) -> NLCPV4DataLoader:
 
 
 def main() -> None:
-    """Entry point for ``python examples/nlcpV4/eval_builder.py``."""
+    """Entry point for ``python examples/lcp/eval_builder.py``."""
     args = parse_args()
 
     # Resolve config.

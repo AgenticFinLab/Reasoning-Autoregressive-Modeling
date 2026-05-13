@@ -1,8 +1,8 @@
 """ConceptPredictor end-to-end pipeline test with real GSM8K data.
 
 Run with:
-    python3 examples/nlcpV4/utest/test_concept_predictor.py \
-        -c configs/nlcpV4/utest/test_concept_predictor.yml
+    python3 examples/lcp/utest/test_concept_predictor.py \
+        -c configs/lcp/utest/test_concept_predictor.yml
 
 DESIGN PHILOSOPHY:
     Single end-to-end pipeline driven by real GSM8K data:
@@ -22,17 +22,17 @@ PROJECT_ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(PROJECT_ROOT / "examples"))
 
-from nlcpV4.concept_builder import (
+from lcp.concept_builder import (
     ConceptPyramidBuilder,
     PyramidOutput,
 )
-from nlcpV4.concept_predictor import (
+from lcp.concept_predictor import (
     ConceptPredictor,
     PredictorOutput,
     build_scale_causal_mask,
 )
-from nlcpV4.data_loader import NLCPV4DataLoader
-from nlcpV4.losses import compute_predictor_concept_loss, compute_predictor_loss
+from lcp.data_loader import NLCPV4DataLoader
+from lcp.losses import compute_predictor_concept_loss, compute_predictor_loss
 from lmbase.utils.env_tools import get_device
 from ram.utils import load_config
 

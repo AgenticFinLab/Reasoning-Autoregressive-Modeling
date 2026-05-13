@@ -1,6 +1,6 @@
 """Analyze Loss_prepare.json and recommend per-config loss weights.
 
-Reads ``EXPERIMENT/nlcpV4/builder/Loss_prepare.json`` (produced by
+Reads ``EXPERIMENT/lcp/builder/Loss_prepare.json`` (produced by
 ``loss_prepare.py``) and generates comparative plots + a recommended
 loss-weight table, to help choose ``training.loss_weights`` per config.
 
@@ -19,7 +19,7 @@ Key-format contract (one entry per config)::
         },
     }
 
-Generated outputs (under ``EXPERIMENT/nlcpV4/builder/training_prepare/``)::
+Generated outputs (under ``EXPERIMENT/lcp/builder/training_prepare/``)::
 
     loss_by_level_per_model_raw.png        # same model × different levels
     loss_by_level_per_model_weighted.png
@@ -44,27 +44,27 @@ Usage::
 
     # Use default paths (require --dataset to resolve BOTH the per-dataset
     # input filename AND the per-dataset output folder):
-    #   -i: EXPERIMENT/nlcpV4/builder/<dataset>_Loss_prepare.json
-    #   -o: EXPERIMENT/nlcpV4/builder/<dataset>_training_prepare/
-    python3 examples/nlcpV4/builder_training_prepare.py --dataset GSM8K
+    #   -i: EXPERIMENT/lcp/builder/<dataset>_Loss_prepare.json
+    #   -o: EXPERIMENT/lcp/builder/<dataset>_training_prepare/
+    python3 examples/lcp/builder_training_prepare.py --dataset GSM8K
 
     # Tune the recommendation target (median weighted contribution per comp).
-    python3 examples/nlcpV4/builder_training_prepare.py --dataset GSM8K --target 1.0
+    python3 examples/lcp/builder_training_prepare.py --dataset GSM8K --target 1.0
 
     # Override -i / -o explicitly when the file lives outside the default tree.
-    python3 examples/nlcpV4/builder_training_prepare.py -i path/to/<dataset>_Loss_prepare.json -o path/to/output_dir
+    python3 examples/lcp/builder_training_prepare.py -i path/to/<dataset>_Loss_prepare.json -o path/to/output_dir
 
     # Pull the same default paths but rebased under a storage root.
     # MUST match the ``-s`` that ``loss_prepare.py`` was launched with
     # so this tool reads the exact JSON just written.
     # Resolved paths:
-    #   -i: /Data/<proj>/EXPERIMENT/nlcpV4/builder/GSM8K_Loss_prepare.json
-    #   -o: /Data/<proj>/EXPERIMENT/nlcpV4/builder/GSM8K_training_prepare/
-    python3 examples/nlcpV4/builder_training_prepare.py -s /Data/<proj> --dataset GSM8K
+    #   -i: /Data/<proj>/EXPERIMENT/lcp/builder/GSM8K_Loss_prepare.json
+    #   -o: /Data/<proj>/EXPERIMENT/lcp/builder/GSM8K_training_prepare/
+    python3 examples/lcp/builder_training_prepare.py -s /Data/<proj> --dataset GSM8K
 
     # Filter to a single module subset (still reads the dataset-specific
     # JSON written by loss_prepare.py).
-    python3 examples/nlcpV4/builder_training_prepare.py --dataset GSM8K --module builder -s /Data/<proj>
+    python3 examples/lcp/builder_training_prepare.py --dataset GSM8K --module builder -s /Data/<proj>
 
 Arguments:
     -s / --storage-root   Prefix used to compute the DEFAULT ``-i`` /
@@ -81,10 +81,10 @@ Arguments:
     -i / --input          Path to <dataset>_Loss_prepare.json. When
                           omitted the default is computed from ``-s``
                           and ``--dataset``:
-                            <storage_root>/EXPERIMENT/nlcpV4/builder/
+                            <storage_root>/EXPERIMENT/lcp/builder/
                             <dataset>_Loss_prepare.json
     -o / --output-dir     Output directory for plots + CSV. Default:
-                            <storage_root>/EXPERIMENT/nlcpV4/builder/
+                            <storage_root>/EXPERIMENT/lcp/builder/
                             <dataset>_training_prepare/
                           (``--dataset`` is required when ``-o`` is
                           omitted so GSM8K / MATH / ... outputs cannot
@@ -589,7 +589,7 @@ def parse_args():
         default=None,
         help=(
             "Path to <dataset>_Loss_prepare.json. Default: "
-            "<storage_root>/EXPERIMENT/nlcpV4/builder/"
+            "<storage_root>/EXPERIMENT/lcp/builder/"
             "<dataset>_Loss_prepare.json, where <storage_root> is -s "
             "and <dataset> is --dataset (required when -i is omitted)."
         ),
@@ -600,7 +600,7 @@ def parse_args():
         default=None,
         help=(
             "Output directory. Default: "
-            "<storage_root>/EXPERIMENT/nlcpV4/builder/"
+            "<storage_root>/EXPERIMENT/lcp/builder/"
             "<dataset>_training_prepare/. --dataset is required when -o "
             "is omitted so per-dataset outputs are kept separate."
         ),
@@ -645,7 +645,7 @@ def main():
         default_input = (
             base
             / "EXPERIMENT"
-            / "nlcpV4"
+            / "lcp"
             / "builder"
             / f"{args.dataset}_Loss_prepare.json"
         )
@@ -662,11 +662,7 @@ def main():
             )
             return 1
         output_dir = (
-            base
-            / "EXPERIMENT"
-            / "nlcpV4"
-            / "builder"
-            / f"{args.dataset}_training_prepare"
+            base / "EXPERIMENT" / "lcp" / "builder" / f"{args.dataset}_training_prepare"
         )
 
     # Surface the resolved storage paths up front. No silent

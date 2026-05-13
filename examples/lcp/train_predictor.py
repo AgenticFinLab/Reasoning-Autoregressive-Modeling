@@ -2,8 +2,8 @@
 
 Usage:
     # Basic: train with the config's own log paths (relative to CWD by default).
-    python3 examples/nlcpV4/train_predictor.py \
-        -c configs/nlcpV4/GSM8K/train_predictor_Qwen2.5-0.5B_3level_shared.yml
+    python3 examples/lcp/train_predictor.py \
+        -c configs/lcp/GSM8K/train_predictor_Qwen2.5-0.5B_3level_shared.yml
 
     # Redirect ALL relative outputs (save_folder/checkpoint_path/log_path)
     # under a storage root — typical on a shared server where the
@@ -11,17 +11,17 @@ Usage:
     # checkpoint paths (model.builder.checkpoint_path) are ALSO resolved
     # under this same root so Stage 2 can find the Stage 1 artefacts the
     # previous builder run wrote.
-    python3 examples/nlcpV4/train_predictor.py \
-        -c configs/nlcpV4/GSM8K/train_predictor_Qwen2.5-0.5B_3level_shared.yml \
+    python3 examples/lcp/train_predictor.py \
+        -c configs/lcp/GSM8K/train_predictor_Qwen2.5-0.5B_3level_shared.yml \
         -s /Data/<proj>
 
     # Resume from the latest checkpoint under log.checkpoint_path.
-    python3 examples/nlcpV4/train_predictor.py \
-        -c configs/nlcpV4/GSM8K/train_predictor_Qwen2.5-0.5B_3level_shared.yml --resume
+    python3 examples/lcp/train_predictor.py \
+        -c configs/lcp/GSM8K/train_predictor_Qwen2.5-0.5B_3level_shared.yml --resume
 
     # Resume AND pin the SwanLab run explicitly (rare).
-    python3 examples/nlcpV4/train_predictor.py \
-        -c configs/nlcpV4/GSM8K/train_predictor_Qwen2.5-0.5B_3level_shared.yml \
+    python3 examples/lcp/train_predictor.py \
+        -c configs/lcp/GSM8K/train_predictor_Qwen2.5-0.5B_3level_shared.yml \
         --resume --swanlab-id 5hjp09vuqh402irzz9j9h
 
 Stage-2 contract (vs Stage-1 / train_builder.py):
@@ -74,25 +74,25 @@ from torch.optim import AdamW
 from tqdm import tqdm
 
 # Project-root path injection must precede local imports so that the
-# ``nlcpV4``, ``lmbase``, and ``ram`` packages resolve when this script
-# is executed directly (``python3 examples/nlcpV4/train_predictor.py``).
+# ``lcp``, ``lmbase``, and ``ram`` packages resolve when this script
+# is executed directly (``python3 examples/lcp/train_predictor.py``).
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(PROJECT_ROOT / "examples"))
 
 from lmbase.utils.env_tools import get_device
-from nlcpV4 import _resume_io
-from nlcpV4.concept_builder import ConceptPyramidBuilder
-from nlcpV4.concept_predictor import ConceptPredictor
-from nlcpV4.data_loader import BuilderInput, NLCPV4DataLoader
-from nlcpV4.eval_builder import log_terminal_entry
-from nlcpV4.eval_predictor import (
+from lcp import _resume_io
+from lcp.concept_builder import ConceptPyramidBuilder
+from lcp.concept_predictor import ConceptPredictor
+from lcp.data_loader import BuilderInput, NLCPV4DataLoader
+from lcp.eval_builder import log_terminal_entry
+from lcp.eval_predictor import (
     _strip_solutions,
     _tokenize_qs,
     evaluate_predictor,
     log_eval_results_predictor,
 )
-from nlcpV4.losses import compute_predictor_loss
+from lcp.losses import compute_predictor_loss
 from ram.utils import apply_storage_root, load_config, print_storage_paths
 
 # =============================================================================
@@ -625,7 +625,7 @@ def train_predictor(
     load_dotenv(dotenv_path)
 
     # ── Experiment name derivation (identical to train_builder.py) ────
-    configs_root = PROJECT_ROOT / "configs" / "nlcpV4"
+    configs_root = PROJECT_ROOT / "configs" / "lcp"
     try:
         rel_parts = config_path.resolve().relative_to(configs_root).parent.parts
     except ValueError:
@@ -726,7 +726,7 @@ def train_predictor(
     eval_enabled = eval_interval > 0
     eval_dataloader = None
     # Single ``mode`` selector replaces legacy teacher_force/generation flags.
-    # Valid values are declared in ``nlcpV4.eval_builder.VALID_MODES``.
+    # Valid values are declared in ``lcp.eval_builder.VALID_MODES``.
     eval_mode = eval_cfg["mode"]
     gen_max_tokens = eval_cfg["generation_max_tokens"]
     eval_history: list[dict] = []

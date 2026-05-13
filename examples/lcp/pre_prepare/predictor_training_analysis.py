@@ -2,23 +2,23 @@
 
 Usage:
     # Single experiment — reads artifacts from the project-local EXPERIMENT/ tree.
-    python3 examples/nlcpV4/predictor_training_analysis.py -m predictor -d GSM8K -e Qwen2.5-0.5B_2level_shared
+    python3 examples/lcp/predictor_training_analysis.py -m predictor -d GSM8K -e Qwen2.5-0.5B_2level_shared
 
     # All experiments for a module + dataset (baseline + nested variants).
-    python3 examples/nlcpV4/predictor_training_analysis.py -m predictor -d GSM8K -e all
+    python3 examples/lcp/predictor_training_analysis.py -m predictor -d GSM8K -e all
 
     # Read training artifacts from a non-default storage root.
-    python3 examples/nlcpV4/predictor_training_analysis.py -m predictor -d GSM8K -e all -s /Data/<proj>
+    python3 examples/lcp/predictor_training_analysis.py -m predictor -d GSM8K -e all -s /Data/<proj>
 
     # Skip already-analyzed configs (by default existing PNGs are overwritten).
-    python3 examples/nlcpV4/predictor_training_analysis.py -m predictor -d GSM8K -e all --no-overlap
+    python3 examples/lcp/predictor_training_analysis.py -m predictor -d GSM8K -e all --no-overlap
 
 Arguments:
     -s / --storage-root   Prefix prepended to RELATIVE log paths in the
                           YAML.  MUST match the value used at training time.
                           Default is ``./`` (current working directory).
     -m / --module         Module name: 'builder' or 'predictor'.
-    -d / --dataset        Dataset name (directory under configs/nlcpV4/).
+    -d / --dataset        Dataset name (directory under configs/lcp/).
     -e / --experiment     Config stem after 'train_{module}_'
                           (e.g. 'Qwen2.5-0.5B_2level_shared') or 'all'.
     -o / --overlap        If true (default), overwrite existing analysis
@@ -63,7 +63,7 @@ from ram.utils import apply_storage_root, load_config, print_storage_paths
 logger = logging.getLogger(__name__)
 
 # --- Batch-mode constants ------------------------------------------
-CONFIGS_ROOT = PROJECT_ROOT / "configs" / "nlcpV4"
+CONFIGS_ROOT = PROJECT_ROOT / "configs" / "lcp"
 VALID_MODULES = {"builder", "predictor"}
 ALL_KEYWORD = "all"
 ANALYSIS_OUTPUT_DIR_NAME = "train_analysis"
@@ -124,7 +124,7 @@ def parse_args():
         "-d",
         "--dataset",
         required=True,
-        help="Dataset name (directory under configs/nlcpV4/).",
+        help="Dataset name (directory under configs/lcp/).",
     )
     parser.add_argument(
         "-e",
@@ -284,7 +284,7 @@ def _backfill_reasoning_accuracy(eval_hist: list, log_dir: Path) -> None:
         texts = texts_by_key.get(key)
         solutions = solutions_by_key.get(key)
         if texts and solutions:
-            from nlcpV4.eval_builder import compute_reasoning_accuracy
+            from lcp.eval_builder import compute_reasoning_accuracy
 
             acc_result = compute_reasoning_accuracy(texts, solutions)
             r["reasoning_accuracy"] = acc_result["accuracy"]
@@ -318,11 +318,11 @@ def run_checkpoint_eval(config: dict) -> dict | None:
     import torch
 
     from lmbase.utils.env_tools import get_device
-    from nlcpV4.concept_builder import ConceptPyramidBuilder
-    from nlcpV4.concept_predictor import ConceptPredictor
-    from nlcpV4.data_loader import NLCPV4DataLoader
-    from nlcpV4.eval_predictor import evaluate_predictor
-    from nlcpV4.eval_builder import MODE_TEACHER_FORCED
+    from lcp.concept_builder import ConceptPyramidBuilder
+    from lcp.concept_predictor import ConceptPredictor
+    from lcp.data_loader import NLCPV4DataLoader
+    from lcp.eval_predictor import evaluate_predictor
+    from lcp.eval_builder import MODE_TEACHER_FORCED
 
     checkpoint_dir = Path(config["log"]["checkpoint_path"]).expanduser()
 

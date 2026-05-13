@@ -3,7 +3,7 @@
 ================================================================================
 PURPOSE
 ================================================================================
-Stage 2 of the two-stage architecture (see VAR.md / nlcpV4-explain.md).
+Stage 2 of the two-stage architecture (see VAR.md / lcp-explain.md).
 
 Given a trained (frozen) ConceptPyramidBuilder that produces ground-truth
 concept pyramids [C_0, C_1, ..., C_{K-1}] from (Q, CoT), the ConceptPredictor
@@ -211,7 +211,7 @@ import torch.nn as nn
 from peft import LoraConfig, get_peft_model
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from nlcpV4.utils import (
+from lcp.utils import (
     build_solution_targets,
     gather_concept_readout,
     gather_solution_logits,
@@ -344,7 +344,7 @@ class ConceptPredictor(nn.Module):
         """Instantiate the predictor.
 
         Args:
-            config: Full config dict (see configs/nlcpV4/**.yml).
+            config: Full config dict (see configs/lcp/**.yml).
                 Required keys:
                     config["model"]["pyramid"]["num_levels"]        — int K
                     config["model"]["pyramid"]["hidden_dim"]        — int D
@@ -795,7 +795,7 @@ class ConceptPredictor(nn.Module):
             readout became the hidden at a PAD TOKEN, and the RoPE
             distance from the solution block to the last real Q token
             varied across the batch.  This path packs per row via
-            :func:`nlcpV4.utils.pack_qcs_sequences`, so every
+            :func:`lcp.utils.pack_qcs_sequences`, so every
             row has no internal padding and per-row offsets mark the
             concept and solution blocks.
 

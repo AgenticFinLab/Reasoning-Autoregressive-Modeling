@@ -263,7 +263,7 @@ def build_solution_targets(
     Contract: ``solution_ids`` MUST be right-padded (real tokens at
     positions ``0 .. s_len[i]-1``; pad tokens afterwards).  This matches
     the HuggingFace default and what
-    :class:`~nlcpV4.data_loader.NLCPV4DataLoader` yields.
+    :class:`~lcp.data_loader.NLCPV4DataLoader` yields.
 
     Shape is preserved as ``[B, L_S_pad]`` so downstream CE
     (``ignore_index=-100``) sees the same layout it saw in the legacy

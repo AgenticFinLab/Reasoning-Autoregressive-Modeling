@@ -1,12 +1,12 @@
 """NLCP V4: Implicit Reasoning via Hierarchical Concept Compression.
 
 USAGE:
-    from nlcpV4 import ConceptPyramidBuilder
+    from lcp import ConceptPyramidBuilder
 
     # Pass raw config dict (loaded from YAML)
     builder = ConceptPyramidBuilder(config_dict)  # Encoder created internally
     # Using BuilderInput: forward() handles ALL tokenization internally
-    from nlcpV4.data_loader import BuilderInput
+    from lcp.data_loader import BuilderInput
     batch_input = BuilderInput(
         questions=["What is 2+2?"],
         cot_answers=["Let me think... 2+2=4"],
@@ -38,18 +38,18 @@ MODULE STRUCTURE:
     - builder_training_analysis: Post-training analysis and visualization
 """
 
-from nlcpV4.concept_builder import (
+from lcp.concept_builder import (
     ConceptPyramidBuilder,
     EncoderOutput,
     LevelOutput,
     PyramidOutput,
 )
-from nlcpV4.concept_predictor import ConceptPredictor
-from nlcpV4.concept_predictor_parallel import ConceptPredictorParallel
-from nlcpV4.data_loader import BuilderInput, NLCPV4DataLoader
-from nlcpV4.eval_builder import evaluate_builder
-from nlcpV4.eval_predictor import evaluate_predictor
-from nlcpV4.losses import compute_builder_loss
+from lcp.concept_predictor import ConceptPredictor
+from lcp.concept_predictor_parallel import ConceptPredictorParallel
+from lcp.data_loader import BuilderInput, NLCPV4DataLoader
+from lcp.eval_builder import evaluate_builder
+from lcp.eval_predictor import evaluate_predictor
+from lcp.losses import compute_builder_loss
 
 __all__ = [
     # Concept Pyramid Builder (Phase 1: training only)

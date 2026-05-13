@@ -1,9 +1,9 @@
 """Compute per-(model, level, mode) Predictor loss weights from ``<dataset>_Loss_prepare_<mode>.json``.
 
 Usage:
-    python3 examples/nlcpV4/predictor_loss_weight_compute.py -f EXPERIMENT/nlcpV4/predictor/GSM8K_Loss_prepare_independent.json
-    python3 examples/nlcpV4/predictor_loss_weight_compute.py -f EXPERIMENT/nlcpV4/predictor/GSM8K_Loss_prepare_shared.json
-    python3 examples/nlcpV4/predictor_loss_weight_compute.py -f ...Loss_prepare_independent.json -t 10 -M independent
+    python3 examples/lcp/predictor_loss_weight_compute.py -f EXPERIMENT/lcp/predictor/GSM8K_Loss_prepare_independent.json
+    python3 examples/lcp/predictor_loss_weight_compute.py -f EXPERIMENT/lcp/predictor/GSM8K_Loss_prepare_shared.json
+    python3 examples/lcp/predictor_loss_weight_compute.py -f ...Loss_prepare_independent.json -t 10 -M independent
 
 The CSV sidecar is named from the input stem, so the dataset + mode
 prefix is preserved automatically:

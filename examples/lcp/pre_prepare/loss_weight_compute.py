@@ -1,7 +1,7 @@
 """Compute per-(model, level) Builder loss weights from ``<dataset>_Loss_prepare.json``.
 
 Usage:
-    python3 examples/nlcpV4/loss_weight_compute.py -f EXPERIMENT/nlcpV4/builder/{dataset}_Loss_prepare.json
+    python3 examples/lcp/loss_weight_compute.py -f EXPERIMENT/lcp/builder/{dataset}_Loss_prepare.json
 
 The CSV sidecar is named from the input stem, so the dataset prefix
 is preserved automatically:

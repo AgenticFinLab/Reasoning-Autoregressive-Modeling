@@ -2,23 +2,23 @@
 
 Usage:
     # Basic: train with the config's own log paths (relative to project root).
-    python3 examples/nlcpV4/train_builder.py -c configs/nlcpV4/GSM8K/train_builder_Qwen2.5-0.5B_6level.yml
+    python3 examples/lcp/train_builder.py -c configs/lcp/GSM8K/train_builder_Qwen2.5-0.5B_6level.yml
 
     # Nested variant (e.g. AutoWeighted/ subtree) — same CLI, path just changes.
-    python3 examples/nlcpV4/train_builder.py -c configs/nlcpV4/GSM8K/AutoWeighted/train_builder_Qwen2.5-0.5B_6level.yml
+    python3 examples/lcp/train_builder.py -c configs/lcp/GSM8K/AutoWeighted/train_builder_Qwen2.5-0.5B_6level.yml
 
     # Redirect ALL relative outputs (save_folder/checkpoint_path/log_path)
     # under a storage root — typical on a shared server where the
     # project-local EXPERIMENT/ tree is not writable.
-    python3 examples/nlcpV4/train_builder.py -c configs/nlcpV4/GSM8K/train_builder_Qwen2.5-0.5B_6level.yml -s /Data/<proj>
+    python3 examples/lcp/train_builder.py -c configs/lcp/GSM8K/train_builder_Qwen2.5-0.5B_6level.yml -s /Data/<proj>
 
     # Resume: boolean flag. The checkpoint to load is auto-discovered
     # under ``log.checkpoint_path`` (the latest epoch/step file).
-    python3 examples/nlcpV4/train_builder.py -c configs/nlcpV4/GSM8K/train_builder_Qwen2.5-0.5B_6level.yml --resume
+    python3 examples/lcp/train_builder.py -c configs/lcp/GSM8K/train_builder_Qwen2.5-0.5B_6level.yml --resume
 
     # Resume AND pin the SwanLab run explicitly (rare — normally the
     # swanlab_id is auto-recovered from logs/<exp>/swanlab.json).
-    python3 examples/nlcpV4/train_builder.py -c configs/nlcpV4/GSM8K/train_builder_Qwen2.5-0.5B_6level.yml --resume --swanlab-id 5hjp09vuqh402irzz9j9h
+    python3 examples/lcp/train_builder.py -c configs/lcp/GSM8K/train_builder_Qwen2.5-0.5B_6level.yml --resume --swanlab-id 5hjp09vuqh402irzz9j9h
 
 Arguments:
     -s / --storage-root   Prefix prepended to RELATIVE log paths in the
@@ -73,11 +73,11 @@ V4 contract (vs V3):
     handles encoding, pyramid construction, and (when the batch has
     solutions) reasoning preparation in a single call. No separate
     ``encode_cot`` / ``compute_reasoning_loss`` plumbing in the trainer.
-  - ``compute_builder_loss`` in ``nlcpV4.losses`` owns ALL loss math
+  - ``compute_builder_loss`` in ``lcp.losses`` owns ALL loss math
     (recon + ordering + residual + reasoning) — it reads the reasoning
     logits/targets directly from ``PyramidOutput``.
   - ``evaluate_builder`` / ``log_eval_results`` / ``log_terminal_entry``
-    live in ``nlcpV4.eval_builder`` and are reused here, so the trainer
+    live in ``lcp.eval_builder`` and are reused here, so the trainer
     contains training-loop logic only.
 """
 
@@ -97,22 +97,22 @@ from torch.optim import AdamW
 from tqdm import tqdm
 
 # Project-root path injection must precede local imports so that the
-# ``nlcpV4``, ``lmbase``, and ``ram`` packages resolve when this script
-# is executed directly (``python3 examples/nlcpV4/train_builder.py``).
+# ``lcp``, ``lmbase``, and ``ram`` packages resolve when this script
+# is executed directly (``python3 examples/lcp/train_builder.py``).
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(PROJECT_ROOT / "examples"))
 
 from lmbase.utils.env_tools import get_device
-from nlcpV4 import _resume_io
-from nlcpV4.concept_builder import ConceptPyramidBuilder
-from nlcpV4.data_loader import NLCPV4DataLoader
-from nlcpV4.eval_builder import (
+from lcp import _resume_io
+from lcp.concept_builder import ConceptPyramidBuilder
+from lcp.data_loader import NLCPV4DataLoader
+from lcp.eval_builder import (
     evaluate_builder,
     log_eval_results,
     log_terminal_entry,
 )
-from nlcpV4.losses import compute_builder_loss
+from lcp.losses import compute_builder_loss
 from ram.utils import apply_storage_root, load_config, print_storage_paths
 
 
@@ -461,17 +461,17 @@ def train_builder(
     load_dotenv(dotenv_path)
 
     # Derive experiment name from the config file's location under
-    # ``configs/nlcpV4/``. All path segments between that root and the
+    # ``configs/lcp/``. All path segments between that root and the
     # file (dataset, and any nested variant such as ``AutoWeighted/``)
     # are joined by ``-`` with the filename stem so the name is unique
     # and self-describing regardless of directory depth:
-    #   configs/nlcpV4/GSM8K/train_builder_Qwen2.5-0.5B_6level.yml
+    #   configs/lcp/GSM8K/train_builder_Qwen2.5-0.5B_6level.yml
     #     -> "GSM8K-train_builder_Qwen2.5-0.5B_6level"
-    #   configs/nlcpV4/GSM8K/AutoWeighted/train_builder_Qwen2.5-0.5B_6level.yml
+    #   configs/lcp/GSM8K/AutoWeighted/train_builder_Qwen2.5-0.5B_6level.yml
     #     -> "GSM8K-AutoWeighted-train_builder_Qwen2.5-0.5B_6level"
-    # Fail-fast: if the config lives outside configs/nlcpV4/, fall back
+    # Fail-fast: if the config lives outside configs/lcp/, fall back
     # to the legacy single-parent form so out-of-tree configs still run.
-    configs_root = PROJECT_ROOT / "configs" / "nlcpV4"
+    configs_root = PROJECT_ROOT / "configs" / "lcp"
     try:
         rel_parts = config_path.resolve().relative_to(configs_root).parent.parts
     except ValueError:
@@ -560,7 +560,7 @@ def train_builder(
     eval_enabled = eval_interval > 0
     eval_dataloader = None
     # Single ``mode`` selector replaces legacy teacher_force/generation flags.
-    # Valid values are declared in ``nlcpV4.eval_builder.VALID_MODES``.
+    # Valid values are declared in ``lcp.eval_builder.VALID_MODES``.
     eval_mode = eval_cfg["mode"]
     gen_max_tokens = eval_cfg["generation_max_tokens"]
     # eval_history holds per-invocation loss rows (eval_history.json);

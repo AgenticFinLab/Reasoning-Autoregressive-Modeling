@@ -2,7 +2,7 @@
 
 ## Overview
 
-NLCP V4 has **two stages**, each with its own loss function. All loss logic lives in a single module ([`losses.py`](examples/nlcpV4/losses.py)) so that the training scripts only invoke `compute_builder_loss` or `compute_predictor_loss` and never reimplement the math.
+NLCP V4 has **two stages**, each with its own loss function. All loss logic lives in a single module ([`losses.py`](examples/lcp/losses.py)) so that the training scripts only invoke `compute_builder_loss` or `compute_predictor_loss` and never reimplement the math.
 
 ### Stage 1 — ConceptPyramidBuilder (`compute_builder_loss`)
 
@@ -17,7 +17,7 @@ L_builder = recon_w    × L_recon
 
 - All four losses are **always computed and logged** when their inputs are available (no gating). Weights control gradient contribution; setting a weight to 0 disables gradient flow but the scalar is still logged for monitoring.
 - `L_reasoning` is only assembled when the batch carries solution tokens (`batch.has_solution=True`). When the predictor-only path is exercised, it is simply absent.
-- **Code**: [`losses.py` L103–210](examples/nlcpV4/losses.py#L103-L210) (`compute_builder_loss`), [`train_builder.py`](examples/nlcpV4/train_builder.py) (`builder(batch) → compute_builder_loss(...)` in the training loop).
+- **Code**: [`losses.py` L103–210](examples/lcp/losses.py#L103-L210) (`compute_builder_loss`), [`train_builder.py`](examples/lcp/train_builder.py) (`builder(batch) → compute_builder_loss(...)` in the training loop).
 
 ### Stage 2 — ConceptPredictor (`compute_predictor_loss`)
 
@@ -31,7 +31,7 @@ L_predictor = concept_w   × L_concept
 - `L_concept` — per-level MSE (or cosine) averaged across the K pyramid levels, computed between the predictor's predicted concepts and the frozen Builder's ground-truth concepts.
 - `L_reasoning` — next-token cross-entropy on solution tokens, produced by the **same unified teacher-forced forward** that yields `L_concept` (not a separate pass).
 - Both components are optional: `compute_predictor_loss` gracefully skips whichever tensor the caller did not populate, so the same function serves training and evaluation.
-- **Code**: [`losses.py` L262–305](examples/nlcpV4/losses.py#L262-L305) (`compute_predictor_concept_loss`), [`losses.py` L308–378](examples/nlcpV4/losses.py#L308-L378) (`compute_predictor_loss`), [`train_predictor.py`](examples/nlcpV4/train_predictor.py) (`predictor(question_ids, ..., gt_concepts, solution_ids) → compute_predictor_loss(...)` in the training loop).
+- **Code**: [`losses.py` L262–305](examples/lcp/losses.py#L262-L305) (`compute_predictor_concept_loss`), [`losses.py` L308–378](examples/lcp/losses.py#L308-L378) (`compute_predictor_loss`), [`train_predictor.py`](examples/lcp/train_predictor.py) (`predictor(question_ids, ..., gt_concepts, solution_ids) → compute_predictor_loss(...)` in the training loop).
 
 ### Document structure
 
@@ -62,20 +62,20 @@ H_CoT [B,L,D_enc] → input_proj → H_proj [B,L,D] → pyramid → f_hat_K [B,L
 
 ### Data flow (with code references)
 
-| Step | Operation                     | Tensor / Shape                                               | Code Location                                                                     |
-|------|-------------------------------|--------------------------------------------------------------|-----------------------------------------------------------------------------------|
-| 1    | Encode CoT                    | `H_CoT = backbone(CoT)` → `[B, L, D_encoder]`                | [`concept_builder.py` L708–788](examples/nlcpV4/concept_builder.py#L708-L788)     |
-| 2    | Project to concept space      | `H_proj = LayerNorm(input_proj(H_CoT))` → `[B, L, D]`        | [`concept_builder.py` L949](examples/nlcpV4/concept_builder.py#L949)              |
-| 3    | Init residual                 | `f_rest_0 = H_proj.clone()` → `[B, L, D]`                    | [`concept_builder.py` L959](examples/nlcpV4/concept_builder.py#L959)              |
-| 4    | Init accumulator              | `f_hat_0 = zeros_like(H_proj)` → `[B, L, D]`                 | [`concept_builder.py` L962](examples/nlcpV4/concept_builder.py#L962)              |
-| 5    | Per-level loop (k=0..K−1)     | See sub-steps below                                          | [`concept_builder.py` L980–1069](examples/nlcpV4/concept_builder.py#L980-L1069)   |
-| 5a   | Soft attention                | `A_k = softmax(Q_k @ f_rest_k^T / (√D × τ))` → `[B, L_k, L]` | [`concept_builder.py` L997–1022](examples/nlcpV4/concept_builder.py#L997-L1022)   |
-| 5b   | Base concepts                 | `C_k_base = level_proj_k(A_k @ f_rest_k)` → `[B, L_k, D]`    | [`concept_builder.py` L1029–1034](examples/nlcpV4/concept_builder.py#L1029-L1034) |
-| 5c   | Per-level recon               | `R_k = A_k^T @ C_k_base` → `[B, L, D]`                       | [`concept_builder.py` L1041](examples/nlcpV4/concept_builder.py#L1041)            |
-| 5d   | Accumulate                    | `f_hat_{k+1} = f_hat_k + R_k`                                | [`concept_builder.py` L1052](examples/nlcpV4/concept_builder.py#L1052)            |
-| 5e   | Update residual               | `f_rest_{k+1} = f_rest_k - R_k`                              | [`concept_builder.py` L1055](examples/nlcpV4/concept_builder.py#L1055)            |
-| 6    | Back-project to encoder space | `recon_enc = back_proj(f_hat_K)` → `[B, L, D_encoder]`       | [`concept_builder.py` L1079](examples/nlcpV4/concept_builder.py#L1079)            |
-| 7    | Compute masked MSE            | See formula above                                            | [`losses.py` L109–127](examples/nlcpV4/losses.py#L109-L127)                       |
+| Step | Operation                     | Tensor / Shape                                               | Code Location                                                                  |
+|------|-------------------------------|--------------------------------------------------------------|--------------------------------------------------------------------------------|
+| 1    | Encode CoT                    | `H_CoT = backbone(CoT)` → `[B, L, D_encoder]`                | [`concept_builder.py` L708–788](examples/lcp/concept_builder.py#L708-L788)     |
+| 2    | Project to concept space      | `H_proj = LayerNorm(input_proj(H_CoT))` → `[B, L, D]`        | [`concept_builder.py` L949](examples/lcp/concept_builder.py#L949)              |
+| 3    | Init residual                 | `f_rest_0 = H_proj.clone()` → `[B, L, D]`                    | [`concept_builder.py` L959](examples/lcp/concept_builder.py#L959)              |
+| 4    | Init accumulator              | `f_hat_0 = zeros_like(H_proj)` → `[B, L, D]`                 | [`concept_builder.py` L962](examples/lcp/concept_builder.py#L962)              |
+| 5    | Per-level loop (k=0..K−1)     | See sub-steps below                                          | [`concept_builder.py` L980–1069](examples/lcp/concept_builder.py#L980-L1069)   |
+| 5a   | Soft attention                | `A_k = softmax(Q_k @ f_rest_k^T / (√D × τ))` → `[B, L_k, L]` | [`concept_builder.py` L997–1022](examples/lcp/concept_builder.py#L997-L1022)   |
+| 5b   | Base concepts                 | `C_k_base = level_proj_k(A_k @ f_rest_k)` → `[B, L_k, D]`    | [`concept_builder.py` L1029–1034](examples/lcp/concept_builder.py#L1029-L1034) |
+| 5c   | Per-level recon               | `R_k = A_k^T @ C_k_base` → `[B, L, D]`                       | [`concept_builder.py` L1041](examples/lcp/concept_builder.py#L1041)            |
+| 5d   | Accumulate                    | `f_hat_{k+1} = f_hat_k + R_k`                                | [`concept_builder.py` L1052](examples/lcp/concept_builder.py#L1052)            |
+| 5e   | Update residual               | `f_rest_{k+1} = f_rest_k - R_k`                              | [`concept_builder.py` L1055](examples/lcp/concept_builder.py#L1055)            |
+| 6    | Back-project to encoder space | `recon_enc = back_proj(f_hat_K)` → `[B, L, D_encoder]`       | [`concept_builder.py` L1079](examples/lcp/concept_builder.py#L1079)            |
+| 7    | Compute masked MSE            | See formula above                                            | [`losses.py` L109–127](examples/lcp/losses.py#L109-L127)                       |
 
 ### Computation details
 
@@ -96,7 +96,7 @@ recon_loss = (recon_diff ** 2).sum() / num_valid_elements        # scalar
 
 - **Target is `H_CoT`** (frozen encoder output), NOT `H_proj` (projected version). This follows VAR's principle: the quantizer reconstructs against the frozen encoder ([`quant.py` L95](third-part/VAR-main/models/quant.py#L95)).
 - **Round-trip via `back_proj`**: Since pyramid operates in D space but target is in D_encoder space, `back_proj` must learn a meaningful inverse of `input_proj`.
-- **`back_proj` initialization**: `back_proj.weight = input_proj.weight^T` ([`concept_builder.py` L706](examples/nlcpV4/concept_builder.py#L706)), providing a pseudo-inverse starting point.
+- **`back_proj` initialization**: `back_proj.weight = input_proj.weight^T` ([`concept_builder.py` L706](examples/lcp/concept_builder.py#L706)), providing a pseudo-inverse starting point.
 
 ### Gradient flow
 
@@ -131,21 +131,21 @@ Enforces **intra-level positional ordering**: concept j should attend to earlier
 
 ### Data flow
 
-| Step | Operation               | Tensor / Shape                                                          | Code Location                                                                      |
-|------|-------------------------|-------------------------------------------------------------------------|------------------------------------------------------------------------------------|
-| 1    | Get attention weights   | `A_k` from pyramid level k                                              | Produced at [`concept_builder.py` L1017](examples/nlcpV4/concept_builder.py#L1017) |
-| 2    | Create position indices | `positions = arange(L)` → `[L]`                                         | [`losses.py` L42](examples/nlcpV4/losses.py#L42)                                   |
-| 3    | Expected position       | `exp_pos = (A_k × positions).sum(dim=-1)` → `[B, L_k]`                  | [`losses.py` L44](examples/nlcpV4/losses.py#L44)                                   |
-| 4    | Margin violation        | `ReLU(exp_pos[:,j] - exp_pos[:,j+1] + margin).mean()` → scalar per pair | [`losses.py` L49–50](examples/nlcpV4/losses.py#L49-L50)                            |
-| 5    | Sum over pairs          | `loss += violation` for j=0..L_k-2                                      | [`losses.py` L47–50](examples/nlcpV4/losses.py#L47-L50)                            |
-| 6    | Average over levels     | `ordering_loss /= levels_with_ordering`                                 | [`losses.py` L155–156](examples/nlcpV4/losses.py#L155-L156)                        |
+| Step | Operation               | Tensor / Shape                                                          | Code Location                                                                   |
+|------|-------------------------|-------------------------------------------------------------------------|---------------------------------------------------------------------------------|
+| 1    | Get attention weights   | `A_k` from pyramid level k                                              | Produced at [`concept_builder.py` L1017](examples/lcp/concept_builder.py#L1017) |
+| 2    | Create position indices | `positions = arange(L)` → `[L]`                                         | [`losses.py` L42](examples/lcp/losses.py#L42)                                   |
+| 3    | Expected position       | `exp_pos = (A_k × positions).sum(dim=-1)` → `[B, L_k]`                  | [`losses.py` L44](examples/lcp/losses.py#L44)                                   |
+| 4    | Margin violation        | `ReLU(exp_pos[:,j] - exp_pos[:,j+1] + margin).mean()` → scalar per pair | [`losses.py` L49–50](examples/lcp/losses.py#L49-L50)                            |
+| 5    | Sum over pairs          | `loss += violation` for j=0..L_k-2                                      | [`losses.py` L47–50](examples/lcp/losses.py#L47-L50)                            |
+| 6    | Average over levels     | `ordering_loss /= levels_with_ordering`                                 | [`losses.py` L155–156](examples/lcp/losses.py#L155-L156)                        |
 
 ### Key details
 
 - **Skips levels with L_k=1** (level 0 with 1 concept): no ordering to enforce.
 - **Margin `m`**: minimum required gap in expected position between adjacent concepts. Larger margin → stricter ordering.
-- **Alternative**: Gaussian target variant ([`losses.py` L56–84](examples/nlcpV4/losses.py#L56-L84)) — KL-divergence-like loss against Gaussian distributions centered at evenly-spaced segment midpoints. Selected via config `ordering_loss_type: "gaussian"` or `"both"`.
-- **Level loop**: iterates over all `pyramid.level_outputs` ([`losses.py` L134–156](examples/nlcpV4/losses.py#L134-L156)).
+- **Alternative**: Gaussian target variant ([`losses.py` L56–84](examples/lcp/losses.py#L56-L84)) — KL-divergence-like loss against Gaussian distributions centered at evenly-spaced segment midpoints. Selected via config `ordering_loss_type: "gaussian"` or `"both"`.
+- **Level loop**: iterates over all `pyramid.level_outputs` ([`losses.py` L134–156](examples/lcp/losses.py#L134-L156)).
 
 ### Gradient flow
 
@@ -174,10 +174,10 @@ The magnitude of the **unexplained residual** after K levels of decomposition. S
 
 ### Data flow
 
-| Step | Operation      | Tensor / Shape                                                   | Code Location                                                                                                     |
-|------|----------------|------------------------------------------------------------------|-------------------------------------------------------------------------------------------------------------------|
-| 1    | Final residual | `f_rest_K` after K iterations of `f_rest_{k+1} = f_rest_k - R_k` | [`concept_builder.py` L1055](examples/nlcpV4/concept_builder.py#L1055), stored in `PyramidOutput.residual_hidden` |
-| 2    | Masked L1 mean | `(                                                               | f_rest_K                                                                                                          |
+| Step | Operation      | Tensor / Shape                                                   | Code Location                                                                                                  |
+|------|----------------|------------------------------------------------------------------|----------------------------------------------------------------------------------------------------------------|
+| 1    | Final residual | `f_rest_K` after K iterations of `f_rest_{k+1} = f_rest_k - R_k` | [`concept_builder.py` L1055](examples/lcp/concept_builder.py#L1055), stored in `PyramidOutput.residual_hidden` |
+| 2    | Masked L1 mean | `(                                                               | f_rest_K                                                                                                       |
 
 ### Computation details
 
@@ -294,7 +294,7 @@ Note: `reason_model` parameters do NOT receive gradients (frozen). `embed_tokens
 
 ### In `compute_builder_loss` (all four losses)
 
-**Code**: [`losses.py` L103–210](examples/nlcpV4/losses.py#L103-L210)
+**Code**: [`losses.py` L103–210](examples/lcp/losses.py#L103-L210)
 
 ```python
 total_loss = (
@@ -318,14 +318,14 @@ total_loss, loss_dict = compute_builder_loss(pyramid, loss_weights, ordering_los
 
 ## 6. Predictor Losses (Stage 2)
 
-The ConceptPredictor is trained with a weighted sum of two components assembled in `compute_predictor_loss` ([`losses.py` L308–378](examples/nlcpV4/losses.py#L308-L378)):
+The ConceptPredictor is trained with a weighted sum of two components assembled in `compute_predictor_loss` ([`losses.py` L308–378](examples/lcp/losses.py#L308-L378)):
 
 ```
 L_predictor = concept_loss_weight   × L_concept
             + reasoning_loss_weight × L_reasoning   (added only if reasoning_logits is populated)
 ```
 
-Both components come from the **same unified teacher-forced forward** through the backbone over `[Q, C_gt, S]` (see [`concept_predictor.py` L768–956](examples/nlcpV4/concept_predictor.py#L768-L956)). No separate pass is needed.
+Both components come from the **same unified teacher-forced forward** through the backbone over `[Q, C_gt, S]` (see [`concept_predictor.py` L768–956](examples/lcp/concept_predictor.py#L768-L956)). No separate pass is needed.
 
 ### 6.1 Concept Reconstruction Loss (`concept_loss`)
 
@@ -337,10 +337,10 @@ $$L_\text{concept} = \frac{1}{K} \sum_{k=0}^{K-1} \ell\bigl(\hat{C}_k,\ \mathrm{
 
 where `sg[·]` is `.detach()` (stop-gradient into the frozen Builder) and `ℓ` is one of:
 
-| `concept_loss_type` | Per-level loss                                           | Source                                                      |
-|---------------------|----------------------------------------------------------|-------------------------------------------------------------|
-| `"mse"` (default)   | `F.mse_loss(Ĉ_k, C_k.detach())`                          | [`losses.py` L232–242](examples/nlcpV4/losses.py#L232-L242) |
-| `"cosine"`          | `mean(1 − cosine_similarity(Ĉ_k, C_k.detach(), dim=-1))` | [`losses.py` L245–259](examples/nlcpV4/losses.py#L245-L259) |
+| `concept_loss_type` | Per-level loss                                           | Source                                                   |
+|---------------------|----------------------------------------------------------|----------------------------------------------------------|
+| `"mse"` (default)   | `F.mse_loss(Ĉ_k, C_k.detach())`                          | [`losses.py` L232–242](examples/lcp/losses.py#L232-L242) |
+| `"cosine"`          | `mean(1 − cosine_similarity(Ĉ_k, C_k.detach(), dim=-1))` | [`losses.py` L245–259](examples/lcp/losses.py#L245-L259) |
 
 Per-level losses are averaged uniformly across K levels; no per-level weighting is used in the current implementation. Per-level scalars are also exposed in `loss_dict["concept_per_level"]` for monitoring.
 
@@ -350,26 +350,26 @@ The predictor's ability to **reproduce the frozen Builder's pyramid from `Q` alo
 
 #### Data flow (teacher-forced, unified single pass)
 
-| Step | Operation                                                         | Tensor / Shape                                               | Code                                                                                                      |
-|------|-------------------------------------------------------------------|--------------------------------------------------------------|-----------------------------------------------------------------------------------------------------------|
-| 1    | Flatten GT concepts level-major                                   | `concepts_flat = cat(C_0, ..., C_{K-1})` → `[B, total_C, D]` | [`concept_predictor.py` L851](examples/nlcpV4/concept_predictor.py#L851)                                  |
-| 2    | Back-decode + slot markers                                        | `concept_embeds` → `[B, total_C, D_enc]`                     | [`concept_predictor.py` L639–701](examples/nlcpV4/concept_predictor.py#L639-L701)                         |
-| 3    | Embed Q (shared embed_tokens)                                     | `Q_embeds` → `[B, L_Q, D_enc]`                               | [`concept_predictor.py` L625–637](examples/nlcpV4/concept_predictor.py#L625-L637)                         |
-| 4    | Embed S (shared embed_tokens, optional)                           | `S_embeds` → `[B, L_S, D_enc]`                               | [`concept_predictor.py` L866–872](examples/nlcpV4/concept_predictor.py#L866-L872)                         |
-| 5    | Per-row pack `[Q, C, S]` (no internal pad)                        | `pack.packed_embeds` → `[B, T, D_enc]`                       | `pack_qcs_sequences` at [`concept_predictor.py` L885–891](examples/nlcpV4/concept_predictor.py#L885-L891) |
-| 6    | Forward full `reason_model` (causal, `output_hidden_states=True`) | `hidden` → `[B, T, D_enc]` + `logits` → `[B, T, V]`          | [`concept_predictor.py` L899–904](examples/nlcpV4/concept_predictor.py#L899-L904)                         |
-| 7    | Per-row gather at concept positions                               | `readout` → `[B, total_C, D_enc]`                            | `gather_concept_readout` at [`concept_predictor.py` L912](examples/nlcpV4/concept_predictor.py#L912)      |
-| 8    | `concept_head` MLP (`D_enc → D`)                                  | `flat_predicted` → `[B, total_C, D]`                         | [`concept_predictor.py` L913](examples/nlcpV4/concept_predictor.py#L913)                                  |
-| 9    | Split into K per-level tensors                                    | `predicted_concepts[k]` → `[B, L_k, D]`                      | [`concept_predictor.py` L918–922](examples/nlcpV4/concept_predictor.py#L918-L922)                         |
-| 10   | Per-level MSE (or cosine) vs `C_k.detach()`, then mean            | scalar                                                       | [`losses.py` L262–305](examples/nlcpV4/losses.py#L262-L305)                                               |
+| Step | Operation                                                         | Tensor / Shape                                               | Code                                                                                                   |
+|------|-------------------------------------------------------------------|--------------------------------------------------------------|--------------------------------------------------------------------------------------------------------|
+| 1    | Flatten GT concepts level-major                                   | `concepts_flat = cat(C_0, ..., C_{K-1})` → `[B, total_C, D]` | [`concept_predictor.py` L851](examples/lcp/concept_predictor.py#L851)                                  |
+| 2    | Back-decode + slot markers                                        | `concept_embeds` → `[B, total_C, D_enc]`                     | [`concept_predictor.py` L639–701](examples/lcp/concept_predictor.py#L639-L701)                         |
+| 3    | Embed Q (shared embed_tokens)                                     | `Q_embeds` → `[B, L_Q, D_enc]`                               | [`concept_predictor.py` L625–637](examples/lcp/concept_predictor.py#L625-L637)                         |
+| 4    | Embed S (shared embed_tokens, optional)                           | `S_embeds` → `[B, L_S, D_enc]`                               | [`concept_predictor.py` L866–872](examples/lcp/concept_predictor.py#L866-L872)                         |
+| 5    | Per-row pack `[Q, C, S]` (no internal pad)                        | `pack.packed_embeds` → `[B, T, D_enc]`                       | `pack_qcs_sequences` at [`concept_predictor.py` L885–891](examples/lcp/concept_predictor.py#L885-L891) |
+| 6    | Forward full `reason_model` (causal, `output_hidden_states=True`) | `hidden` → `[B, T, D_enc]` + `logits` → `[B, T, V]`          | [`concept_predictor.py` L899–904](examples/lcp/concept_predictor.py#L899-L904)                         |
+| 7    | Per-row gather at concept positions                               | `readout` → `[B, total_C, D_enc]`                            | `gather_concept_readout` at [`concept_predictor.py` L912](examples/lcp/concept_predictor.py#L912)      |
+| 8    | `concept_head` MLP (`D_enc → D`)                                  | `flat_predicted` → `[B, total_C, D]`                         | [`concept_predictor.py` L913](examples/lcp/concept_predictor.py#L913)                                  |
+| 9    | Split into K per-level tensors                                    | `predicted_concepts[k]` → `[B, L_k, D]`                      | [`concept_predictor.py` L918–922](examples/lcp/concept_predictor.py#L918-L922)                         |
+| 10   | Per-level MSE (or cosine) vs `C_k.detach()`, then mean            | scalar                                                       | [`losses.py` L262–305](examples/lcp/losses.py#L262-L305)                                               |
 
 #### Key design decisions
 
 - **Teacher-forcing from GT concepts.** Level-k prediction is conditioned on *ground-truth* levels `0..k−1` rather than on predictions. This aligns Stage-2 training with VAR's teacher-forced next-scale regime.
-- **Per-row packing** ([`pack_qcs_sequences`](examples/nlcpV4/utils.py)) eliminates geometry bugs that arise when a legacy concat-then-slice concatenated right-padded Q with the concept block: under variable `L_Q`, the single batch-uniform slice offset would point into Q's padding region for short rows, reading concept hidden states off *pad tokens*. Per-row packing guarantees every row has no internal padding.
-- **Slot markers (`level_embeddings + position_embeddings`)** are added on top of `back_proj(concepts_flat)` so the backbone can distinguish slot `(level=k, pos=j)` from any other slot purely from the input embedding, independent of absolute sequence position ([`concept_predictor.py` L684–701](examples/nlcpV4/concept_predictor.py#L684-L701)).
+- **Per-row packing** ([`pack_qcs_sequences`](examples/lcp/utils.py)) eliminates geometry bugs that arise when a legacy concat-then-slice concatenated right-padded Q with the concept block: under variable `L_Q`, the single batch-uniform slice offset would point into Q's padding region for short rows, reading concept hidden states off *pad tokens*. Per-row packing guarantees every row has no internal padding.
+- **Slot markers (`level_embeddings + position_embeddings`)** are added on top of `back_proj(concepts_flat)` so the backbone can distinguish slot `(level=k, pos=j)` from any other slot purely from the input embedding, independent of absolute sequence position ([`concept_predictor.py` L684–701](examples/lcp/concept_predictor.py#L684-L701)).
 - **Detach on target.** The target `C_k` is explicitly `.detach()`-ed inside `compute_predictor_concept_loss` as a defensive measure; the GT already comes from a frozen Builder.
-- **Non-AR training but AR inference** — `_forward_training` does ONE parallel causal pass; `_forward_inference` is a 63-step loop with KV cache ([`concept_predictor.py` L962–L1123](examples/nlcpV4/concept_predictor.py#L962-L1123)).
+- **Non-AR training but AR inference** — `_forward_training` does ONE parallel causal pass; `_forward_inference` is a 63-step loop with KV cache ([`concept_predictor.py` L962–L1123](examples/lcp/concept_predictor.py#L962-L1123)).
 
 #### Gradient flow
 
@@ -397,7 +397,7 @@ The concept loss does **NOT** flow into `C_k` (detached) nor into the Builder's 
 
 $$L_\text{reasoning} = \text{CrossEntropy}\bigl(\text{reasoning\_logits},\ \text{reasoning\_target\_ids}\bigr)$$
 
-with `ignore_index=-100` on solution-pad positions ([`losses.py` L354–368](examples/nlcpV4/losses.py#L354-L368)).
+with `ignore_index=-100` on solution-pad positions ([`losses.py` L354–368](examples/lcp/losses.py#L354-L368)).
 
 #### What it measures
 
@@ -407,13 +407,13 @@ Whether concepts teacher-forced from the Builder, placed between `Q` and `S` in 
 
 Produced by the **same forward** as `L_concept`:
 
-| Step | Operation                                 | Tensor / Shape                    | Code                                                                                                       |
-|------|-------------------------------------------|-----------------------------------|------------------------------------------------------------------------------------------------------------|
-| 1–5  | (same as §6.1 steps 1–5)                  | —                                 | —                                                                                                          |
-| 6    | Full `reason_model` forward → `logits`    | `[B, T, V]`                       | [`concept_predictor.py` L937](examples/nlcpV4/concept_predictor.py#L937)                                   |
-| 7    | Per-row gather at solution positions      | `solution_logits` → `[B, L_S, V]` | `gather_solution_logits` [`concept_predictor.py` L938](examples/nlcpV4/concept_predictor.py#L938)          |
-| 8    | Build targets with `-100` on pad          | `targets` → `[B, L_S]`            | `build_solution_targets` [`concept_predictor.py` L942–944](examples/nlcpV4/concept_predictor.py#L942-L944) |
-| 9    | `F.cross_entropy(..., ignore_index=-100)` | scalar                            | [`losses.py` L356–360](examples/nlcpV4/losses.py#L356-L360)                                                |
+| Step | Operation                                 | Tensor / Shape                    | Code                                                                                                    |
+|------|-------------------------------------------|-----------------------------------|---------------------------------------------------------------------------------------------------------|
+| 1–5  | (same as §6.1 steps 1–5)                  | —                                 | —                                                                                                       |
+| 6    | Full `reason_model` forward → `logits`    | `[B, T, V]`                       | [`concept_predictor.py` L937](examples/lcp/concept_predictor.py#L937)                                   |
+| 7    | Per-row gather at solution positions      | `solution_logits` → `[B, L_S, V]` | `gather_solution_logits` [`concept_predictor.py` L938](examples/lcp/concept_predictor.py#L938)          |
+| 8    | Build targets with `-100` on pad          | `targets` → `[B, L_S]`            | `build_solution_targets` [`concept_predictor.py` L942–944](examples/lcp/concept_predictor.py#L942-L944) |
+| 9    | `F.cross_entropy(..., ignore_index=-100)` | scalar                            | [`losses.py` L356–360](examples/lcp/losses.py#L356-L360)                                                |
 
 **Why the per-row gather?** In a right-padded batch, position-wise slicing would read a mix of Q pad tokens, concept tokens, and S pad tokens at the same offset across rows. The per-row gather uses each row's real `q_len[i]` so that row `i` reads logits at `q_len[i] + total_C − 1 + j` for `j = 0..L_S−1`, aligning logits with solution tokens under the causal "position t predicts t+1" rule.
 
@@ -421,7 +421,7 @@ Produced by the **same forward** as `L_concept`:
 
 - **Unified forward, not a second pass.** Running reasoning CE in the same forward as the concept MSE saves one backbone forward per step and guarantees the hidden states / logits come from the same weights. Branch drift is eliminated.
 - **Only defined in the teacher-forced path.** `_forward_inference` explicitly refuses `solution_ids` because during AR inference the concepts are predicted, not ground truth, and a reasoning CE on a still-forming pyramid is not a meaningful training signal.
-- **`reasoning_texts`**. An `argmax` decode of `solution_logits` is also stored on `PredictorOutput.reasoning_texts` under `no_grad()` for qualitative inspection ([`concept_predictor.py` L950–954](examples/nlcpV4/concept_predictor.py#L950-L954)).
+- **`reasoning_texts`**. An `argmax` decode of `solution_logits` is also stored on `PredictorOutput.reasoning_texts` under `no_grad()` for qualitative inspection ([`concept_predictor.py` L950–954](examples/lcp/concept_predictor.py#L950-L954)).
 
 #### Gradient flow
 
@@ -442,7 +442,7 @@ Crucially, the reasoning CE does **NOT** flow into the `concept_head` MLP (the c
 
 ### 6.3 Stage 2 Total Loss Assembly
 
-**Code**: [`losses.py` L308–378](examples/nlcpV4/losses.py#L308-L378)
+**Code**: [`losses.py` L308–378](examples/lcp/losses.py#L308-L378)
 
 ```python
 # Concept component (skipped if gt_concepts is None or empty)
@@ -452,7 +452,7 @@ total = concept_loss_weight * L_concept
 total += reasoning_loss_weight * L_reasoning
 ```
 
-The training loop ([`train_predictor.py`](examples/nlcpV4/train_predictor.py)):
+The training loop ([`train_predictor.py`](examples/lcp/train_predictor.py)):
 
 ```python
 output = predictor(
@@ -469,7 +469,7 @@ loss, loss_dict = compute_predictor_loss(
 )
 ```
 
-Default weights from the GSM8K configs: `concept_loss_weight: 1.0`, `reasoning_loss_weight: 1.0` ([`configs/nlcpV4/GSM8K/train_predictor_Qwen2.5-0.5B_2level_shared.yml#L121-L123`](configs/nlcpV4/GSM8K/train_predictor_Qwen2.5-0.5B_2level_shared.yml#L121-L123)).
+Default weights from the GSM8K configs: `concept_loss_weight: 1.0`, `reasoning_loss_weight: 1.0` ([`configs/lcp/GSM8K/train_predictor_Qwen2.5-0.5B_2level_shared.yml#L121-L123`](configs/lcp/GSM8K/train_predictor_Qwen2.5-0.5B_2level_shared.yml#L121-L123)).
 
 ---
 
@@ -497,7 +497,7 @@ All four Builder losses share (subsets of) the same trainable parameter set:
 | `reason_model` (all weights)   | Configurable via `training.reason_model.freeze` (default: true) | Encoding: backbone produces H_CoT; Decoding: lm_head produces solution logits |
 | `reason_model` + LoRA adapters | LoRA params trainable if `training.reason_model.lora` is set    | Fine-tune backbone representation with PEFT                                   |
 
-Freezing is controlled by `training.reason_model.freeze` (default: true for VAR-faithful behaviour). LoRA config is at `training.reason_model.lora`. Code: [`concept_builder.py`](examples/nlcpV4/concept_builder.py) (`_init_reason_model`).
+Freezing is controlled by `training.reason_model.freeze` (default: true for VAR-faithful behaviour). LoRA config is at `training.reason_model.lora`. Code: [`concept_builder.py`](examples/lcp/concept_builder.py) (`_init_reason_model`).
 
 ### 7.2 Stage 2 (Predictor) — SHARED mode (`use_shared_model: true`)
 
@@ -516,7 +516,7 @@ In SHARED mode the predictor *aliases* the Builder's `reason_model`, `tokenizer`
 | `tokenizer`    = builder.tokenizer    | Q / S tokenisation.                                                                        |
 | `back_proj`    = builder.back_proj    | `D → D_enc` lift used in both the concept-input path and the Builder's own reasoning path. |
 
-**Fail-fast constraint**: `use_shared_model=True` ⇒ `training.predictor.lora` **must be null**. The predictor's `__init__` enforces this because wrapping the shared `reason_model` with LoRA would leak gradients into the Builder's forward and violate the frozen-target invariant. Config comments: [`train_predictor_Qwen2.5-0.5B_2level_shared.yml#L98-L102`](configs/nlcpV4/GSM8K/train_predictor_Qwen2.5-0.5B_2level_shared.yml#L98-L102).
+**Fail-fast constraint**: `use_shared_model=True` ⇒ `training.predictor.lora` **must be null**. The predictor's `__init__` enforces this because wrapping the shared `reason_model` with LoRA would leak gradients into the Builder's forward and violate the frozen-target invariant. Config comments: [`train_predictor_Qwen2.5-0.5B_2level_shared.yml#L98-L102`](configs/lcp/GSM8K/train_predictor_Qwen2.5-0.5B_2level_shared.yml#L98-L102).
 
 ### 7.3 Stage 2 (Predictor) — INDEPENDENT mode (`use_shared_model: false`)
 
@@ -544,16 +544,16 @@ In INDEPENDENT mode the predictor owns its own `reason_model` (loaded fresh from
 
 ### 8.1 Stage 1: Builder vs VQ-VAE
 
-| Aspect              | VAR (VQVAE Stage 1)                                       | NLCP V4 Builder                                             |
-|---------------------|-----------------------------------------------------------|-------------------------------------------------------------|
-| Encoder             | CNN encoder (trainable)                                   | Frozen LLM backbone                                         |
-| Target              | Encoder output `f_BChw`                                   | `H_CoT` from frozen backbone                                |
-| Decomposition space | Same dim as encoder (C=32)                                | Reduced dim D (e.g., 256) via `input_proj`                  |
-| Dimension change?   | **No** — `quant_conv` is `Conv2d(C, C)`                   | **Yes** — D_encoder (e.g., 1536) → D (e.g., 256)            |
-| Reconstruction      | `F.mse_loss(f_hat, f_BChw)` in C space                    | `MSE(back_proj(f_hat), H_CoT)` round-trip through D         |
-| Quantization        | Hard (nearest codebook) + STE                             | Soft (attention-weighted pooling)                           |
-| Additional losses   | VQ commitment loss (`β × MSE`)                            | ordering, residual, reasoning                               |
-| Code ref            | [`quant.py` L95](third-part/VAR-main/models/quant.py#L95) | [`losses.py` L103–210](examples/nlcpV4/losses.py#L103-L210) |
+| Aspect              | VAR (VQVAE Stage 1)                                       | NLCP V4 Builder                                          |
+|---------------------|-----------------------------------------------------------|----------------------------------------------------------|
+| Encoder             | CNN encoder (trainable)                                   | Frozen LLM backbone                                      |
+| Target              | Encoder output `f_BChw`                                   | `H_CoT` from frozen backbone                             |
+| Decomposition space | Same dim as encoder (C=32)                                | Reduced dim D (e.g., 256) via `input_proj`               |
+| Dimension change?   | **No** — `quant_conv` is `Conv2d(C, C)`                   | **Yes** — D_encoder (e.g., 1536) → D (e.g., 256)         |
+| Reconstruction      | `F.mse_loss(f_hat, f_BChw)` in C space                    | `MSE(back_proj(f_hat), H_CoT)` round-trip through D      |
+| Quantization        | Hard (nearest codebook) + STE                             | Soft (attention-weighted pooling)                        |
+| Additional losses   | VQ commitment loss (`β × MSE`)                            | ordering, residual, reasoning                            |
+| Code ref            | [`quant.py` L95](third-part/VAR-main/models/quant.py#L95) | [`losses.py` L103–210](examples/lcp/losses.py#L103-L210) |
 
 #### Key difference: round-trip reconstruction
 
@@ -567,7 +567,7 @@ NLCP V4 must project down then back up because D_encoder ≠ D:
 H_CoT [B,L,D_enc] → input_proj → H_proj [B,L,D] → pyramid → f_hat [B,L,D] → back_proj → [B,L,D_enc] → MSE(·, H_CoT)
 ```
 
-This means `back_proj` must learn a meaningful inverse of `input_proj`. The initialization `back_proj.weight = input_proj.weight^T` ([`concept_builder.py`](examples/nlcpV4/concept_builder.py) in `__init__`) provides a starting point.
+This means `back_proj` must learn a meaningful inverse of `input_proj`. The initialization `back_proj.weight = input_proj.weight^T` ([`concept_builder.py`](examples/lcp/concept_builder.py) in `__init__`) provides a starting point.
 
 ### 8.2 Stage 2: Predictor vs VAR Transformer
 

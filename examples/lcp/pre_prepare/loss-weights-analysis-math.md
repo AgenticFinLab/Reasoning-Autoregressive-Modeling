@@ -1,7 +1,7 @@
 # NLCP V4 Builder Loss Analysis and Weight Design — MATH
 
 > **Scope.** This document is the MATH counterpart of
-> [`loss-weights-analysis-gsm8k.md`](file:///Users/sjia/Documents/AgenticFinLab/Projects/Reasoning-Autoregressive-Modeling/examples/nlcpV4/loss-weights-analysis-gsm8k.md).
+> [`loss-weights-analysis-gsm8k.md`](file:///Users/sjia/Documents/AgenticFinLab/Projects/Reasoning-Autoregressive-Modeling/examples/lcp/loss-weights-analysis-gsm8k.md).
 > Part I (§1–§7) is a purely empirical characterization of the four
 > raw loss components across the 36-config MATH matrix using exactly
 > the same protocol. Part II (§8–§12) reuses the dataset-agnostic
@@ -21,8 +21,8 @@ This document characterizes the four raw loss components produced by
 across every available **MATH** Builder configuration, to select
 `loss_weights` from empirical evidence.
 
-- **Data file**: [`EXPERIMENT/nlcpV4/builder/MATH_Loss_prepare.json`](file:///Users/sjia/Documents/AgenticFinLab/Projects/Reasoning-Autoregressive-Modeling/EXPERIMENT/nlcpV4/builder/MATH_Loss_prepare.json)
-- **Derived artifact**: [`EXPERIMENT/nlcpV4/builder/MATH_training_prepare/weights_summary.txt`](file:///Users/sjia/Documents/AgenticFinLab/Projects/Reasoning-Autoregressive-Modeling/EXPERIMENT/nlcpV4/builder/MATH_training_prepare/weights_summary.txt)
+- **Data file**: [`EXPERIMENT/lcp/builder/MATH_Loss_prepare.json`](file:///Users/sjia/Documents/AgenticFinLab/Projects/Reasoning-Autoregressive-Modeling/EXPERIMENT/lcp/builder/MATH_Loss_prepare.json)
+- **Derived artifact**: [`EXPERIMENT/lcp/builder/MATH_training_prepare/weights_summary.txt`](file:///Users/sjia/Documents/AgenticFinLab/Projects/Reasoning-Autoregressive-Modeling/EXPERIMENT/lcp/builder/MATH_training_prepare/weights_summary.txt)
   (rows 18–53 tabulate the raw values used below).
 - **Entries analyzed**: 36 configs (6 model sizes × 6 pyramid levels;
   Qwen3-8B entries are not yet recorded in `MATH_Loss_prepare.json`).
@@ -276,7 +276,7 @@ fail to capture it.
 Same caveats as GSM8K §7 (FP32 no-grad forward passes, `batch_size=4`,
 initial pre-training loss, Qwen3-8B not yet recorded). All MATH
 numbers in §2 are sourced verbatim from
-[`MATH_training_prepare/weights_summary.txt`](file:///Users/sjia/Documents/AgenticFinLab/Projects/Reasoning-Autoregressive-Modeling/EXPERIMENT/nlcpV4/builder/MATH_training_prepare/weights_summary.txt)
+[`MATH_training_prepare/weights_summary.txt`](file:///Users/sjia/Documents/AgenticFinLab/Projects/Reasoning-Autoregressive-Modeling/EXPERIMENT/lcp/builder/MATH_training_prepare/weights_summary.txt)
 rows 18–53.
 
 ---
@@ -291,7 +291,7 @@ form for ordering; MATH can collapse only the ordering half.
 
 ## 8. Design philosophy
 
-Reuse [GSM8K §8](file:///Users/sjia/Documents/AgenticFinLab/Projects/Reasoning-Autoregressive-Modeling/examples/nlcpV4/loss-weights-analysis-gsm8k.md)
+Reuse [GSM8K §8](file:///Users/sjia/Documents/AgenticFinLab/Projects/Reasoning-Autoregressive-Modeling/examples/lcp/loss-weights-analysis-gsm8k.md)
 verbatim:
 
 - Objective: learn a concept pyramid that fits CoT hidden states while
@@ -431,32 +431,32 @@ recon ⪰ residual, reasoning ⪰ residual ordering holds universally.
 ### 11.1 Pipeline (MATH-specific paths)
 
 ```
-configs/nlcpV4/MATH/train_builder_*_*level.yml       (baseline recipes)
+configs/lcp/MATH/train_builder_*_*level.yml       (baseline recipes)
                 │
                 ▼  loss_prepare.py --dataset MATH (10-batch warm-up)
-EXPERIMENT/nlcpV4/builder/MATH_Loss_prepare.json     (raw L̄_i per config)
+EXPERIMENT/lcp/builder/MATH_Loss_prepare.json     (raw L̄_i per config)
                 │
                 ▼  loss_weight_compute.py -f MATH_Loss_prepare.json
-EXPERIMENT/nlcpV4/builder/MATH_training_prepare/recommended_weights.csv
+EXPERIMENT/lcp/builder/MATH_training_prepare/recommended_weights.csv
                 │
                 ▼  AutoWeighted generator
-configs/nlcpV4/MATH/AutoWeighted/train_builder_*_*level.yml   (to create)
+configs/lcp/MATH/AutoWeighted/train_builder_*_*level.yml   (to create)
                 │
                 ▼  train_builder.py
-EXPERIMENT/nlcpV4/builder/MATH_<m>_<L>level_AutoWeighted/
+EXPERIMENT/lcp/builder/MATH_<m>_<L>level_AutoWeighted/
 ```
 
 ### 11.2 File artifacts (existing)
 
-- [`EXPERIMENT/nlcpV4/builder/MATH_Loss_prepare.json`](file:///Users/sjia/Documents/AgenticFinLab/Projects/Reasoning-Autoregressive-Modeling/EXPERIMENT/nlcpV4/builder/MATH_Loss_prepare.json) — raw measurements.
-- [`EXPERIMENT/nlcpV4/builder/MATH_training_prepare/weights_summary.txt`](file:///Users/sjia/Documents/AgenticFinLab/Projects/Reasoning-Autoregressive-Modeling/EXPERIMENT/nlcpV4/builder/MATH_training_prepare/weights_summary.txt) — per-config raw + recommended weights (target-0.8 variant).
-- [`EXPERIMENT/nlcpV4/builder/MATH_training_prepare/recommended_weights.csv`](file:///Users/sjia/Documents/AgenticFinLab/Projects/Reasoning-Autoregressive-Modeling/EXPERIMENT/nlcpV4/builder/MATH_training_prepare/recommended_weights.csv) — machine-readable equivalent.
+- [`EXPERIMENT/lcp/builder/MATH_Loss_prepare.json`](file:///Users/sjia/Documents/AgenticFinLab/Projects/Reasoning-Autoregressive-Modeling/EXPERIMENT/lcp/builder/MATH_Loss_prepare.json) — raw measurements.
+- [`EXPERIMENT/lcp/builder/MATH_training_prepare/weights_summary.txt`](file:///Users/sjia/Documents/AgenticFinLab/Projects/Reasoning-Autoregressive-Modeling/EXPERIMENT/lcp/builder/MATH_training_prepare/weights_summary.txt) — per-config raw + recommended weights (target-0.8 variant).
+- [`EXPERIMENT/lcp/builder/MATH_training_prepare/recommended_weights.csv`](file:///Users/sjia/Documents/AgenticFinLab/Projects/Reasoning-Autoregressive-Modeling/EXPERIMENT/lcp/builder/MATH_training_prepare/recommended_weights.csv) — machine-readable equivalent.
 - Heat-maps and line plots in the same directory visualize the
   pre-/post-weight distribution of each component.
 
 ### 11.3 File artifacts (to create)
 
-- `configs/nlcpV4/MATH/AutoWeighted/train_builder_*_*level.yml` — 36
+- `configs/lcp/MATH/AutoWeighted/train_builder_*_*level.yml` — 36
   recipes (+ 6 for Qwen3-8B once measured). Each should carry a
   provenance banner listing $\bar{\mathcal{L}}_i$, $w_i^{\star}$, and
   $\tilde{\mathcal{L}}_i$ for its (model, level) cell.
@@ -465,11 +465,11 @@ EXPERIMENT/nlcpV4/builder/MATH_<m>_<L>level_AutoWeighted/
 
 ```bash
 python3 examples/RunResults/loss_prepare.py \
-    -c configs/nlcpV4/MATH/ --dataset MATH
-python3 examples/nlcpV4/loss_weight_compute.py \
-    -f EXPERIMENT/nlcpV4/builder/MATH_Loss_prepare.json \
+    -c configs/lcp/MATH/ --dataset MATH
+python3 examples/lcp/loss_weight_compute.py \
+    -f EXPERIMENT/lcp/builder/MATH_Loss_prepare.json \
     --c-recon 10 --c-ordering 6
-# then re-run the AutoWeighted generator against configs/nlcpV4/MATH/
+# then re-run the AutoWeighted generator against configs/lcp/MATH/
 ```
 
 ### 11.5 Coverage
@@ -528,7 +528,7 @@ Same triggers as GSM8K §12.2, plus:
    everywhere.
 4. Keep `ordering_margin = 1.0` (unchanged from GSM8K).
 
-**Emit these into `configs/nlcpV4/MATH/AutoWeighted/*.yml`** with the
+**Emit these into `configs/lcp/MATH/AutoWeighted/*.yml`** with the
 same banner-and-suffix convention as the GSM8K AutoWeighted set:
 
 ```yaml
@@ -540,7 +540,7 @@ training:
     ordering_margin:       1.0
     residual_loss_weight:  1.0000
 log:
-  save_folder: EXPERIMENT/nlcpV4/builder/MATH_<model>_<L>level_AutoWeighted
+  save_folder: EXPERIMENT/lcp/builder/MATH_<model>_<L>level_AutoWeighted
 ```
 
 This matches the GSM8K methodology in every respect except recon,
