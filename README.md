@@ -174,30 +174,7 @@ weights are generated from dataset statistics rather than hand-tuned.
 
 ---
 
-## 6. Development Workflow
-
-1. **Style.** Follow [Google's Python Style Guide](https://google.github.io/styleguide/pyguide.html);
-   docstrings in the [Napoleon / Google format](https://sphinxcontrib-napoleon.readthedocs.io/en/latest/example_google.html).
-2. **Source location.** Reusable code goes under `ram/`. Experiment-specific
-   orchestration (training loops, analysis scripts, configs) goes under
-   `examples/<variant>/`.
-3. **Version bumps.** `ram/__init__.py` holds `__version__`, which `setup.py`
-   reads automatically — bump it there.
-4. **Commits.** Use atomic commits with descriptive messages; follow the
-   [research-preparation guide](https://github.com/AgenticFinLab/group-resource/blob/main/materials/research-preparation.md).
-5. **Sync.** Pull before push; resolve conflicts locally.
-
-### Troubleshooting
-
-If `pip install -e .` fails on metadata generation, upgrade setuptools first:
-
-```bash
-pip install --upgrade setuptools
-```
-
----
-
-## 7. References & Docs
+## 6. References & Docs
 
 - `docs/VAR.md` — VAR architecture notes that motivate RAM's design.
 - `docs/concept-pyramid-V{1..3}.md`, `docs/concept-pyramid-critic.md` — NLCP
@@ -210,6 +187,6 @@ pip install --upgrade setuptools
 
 ---
 
-## 8. License
+## 7. License
 
 Licensed under the **Apache License 2.0** — see [`LICENSE`](LICENSE).
