@@ -10,10 +10,10 @@ We use a two-level subscript **C_{k,j}** to unambiguously distinguish inter-leve
 |-------------|---------------------------------------------------------------|------------------------------------|
 | **C_{k,j}** | The j-th concept at level k                                   | C_{5,17} = 18th concept at level 5 |
 | **C_k**     | All concepts at level k: [C_{k,0}, C_{k,1}, ..., C_{k,L_k-1}] | C_5 has shape [B, 32, D]           |
-| **j**       | Concept slot within level k (intra-level)                     | j ∈ {0, 1, ..., L_k-1}             |
+| **j**       | Intra-level concept index within level k                      | j ∈ {0, 1, ..., L_k-1}             |
 | **k**       | Level index (inter-level)                                     | k ∈ {0, 1, ..., K-1}               |
 | **K**       | Total number of levels                                        | K=6 (levels 0 to 5)                |
-| **L_k**     | Number of concept slots at level k                            | L_k = 2^k for k < K                |
+| **L_k**     | Number of concepts at level k                                 | L_k = 2^k for k < K                |
 
 Level configuration (K=6): L_0=1, L_1=2, L_2=4, L_3=8, L_4=16, L_5=32 (total: 63 concepts)
 
@@ -139,7 +139,7 @@ with disjoint objectives.
     │                                                                     │
     │  ┌──────────────┬───────────────────────────────────┬────────────┐  │
     │  │   Q tokens   │ C_0 C_1,C_1 C_2,C_2,C_2,C_2 ... │  S tokens  │  │
-    │  │  (real Q_len)│         Σ L_k slots              │ (solution) │  │
+    │  │  (real Q_len)│         Σ L_k concepts            │ (solution) │  │
     │  └──────────────┴───────────────────────────────────┴────────────┘  │
     │                                                                     │
     │  reason_model (causal LM, SHARED or INDEPENDENT) — one pass         │
@@ -579,7 +579,7 @@ Therefore the phrase "best low-rank summary" in §2.5.1 is not rhetoric — it i
 
 Multiplying `A_k^T ∈ R^{L×L_k}` by `C_k ∈ R^{L_k × D}` produces `R_k ∈ R^{L×D}`:
 
-- Each of `L` sequence positions receives a convex-like combination of the `L_k` concepts, weighted by how much that position attended to each concept slot.
+- Each of `L` sequence positions receives a convex-like combination of the `L_k` concepts, weighted by how much that position attended to each concept.
 - If position `t` was claimed primarily by `C_{k,j}`, then `R_k[t] ≈ C_{k,j}`.
 - If position `t` is on the boundary between two concepts, `R_k[t]` is a soft blend.
 
@@ -785,7 +785,7 @@ Our design uses **soft attention** rather than hard segmentation. Three mechanis
 A_k = softmax(Q_k @ H_rest_k^T / (√D × τ))   shape: [B, L_k, L]
 ```
 
-For a fixed position t, softmax enforces: Σ_j A_{k,j}(t) = 1. This means concept slots **compete** for each position. If C_{5,0} strongly attends to position [0, L/32], then A_{5,0}(t) is large for t ∈ [0, L/32], forcing A_{5,1}(t), ..., A_{5,31}(t) to be small for those positions. This pushes later concept slots toward later positions.
+For a fixed position t, softmax enforces: Σ_j A_{k,j}(t) = 1. This means concepts **compete** for each position. If C_{5,0} strongly attends to position [0, L/32], then A_{5,0}(t) is large for t ∈ [0, L/32], forcing A_{5,1}(t), ..., A_{5,31}(t) to be small for those positions. This pushes later concepts toward later positions.
 
 #### Mechanism 2: Residual Flow
 
@@ -844,7 +844,7 @@ Without ordering loss:            With ordering loss:
   ...  (chaotic, no structure)       ...  (ordered, segment-like)
 ```
 
-The ordering loss ensures each concept slot "owns" a contiguous, ordered segment
+The ordering loss ensures each concept "owns" a contiguous, ordered segment
 of the CoT, just like DLCM's hard segmentation — but enforced softly via loss.
 
 > **Why no inter-level ordering?** Inter-level ordering (e.g., "last concept of
@@ -894,11 +894,11 @@ The concern is: "Can soft attention actually learn focused, segment-like pattern
 
 **Argument for sufficiency**:
 
-1. **Competition forces focus**: In level 5 with 32 concept slots, if C_{5,0} and C_{5,1} both attend diffusely to [0, L/2], they would produce nearly identical concepts. The NTP loss (from the decoder) would penalize redundancy — if two concepts carry the same information, one is wasted. The model is incentivized to differentiate concepts by attending to different positions.
+1. **Competition forces focus**: In level 5 with 32 concepts, if C_{5,0} and C_{5,1} both attend diffusely to [0, L/2], they would produce nearly identical concepts. The NTP loss (from the decoder) would penalize redundancy — if two concepts carry the same information, one is wasted. The model is incentivized to differentiate concepts by attending to different positions.
 
 2. **Residual flow prevents overlap**: Even without ordering loss, the residual flow naturally creates soft boundaries. If C_{5,0} extracts information from positions [0, L/32], that information is subtracted from H_rest for subsequent concepts.
 
-3. **Ordering loss provides explicit pressure**: The ordering loss directly pushes concept slots toward sequential, non-overlapping attention patterns.
+3. **Ordering loss provides explicit pressure**: The ordering loss directly pushes concepts toward sequential, non-overlapping attention patterns.
 
 4. **Positional query initialization**: When `use_positional_query_init=True`, concept queries start with positional priors that bias C_{k,j} toward the j-th segment of the sequence. This accelerates the discovery of segment structure.
 
@@ -1073,7 +1073,7 @@ packed, masks, positions = pack_qcs_sequences(
     c_embeds=X_concept,              c_mask,
     s_embeds=embed_tokens(S),        s_mask,
 )
-# masks carries per-row slot indices so we can gather later
+# masks carries per-row concept-position indices so we can gather later
 
 # 3. ONE pass through the (shared or independent) backbone
 out = reason_model(
@@ -1085,7 +1085,7 @@ out = reason_model(
 H = out.hidden_states[-1]                                     # (B, T, D_enc)
 
 # 4. Two independent readouts from the SAME H
-#    — concept readout: positions that correspond to concept slots
+#    — concept readout: positions that correspond to the concept segment
 H_concepts = gather_concept_readout(H, masks)                 # (B, Σ L_k, D_enc)
 predicted  = concept_head(H_concepts)                         # (B, Σ L_k, D)
 [Ĉ_0, ..., Ĉ_{K-1}] = split_levels(predicted, level_lengths)
@@ -1103,7 +1103,7 @@ For a single row `b` in the batch (K=3, L = [1, 2, 4] for illustration):
 
 ```
  position : 0 1 2 ... q_len-1 | q_len      ...  q_len+6 | q_len+7 ... q_len+7+L_S-1
- slot kind: Q Q Q ...    Q    | C_{0,0} C_{1,0} C_{1,1} C_{2,0} C_{2,1} C_{2,2} C_{2,3} | S S ...
+ kind     : Q Q Q ...    Q    | C_{0,0} C_{1,0} C_{1,1} C_{2,0} C_{2,1} C_{2,2} C_{2,3} | S S ...
  level k  : · · · ...    ·    |   0       1       1       2       2       2       2    | · · ...
  pos   j  : · · · ...    ·    |   0       0       1       0       1       2       3    | · · ...
                                     │         │       │
@@ -1148,18 +1148,18 @@ code.
   `[Q_b; C_b; S_b]` for each row `b`, yielding a contiguous sequence that
   the LLM sees as a single natural utterance. Padding, if any, is pushed to
   the right edge of the batch.
-- **Teacher forcing at the concept slots.** Because `X_concept` is built
-  from **groundtruth** `C_gt` (detached from Builder), every concept slot
-  sees only past slots plus `Q`, exactly like NTP on text tokens.
-- **Slot identity via additive embeddings.** Inside a level, slots share the
+- **Teacher forcing at the concept positions.** Because `X_concept` is built
+  from **groundtruth** `C_gt` (detached from Builder), every concept
+  sees only previous concepts plus `Q`, exactly like NTP on text tokens.
+- **Identity via additive embeddings.** Within a level, concepts share the
   same causal context; the only way the backbone can distinguish
   `C_{k,0}` from `C_{k,1}` is through `position_embeddings`. Level identity
   across K levels is provided analogously by `level_embeddings`.
 - **Causality is natural, not specialised.** We do **not** build a
   scale-level causal mask by hand. The backbone's own causal mask, applied
   to the packed `[Q; C; S]` sequence, yields the correct dependency
-  pattern: every concept slot sees `Q` plus earlier concept slots only; the
-  solution tokens see `Q` plus all concept slots.
+  pattern: every concept sees `Q` plus earlier concepts only; the
+  solution tokens see `Q` plus all concepts.
 
 #### 4.2.4 Inference forward pass (`_forward_inference`, autoregressive with KV cache)
 
@@ -1266,7 +1266,7 @@ Inherited from §1 of this document; summarised here for convenience:
 | **D_enc**   | Encoder / LLM hidden dimension       | 896                 |
 | **B**       | Batch size                           | 4                   |
 | **L_Q**     | Question token count                 | 40                  |
-| **total_C** | Total concept slots: Σ L_k           | 63                  |
+| **total_C** | Total number of concepts: Σ L_k      | 63                  |
 | **C_k**     | All concepts at level k: [B, L_k, D] |                     |
 | **Ĉ_k**     | Predicted concepts at level k        |                     |
 
@@ -1363,7 +1363,7 @@ level_queries[k] ∈ ℝ^{L_k × D_enc}
 
 Each `level_queries[k]` learns "what information to extract" from the LLM's
 context for level `k`. They function like **DETR-style object queries** —
-each query slot "asks" for a specific concept from the contextualised
+each query vector "asks" for a specific concept from the contextualised
 hidden states.
 
 ##### 4.3.4.3 Cumulative Lengths and Context Windows
@@ -1492,7 +1492,7 @@ a different slice of the **same** `H` tensor:
 H = [||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||]
      ↑                                      ↑                                                            ↑
      position 0                        position 40                                               position 102
-     (first Q token)                   (first concept slot)                                 (last concept slot)
+     (first Q token)                   (first concept position)                              (last concept position)
 
 Level 0 reads: H[:, 0:40, :]                    ← Q only
 Level 1 reads: H[:, 0:41, :]                    ← Q + 1 concept position
@@ -1569,7 +1569,7 @@ For level k=3, each of the 8 query vectors attends over 47 context positions:
     │    C_{2,3}]                                   │
     │                                              │
     │   = 40 Q tokens + 7 concept positions        │
-    │     (C_0: 1 slot, C_1: 2 slots, C_2: 4 slots) │
+    │     (C_0: 1 concept, C_1: 2, C_2: 4)         │
     └───────────────────────────────────────────────┘
            │        │        │              │
            ▼        ▼        ▼              ▼
@@ -1804,7 +1804,7 @@ These are L_k INDEPENDENT readouts from the same tensor.
 → A model that predicts all L_k simultaneously is architecturally valid.
 ```
 
-##### 4.3.9.2 Cross-Attention as a Multi-Slot Soft Readout
+##### 4.3.9.2 Cross-Attention as a Multi-Query Soft Readout
 
 The cross-attention mechanism naturally handles multiple simultaneous
 predictions:
@@ -1828,7 +1828,7 @@ This is exactly how DETR's object queries work:
 Our setting:
     - L_k queries, each predicts one concept independently
     - All attend to the same LLM hidden prefix
-    - Position correspondence assigns GT to queries (by slot order)
+    - Position correspondence assigns GT to queries (by index order)
 ```
 
 ##### 4.3.9.3 What Option Y Loses vs Option X
@@ -1851,7 +1851,7 @@ Option Y intra-level dependency:
 
 1. The Builder's ground-truth concepts are already independently extracted
    (no intra-level conditioning).
-2. The learnable queries provide per-slot identity — `Query_0 ≠ Query_1`
+2. The learnable queries provide per-index identity — `Query_0 ≠ Query_1`
    even without seeing each other's output.
 3. The context from the LLM already contains rich representations of
    `Q + prior levels`.
@@ -2125,7 +2125,7 @@ loss_fn ∈ { mse, cosine }       # selected by loss.concept_loss_type
 
 Properties:
 
-- **Per-level averaging** prevents fine-grained levels (which have more slots,
+- **Per-level averaging** prevents fine-grained levels (which have more concepts,
   e.g. L_5 = 32) from dominating coarse levels (L_0 = 1) simply by sample count.
 - **Groundtruth is detached** from the Builder graph; the Predictor never
   back-propagates into Builder weights.
@@ -2284,8 +2284,8 @@ VAR explicitly separates extraction (VQ-VAE) from generation (Transformer). We f
 | Codebook                     | `concept_queries`                          | Learnable "vocabulary" of concept patterns      |
 | f_hat / f_rest               | H_hat / H_rest                             | Residual decomposition                          |
 | **Phase 2: VAR Transformer** | **ConceptPredictor**                       | Generate autoregressively from condition        |
-| Decoder-only Transformer     | `reason_model` (shared or independent LLM) | Predict next concept slot given previous        |
-| Scale embeddings             | `level_embeddings` + `position_embeddings` | Mark level k and within-level slot j            |
+| Decoder-only Transformer     | `reason_model` (shared or independent LLM) | Predict next concept given previous             |
+| Scale embeddings             | `level_embeddings` + `position_embeddings` | Mark level k and within-level index j           |
 | Prediction head              | `concept_head` MLP                         | Project backbone hidden state to concept space  |
 | VAE Decoder                  | `reason_model.lm_head` reused on solution  | Decode final output tokens from concepts        |
 
@@ -2338,7 +2338,7 @@ VAR explicitly separates extraction (VQ-VAE) from generation (Transformer). We f
 | Guarantee                                             | Mechanism                                                                                 | Strength                  |
 |-------------------------------------------------------|-------------------------------------------------------------------------------------------|---------------------------|
 | Inter-level causality (level k depends on levels < k) | Packed `[Q; C; S]` sequence + backbone's native causal mask                               | **Hard** (architectural)  |
-| Intra-level slot identity (C_{k,0} ≠ C_{k,1})         | `position_embeddings` added to every slot                                                 | **Hard** (architectural)  |
+| Intra-level concept identity (C_{k,0} ≠ C_{k,1})      | `position_embeddings` added to every concept                                              | **Hard** (architectural)  |
 | Backbone reuse without new Transformer                | `reason_model` processes concepts as `inputs_embeds`; `concept_head` is the only new head | **Hard** (architectural)  |
 | Teacher forcing alignment                             | Groundtruth `C_gt` from frozen Builder, detached                                          | **Hard** (training setup) |
 | SHARED-mode weight integrity                          | Predictor aliases Builder's `reason_model` / `back_proj`; LoRA forbidden (fail-fast)      | **Hard** (architectural)  |
