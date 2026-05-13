@@ -1,3 +1,5 @@
+[![](https://raw.githubusercontent.com/SwanHubX/assets/main/badge1.svg)](https://swanlab.cn/@AfLab/ReasoningAR/overview)
+
 # Reasoning Autoregressive Modeling (RAM)
 
 A research codebase for **coarse-to-fine reasoning in LLMs**, inspired by
