@@ -311,6 +311,18 @@ def parse_args() -> argparse.Namespace:
             f"Valid keys: {', '.join(ALL_ANALYSES)}."
         ),
     )
+    parser.add_argument(
+        "--sample",
+        type=str,
+        default=ALL_KEYWORD,
+        help=(
+            "Restrict processing to a specific sample folder (or comma- "
+            "separated list). Accepts either the full folder name "
+            "('sample_ID1') or just the main_id ('ID1'); the 'sample_' "
+            "prefix is added automatically. Default 'all' processes every "
+            "sample_*/ folder under eval_root."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -326,6 +338,22 @@ def _parse_analyses(arg: str) -> Tuple[str, ...]:
             f"Valid keys: {', '.join(ALL_ANALYSES)} (or 'all')."
         )
     return keys
+
+
+def _parse_sample_filter(arg: str) -> Tuple[str, ...] | None:
+    """Normalise ``--sample`` to a tuple of full folder names, or None for all.
+
+    Accepts either the full folder name (``sample_ID1``) or the bare
+    ``main_id`` (``ID1``). Returns ``None`` when the caller requested
+    every sample so downstream code can shortcut the filter.
+    """
+    if arg.strip() == ALL_KEYWORD:
+        return None
+    parts = [p.strip() for p in arg.split(",") if p.strip()]
+    normalised: List[str] = []
+    for p in parts:
+        normalised.append(p if p.startswith("sample_") else f"sample_{p}")
+    return tuple(normalised)
 
 
 def discover_configs(dataset: str, experiment: str) -> List[Path]:
@@ -533,11 +561,6 @@ def _plot_attention_heatmaps(
     L_i = int(valid_lens[i])
     tokens_i = list(tokens_per_row[i])[:L_i]
 
-    cot_preview = "".join(tokens_per_row[i][:30]).replace("\n", " ").strip()
-    cot_preview = (
-        cot_preview if len(cot_preview) <= 110 else cot_preview[:107] + "\u2026"
-    )
-
     for k in range(K):
         A_k = pyramid.level_outputs[k].attention_weights[i, :, :L_i]
         mat = A_k.detach().cpu().float().numpy()
@@ -551,21 +574,23 @@ def _plot_attention_heatmaps(
             interpolation="nearest",
             vmin=0.0,
         )
-        ax.set_ylabel(f"slot j  (L_k={L_k})")
-        ax.set_yticks(np.arange(L_k))
-        ax.set_yticklabels([str(j) for j in range(L_k)])
-        xticks = _tick_positions(L_i, max_ticks=20)
-        ax.set_xticks(xticks)
-        ax.set_xticklabels(
-            [_short(tokens_i[t], n=8) for t in xticks],
-            rotation=60,
-            ha="right",
-        )
-        ax.set_xlabel("CoT token")
+        # Strip ALL figure/title text per user directive. Only level 0
+        # carries the original CoT tokens as x-axis tick labels; deeper
+        # levels are rendered with no text at all so the heatmap alone
+        # speaks. Slot numbers, axis titles, figure title, colorbar
+        # label — all removed.
+        ax.set_yticks([])
+        if k == 0:
+            xticks = _tick_positions(L_i, max_ticks=20)
+            ax.set_xticks(xticks)
+            ax.set_xticklabels(
+                [_short(tokens_i[t], n=8) for t in xticks],
+                rotation=60,
+                ha="right",
+            )
+        else:
+            ax.set_xticks([])
         fig.colorbar(im, ax=ax, fraction=0.015, pad=0.01)
-        ax.set_title(
-            f"{experiment_name} \u2014 attention heatmap (level {k})\n{cot_preview}"
-        )
         fig.tight_layout()
         _save_figure(fig, output_dir, f"{file_stem}_level{k}")
 
@@ -659,12 +684,11 @@ def _plot_attention_text_overlay(
         )
         sm.set_array([])
         fig.colorbar(sm, ax=ax, fraction=0.012, pad=0.01)
-        ax.set_title(
-            f"{experiment_name} \u2014 attention-on-text (level {k}, "
-            f"L_k={pyramid.level_lengths[k]}, max_w={a_max:.3f})\n{preview}",
-            loc="left",
-            fontsize=11,
-        )
+        # Only the level-0 figure carries a textual header — the raw CoT
+        # preview, nothing else. Deeper levels render the coloured token
+        # grid with zero added text so the attention pattern stands alone.
+        if k == 0:
+            ax.set_title(f"CoT: {preview}", loc="left", fontsize=11)
         fig.tight_layout()
         _save_figure(fig, output_dir, f"{file_stem}_level{k}")
 
@@ -763,12 +787,9 @@ def _plot_attention_text_per_concept(
             )
             sm.set_array([])
             fig.colorbar(sm, ax=ax, fraction=0.012, pad=0.01)
-            ax.set_title(
-                f"{experiment_name} \u2014 attention-on-text "
-                f"(level {k}, slot {j}, L_k={L_k}, max_w={r_max:.3f})\n{preview}",
-                loc="left",
-                fontsize=11,
-            )
+            # No title on per-concept text overlays — the coloured token
+            # grid speaks for itself; cross-file context (level k, slot j)
+            # already lives in the filename "<stem>_level{k}_slot{j}.*".
             fig.tight_layout()
             _save_figure(fig, output_dir, f"{file_stem}_level{k}_slot{j}")
 
@@ -929,8 +950,8 @@ def _plot_intra_level_similarity(
             vmax=1.0,
             interpolation="nearest",
         )
-        ax.set_xlabel("slot j")
-        ax.set_ylabel("slot i")
+        ax.set_xlabel("concept j")
+        ax.set_ylabel("concept i")
         fig.colorbar(im, ax=ax, fraction=0.04, pad=0.02)
         ax.set_title(
             f"{experiment_name} \u2014 intra-level cosine similarity "
@@ -1140,9 +1161,10 @@ def _plot_concept_pca(
         )
     ax.axhline(0.0, color="grey", linestyle=":", linewidth=0.7)
     ax.axvline(0.0, color="grey", linestyle=":", linewidth=0.7)
-    ax.set_xlabel("PC 1")
-    ax.set_ylabel("PC 2")
-    ax.grid(True, linestyle=":", alpha=0.4)
+    ax.set_xticks([])
+    ax.set_yticks([])
+    for spine in ax.spines.values():
+        spine.set_visible(False)
     ax.legend(loc="best")
     ax.set_title(f"{experiment_name} — concept PCA (2-D)")
     fig.tight_layout()
@@ -1203,14 +1225,168 @@ def _plot_concept_pca_per_level(
             )
         ax.axhline(0.0, color="grey", linestyle=":", linewidth=0.7)
         ax.axvline(0.0, color="grey", linestyle=":", linewidth=0.7)
-        ax.set_xlabel("PC 1 (level-local)")
-        ax.set_ylabel("PC 2 (level-local)")
-        ax.grid(True, linestyle=":", alpha=0.4)
+        ax.set_xticks([])
+        ax.set_yticks([])
+        for spine in ax.spines.values():
+            spine.set_visible(False)
         cbar = fig.colorbar(sc, ax=ax, fraction=0.04, pad=0.02)
-        cbar.set_label("slot j")
+        cbar.set_label("concept j")
         ax.set_title(f"{experiment_name} — concept PCA (level {k}, L_k={L_k})")
         fig.tight_layout()
         _save_figure(fig, output_dir, f"concept_pca_level{k}")
+
+
+# Marker cycle for slot-index encoding in aggregate scatter. 15 distinct
+# markers cover typical pyramid slot counts without repetition; if a level
+# exceeds this list, markers wrap modulo — slot numbers in the legend still
+# disambiguate visually.
+_AGG_MARKERS: Tuple[str, ...] = (
+    "o",
+    "s",
+    "^",
+    "D",
+    "v",
+    "P",
+    "X",
+    "*",
+    "<",
+    ">",
+    "h",
+    "p",
+    "H",
+    "d",
+    "8",
+)
+
+
+def _plot_aggregate_concept_pca_per_level(
+    pyramids: Sequence[Tuple[str, SimpleNamespace]],
+    output_dir: Path,
+    experiment_name: str,
+) -> None:
+    """Aggregate per-level 2-D PCA pooling ALL samples — ONE file per level.
+
+    For every level ``k`` we stack every sample's concepts
+    (``[1, L_k, D]`` each) into a single ``[N * L_k, D]`` matrix,
+    mean-centre it, and project onto the top-2 principal axes computed
+    from the pooled data. The scatter encodes two orthogonal factors:
+
+        * colour — sample index (tab20 up to 20 samples, viridis beyond)
+        * marker shape — slot index ``j ∈ [0, L_k)``
+
+    Level 0 typically has ``L_0=1`` so every sample contributes a single
+    point (all one marker, differentiated only by colour — a pure
+    cross-sample view). Deeper levels have more slots so markers fan out,
+    revealing whether slot-specific clusters persist across the dataset.
+
+    Files are written to ``output_dir`` (the eval_root), NOT into
+    per-sample folders, because they are a dataset-level summary.
+    """
+    if not pyramids:
+        return
+    # Assume num_levels / level_lengths are identical across samples — they
+    # come from the same builder config. Use the first sample as reference.
+    _ref_name, ref = pyramids[0]
+    K = ref.num_levels
+    level_lengths = ref.level_lengths
+
+    N = len(pyramids)
+    # tab20 gives visually distinct colours up to 20 samples; fall back to
+    # viridis for larger batches where exact identity matters less than the
+    # overall distribution.
+    if N <= 20:
+        sample_colors = [plt.cm.tab20(i % 20) for i in range(N)]
+    else:
+        sample_colors = [plt.cm.viridis(i / max(N - 1, 1)) for i in range(N)]
+
+    from matplotlib.lines import Line2D  # local — only used here
+
+    for k in range(K):
+        L_k = level_lengths[k]
+        # Gather every sample's concepts for this level (skip any sample
+        # whose L_k disagrees — defensive against heterogeneous dumps).
+        rows: List[torch.Tensor] = []
+        sample_ids: List[int] = []
+        slot_ids: List[int] = []
+        for s_idx, (_name, pyr) in enumerate(pyramids):
+            if k >= pyr.num_levels:
+                continue
+            C_k = pyr.concepts[k].detach().cpu().float()  # [B, L_k_s, D]
+            B_k, Lk_s, _ = C_k.shape
+            if Lk_s != L_k:
+                continue
+            flat = C_k.reshape(B_k * Lk_s, -1)
+            rows.append(flat)
+            sample_ids.extend([s_idx] * (B_k * Lk_s))
+            slot_ids.extend(list(np.tile(np.arange(Lk_s), B_k)))
+        if not rows:
+            continue
+        X = torch.cat(rows, dim=0)
+        if X.shape[0] < 2:
+            # PCA needs at least 2 points to produce two axes.
+            continue
+        X_centred = X - X.mean(dim=0, keepdim=True)
+        q = min(3, X_centred.shape[0], X_centred.shape[1])
+        _, _, V = torch.svd_lowrank(X_centred, q=q)
+        pcs = (X_centred @ V[:, :2]).numpy()  # [N_points, 2]
+
+        sample_ids_arr = np.asarray(sample_ids)
+        slot_ids_arr = np.asarray(slot_ids)
+
+        fig, ax = plt.subplots(1, 1, figsize=(8.0, 6.5))
+        for j in range(L_k):
+            mask_j = slot_ids_arr == j
+            if not mask_j.any():
+                continue
+            marker = _AGG_MARKERS[j % len(_AGG_MARKERS)]
+            # Scatter this slot's points coloured per sample.
+            ax.scatter(
+                pcs[mask_j, 0],
+                pcs[mask_j, 1],
+                s=48,
+                alpha=0.75,
+                marker=marker,
+                c=[sample_colors[s] for s in sample_ids_arr[mask_j]],
+                edgecolors="black",
+                linewidths=0.4,
+            )
+        ax.axhline(0.0, color="grey", linestyle=":", linewidth=0.7)
+        ax.axvline(0.0, color="grey", linestyle=":", linewidth=0.7)
+        ax.set_xticks([])
+        ax.set_yticks([])
+        for spine in ax.spines.values():
+            spine.set_visible(False)
+
+        # Concept legend only — marker SHAPE ↔ slot index j, rendered in
+        # neutral grey so the shape (not colour) carries the concept
+        # encoding. Sample identity is still encoded by colour in the
+        # scatter itself, but no sample-ID legend is drawn per user
+        # directive — the cross-sample spread is meant to be read
+        # holistically, not enumerated.
+        concept_handles = [
+            Line2D(
+                [0],
+                [0],
+                marker=_AGG_MARKERS[j % len(_AGG_MARKERS)],
+                color="w",
+                markerfacecolor="0.4",
+                markeredgecolor="black",
+                markersize=9,
+                label=f"concept {j}",
+                linestyle="",
+            )
+            for j in range(L_k)
+        ]
+        ax.legend(
+            handles=concept_handles,
+            loc="best",
+            title="concept (marker)",
+            ncol=min(max(L_k, 1), 4),
+            fontsize=9,
+        )
+        ax.set_title(f"{experiment_name} — concept PCA (level {k}, L_k={L_k})")
+        fig.tight_layout()
+        _save_figure(fig, output_dir, f"aggregate_concept_pca_level{k}")
 
 
 # =============================================================================
@@ -1243,33 +1419,66 @@ def _resolve_eval_root(config: Dict[str, Any], mode: str) -> Path:
     return log_dir / EVAL_BUILDER_DIR_NAME / mode
 
 
-def _existing_outputs(eval_root: Path, analyses: Sequence[str]) -> bool:
-    """Return True iff every ``sample_*/pyramid.pt`` already has every figure.
+def _existing_outputs(
+    eval_root: Path,
+    analyses: Sequence[str],
+    sample_filter: Tuple[str, ...] | None = None,
+) -> bool:
+    """Return True iff every expected figure is already on disk.
 
-    Layout: ``<eval_root>/sample_*/<file_stem>.png``. Both PNG and PDF
-    are written together so checking the PNG is sufficient. Sample
-    folders missing ``pyramid.pt`` (e.g. eval_builder ran with ``-v 0``)
-    are skipped — they'd never get figures anyway.
+    Two kinds of figures are checked:
+        * Per-sample — ``<eval_root>/sample_*/<stem>.png``. Every sample
+          folder that has a ``pyramid.pt`` must also carry every
+          per-sample sentinel (PNG is probed; PDF is written alongside).
+        * Aggregate — ``<eval_root>/<stem>.png``. A single dataset-level
+          probe at the eval_root.
+
+    Sample folders missing ``pyramid.pt`` (e.g. eval_builder ran with
+    ``-v 0``) are skipped — they'd never get figures anyway.
+
+    ``sample_filter`` — when given, only these folder names are probed;
+    aggregate sentinels are also skipped because a single-sample run
+    cannot legitimately produce a dataset-level aggregate figure.
     """
     if not eval_root.is_dir():
         return False
     sample_dirs = sorted(
         p for p in eval_root.iterdir() if p.is_dir() and p.name.startswith("sample_")
     )
+    if sample_filter is not None:
+        allow = set(sample_filter)
+        sample_dirs = [p for p in sample_dirs if p.name in allow]
     if not sample_dirs:
         return False
-    needed_stems = [
-        _ANALYSIS_SENTINEL_STEMS[k] for k in analyses if k in _ANALYSIS_SENTINEL_STEMS
+    per_sample_stems = [
+        _PER_SAMPLE_ANALYSIS_SENTINEL_STEMS[k]
+        for k in analyses
+        if k in _PER_SAMPLE_ANALYSIS_SENTINEL_STEMS
+    ]
+    aggregate_stems = [
+        _AGGREGATE_ANALYSIS_SENTINEL_STEMS[k]
+        for k in analyses
+        if k in _AGGREGATE_ANALYSIS_SENTINEL_STEMS
     ]
     any_with_dump = False
     for sd in sample_dirs:
         if not (sd / PYRAMID_DUMP_NAME).is_file():
             continue
         any_with_dump = True
-        for stem in needed_stems:
+        for stem in per_sample_stems:
             if not (sd / f"{stem}.png").is_file():
                 return False
-    return any_with_dump
+    if not any_with_dump:
+        return False
+    for stem in aggregate_stems:
+        if sample_filter is not None:
+            # Aggregate figures pool every sample; if the caller restricted
+            # processing to a subset, skip the aggregate probe rather than
+            # block the rerun on a file this invocation wouldn't produce.
+            continue
+        if not (eval_root / f"{stem}.png").is_file():
+            return False
+    return True
 
 
 def _run_concept_analysis(
@@ -1278,6 +1487,7 @@ def _run_concept_analysis(
     storage_root: str,
     mode: str,
     analyses: Sequence[str],
+    sample_filter: Tuple[str, ...] | None = None,
 ) -> int:
     """Iterate every ``sample_*/pyramid.pt`` under eval_root and render figures.
 
@@ -1301,11 +1511,27 @@ def _run_concept_analysis(
     sample_dirs = sorted(
         p for p in eval_root.iterdir() if p.is_dir() and p.name.startswith("sample_")
     )
+    if sample_filter is not None:
+        allow = set(sample_filter)
+        kept = [p for p in sample_dirs if p.name in allow]
+        missing = sorted(allow - {p.name for p in kept})
+        if missing:
+            logger.warning(
+                "  --sample filter skipped (not found under %s): %s",
+                eval_root,
+                ", ".join(missing),
+            )
+        sample_dirs = kept
 
     tokenizer = None
     max_seq_len = int(config["model"]["pyramid"]["max_seq_len"])
     analyses_set = set(analyses)
     n_rendered = 0
+    # Retain each sample's loaded pyramid so we can run aggregate analyses
+    # (pooled across all samples) after the per-sample loop finishes. The
+    # list holds (sample_name, pyramid) pairs — sample_name is currently
+    # only used for diagnostics but kept for future per-sample labelling.
+    collected_pyramids: List[Tuple[str, SimpleNamespace]] = []
 
     for sample_dir in sample_dirs:
         pt_path = sample_dir / PYRAMID_DUMP_NAME
@@ -1338,7 +1564,7 @@ def _run_concept_analysis(
         # Dispatch every requested analysis into THIS sample's folder.
         # Multi-level analyses write per-level (or per-slot) files named
         # with a suffix; single-axis analyses write a single file. See
-        # ``_ANALYSIS_SENTINEL_STEMS`` for the existence-probe stems.
+        # ``_PER_SAMPLE_ANALYSIS_SENTINEL_STEMS`` for existence-probe stems.
         if "attention_heatmaps" in analyses_set:
             _plot_attention_heatmaps(
                 pyramid,
@@ -1380,12 +1606,37 @@ def _run_concept_analysis(
         if "concept_pca_per_level" in analyses_set:
             _plot_concept_pca_per_level(pyramid, sample_dir, experiment_name)
 
+        # Keep the loaded pyramid for the aggregate pass below. Storing the
+        # full object is fine — batch_size is 1 per sample so memory stays
+        # proportional to (N_samples × K × L_k × D), which is modest for
+        # eval dumps.
+        collected_pyramids.append((sample_dir.name, pyramid))
+
         n_rendered += 1
         logger.info(
             "  %s: wrote %d analyses -> %s",
             sample_dir.name,
             len(analyses_set),
             sample_dir,
+        )
+
+    # Aggregate (dataset-level) analyses run AFTER the per-sample loop so
+    # they can pool every loaded pyramid. Files land at eval_root itself
+    # (beside the ``sample_*/`` folders), not inside any sample. We skip
+    # this pass when the caller restricted to a subset of samples — an
+    # aggregate computed from a single sample would be meaningless and
+    # would also overwrite the real dataset-level figure on disk.
+    if (
+        "aggregate_concept_pca_per_level" in analyses_set
+        and collected_pyramids
+        and sample_filter is None
+    ):
+        _plot_aggregate_concept_pca_per_level(
+            collected_pyramids, eval_root, experiment_name
+        )
+        logger.info(
+            "  aggregate: wrote aggregate_concept_pca_level*.png -> %s",
+            eval_root,
         )
 
     print(f"Rendered figures into {n_rendered} sample folder(s) under {eval_root}")
@@ -1399,6 +1650,7 @@ def analyze_one(
     storage_root: str,
     mode: str,
     analyses: Sequence[str],
+    sample_filter: Tuple[str, ...] | None = None,
 ) -> Tuple[str, str]:
     """Per-config status tracker: resolve eval_root, skip or render.
 
@@ -1427,10 +1679,18 @@ def analyze_one(
         and p.name.startswith("sample_")
         and (p / PYRAMID_DUMP_NAME).is_file()
     ]
+    if sample_filter is not None:
+        allow = set(sample_filter)
+        sample_dumps = [p for p in sample_dumps if p.name in allow]
     if not sample_dumps:
+        if sample_filter is not None:
+            return (
+                "skip_no_data",
+                f"no sample_*/pyramid.pt matching --sample={','.join(sample_filter)} under {eval_root}",
+            )
         return "skip_no_data", f"no sample_*/pyramid.pt under {eval_root}"
 
-    if not overlap and _existing_outputs(eval_root, analyses):
+    if not overlap and _existing_outputs(eval_root, analyses, sample_filter):
         return "skip_exists", f"figures already present under {eval_root}"
 
     try:
@@ -1439,6 +1699,7 @@ def analyze_one(
             storage_root=storage_root,
             mode=mode,
             analyses=analyses,
+            sample_filter=sample_filter,
         )
     except Exception as exc:  # noqa: BLE001
         plt.close("all")
@@ -1501,6 +1762,7 @@ def main() -> int:
     storage_root: str = args.storage_root
     mode: str = args.mode
     analyses = _parse_analyses(args.analyses)
+    sample_filter = _parse_sample_filter(args.sample)
 
     configs = _resolve_configs_from_args(args)
     if not configs:
@@ -1518,7 +1780,9 @@ def main() -> int:
     )
     print(
         f"[ANALYZE] concept pyramid  {source_desc}  mode={mode}  "
-        f"analyses={','.join(analyses)}  overlap={overlap}  "
+        f"analyses={','.join(analyses)}  "
+        f"sample={'all' if sample_filter is None else ','.join(sample_filter)}  "
+        f"overlap={overlap}  "
         f"({len(configs)} config file(s))"
     )
     for p in configs:
@@ -1537,6 +1801,7 @@ def main() -> int:
             storage_root=storage_root,
             mode=mode,
             analyses=analyses,
+            sample_filter=sample_filter,
         )
         if status == "analyzed":
             print(f"[OK]   {detail}")
