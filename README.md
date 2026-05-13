@@ -13,7 +13,7 @@ across levels), in the spirit of
 [VAR](https://arxiv.org/abs/2404.02905) for images. Each level is
 built **purely residually** over the hidden states the coarser levels
 have not yet explained, so the pyramid is a multi-scale residual code
-rather than a redundant encoder stack. The realised system (`nlcpV4`)
+rather than a redundant encoder stack. The implemented method (`examples/nlcpV4`)
 splits training into a **Builder** that extracts this pyramid from
 ground-truth CoT and a **Predictor** that generates the next level given
 the coarser ones — so inference is a short autoregression *across
