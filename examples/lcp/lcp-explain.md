@@ -935,51 +935,136 @@ Following VAR's design principle, we explicitly separate **concept extraction** 
 
 ### 4.1 ConceptPyramidBuilder (Phase 1: Extraction)
 
-The Builder constructs the groundtruth concept pyramid from CoT using soft attention and residual reconstruction.
+The Builder constructs the groundtruth concept pyramid from CoT using soft attention and residual decomposition. This subsection enumerates **every** component declared in `ConceptPyramidBuilder.__init__` (see [examples/lcp/concept_builder.py](file:///Users/sjia/Documents/AgenticFinLab/Projects/Reasoning-Autoregressive-Modeling/examples/lcp/concept_builder.py)) and gives the design reason for each, followed by the forward-pass pipeline and the output dataclasses.
 
-**Input**: (Q, CoT, Solution)
-- **CoT**: Core source for building the concept pyramid
-- **Q**: Context/prior (conditions the extraction but doesn't enter pyramid)
-- **Solution**: Used for auxiliary loss (validating pyramid's reasoning capability)
+**Input**: `BuilderInput(questions, cot_answers, solutions)`
+- **CoT**: core source for building the concept pyramid (encoded by `reason_model`).
+- **Q**: context/prior used only by the reasoning loss; does **not** enter the pyramid.
+- **Solution**: target for `L_reasoning`; concepts must reconstruct enough information to predict it.
 
-**Mechanism** (purely residual — no cross-scale conditioning):
+**Output**: `PyramidOutput` containing the full pyramid `[C_0, ..., C_{K-1}]` plus all intermediate tensors needed for external loss computation.
+
+#### 4.1.1 Components (`ConceptPyramidBuilder.__init__`)
+
+| Component         | Shape / Type                                | Role and design reason                                                                                                                                                                                                                                                                                                                                                                                                   |
+|-------------------|---------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `reason_model`    | `AutoModelForCausalLM` (e.g., Qwen2.5-0.5B) | One model, two roles: (1) backbone produces `H_CoT` for concept extraction; (2) `lm_head` computes the reasoning loss on `[Q; concepts; S]`. Loaded as Causal LM so a separate solution decoder is unnecessary.                                                                                                                                                                                                          |
+| `tokenizer`       | `AutoTokenizer` paired with `reason_model`  | Tokenizes CoT / Q / S; `pad_token` falls back to `eos_token` when the model has none.                                                                                                                                                                                                                                                                                                                                    |
+| `input_proj`      | `Linear(D_encoder, D)` (with bias)          | Maps reason_model hidden states from encoder space `D_encoder` to concept space `D`. When `D == D_encoder`, this is a same-dim learned rotation, mirroring VAR's `quant_conv` (preserves dimension to keep `back_proj` a faithful inverse).                                                                                                                                                                              |
+| `input_proj_norm` | `LayerNorm(D)`                              | Normalises `H_proj`. Reason: raw Qwen2.5 hidden states have `std ≈ 10`, `max ≈ 200`; without LayerNorm the random pyramid explodes (reconstructed `std ≈ 200` vs. projected `std ≈ 12`, giving `recon_loss ≈ 4.4e4`). LayerNorm makes recon loss start at a sane magnitude.                                                                                                                                              |
+| `concept_queries` | `ParameterList` of K, each `[L_k, D]`       | Learnable queries that define *what to attend to* at level k. Query-expansion schedule `L_k = 2^k`, i.e. `1 → 2 → 4 → 8 → 16 → 32` for K=6. Functionally replace VAR's discrete codebook with a continuous, level-specific query bank.                                                                                                                                                                                   |
+| `temperature`     | `Parameter(torch.ones(1))`, scalar τ        | Learnable attention sharpness in `A_k = softmax(Q_k H_rest_k^⊤ / (√D · τ))`. Too large → diffuse attention; too small → sharp but inflexible. Letting τ be learnable lets the model anneal sharpness during training.                                                                                                                                                                                                    |
+| `level_projs`     | `ModuleList` of K, each `Linear(D, D)`      | Per-level output projection `C_k = level_proj_k(A_k @ H_rest_k)`. Reason for *per-level* (not shared) projection: each level operates on a different residual `H_rest_k` whose statistics shift as coarse content is removed; an independent projection per level lets the model adapt to that drift.                                                                                                                    |
+| `back_proj`       | `Linear(D, D_encoder, bias=False)`          | Maps concept-space tensors back to encoder space. Used in two places: (i) `L_recon = ‖back_proj(H_hat_K) − H_CoT‖²` so reconstruction is measured against the *stable* encoder output, not the projected one; (ii) `_prepare_reasoning` feeds `back_proj(concepts)` into `reason_model` for `L_reasoning`. Initialised as `input_proj.weight.T` (pseudo-inverse) so it starts as an approximate inverse of `input_proj`. |
+
+Training-strategy flags (read from `config["training"]["reason_model"]`):
+
+| Flag                                              | Effect on `reason_model`                                                                                                           |
+|---------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------|
+| `freeze: true`                                    | All `reason_model` parameters get `requires_grad=False`. Mirrors VAR's frozen VQ-VAE encoder — stable target.                      |
+| `lora: {r, alpha, target_modules, dropout, bias}` | PEFT LoRA adapters injected into `target_modules` (default `q_proj`, `v_proj`); only LoRA params are trainable when `freeze=true`. |
+| `reason_model_num_layers: N` (>0)                 | Truncates the backbone to its first `N` Transformer layers (works for both plain and PEFT-wrapped models). `-1` disables pruning.  |
+
+**There is no separate `solution_decoder`**, no `concept_transformer`, and no `start_token`. The model around which Stage 1 is built is exactly `reason_model`; everything else (`input_proj`, `input_proj_norm`, `concept_queries`, `temperature`, `level_projs`, `back_proj`) is the *trainable shell* that turns it into a pyramid extractor.
+
+**Dimension-consistency warning (runtime).** `__init__` checks `pyramid.hidden_dim == reason_model.config.hidden_size` and emits a `UserWarning` when they differ. Reason: VAR's `quant_conv` preserves channel count so the inverse `post_quant_conv` is faithful; if our `D ≠ D_encoder`, then `input_proj` becomes a lossy compression and `back_proj` cannot perfectly invert it, putting a non-zero floor on `L_recon` that is unrelated to the pyramid's capacity. Set `D = D_encoder` for VAR-faithful, lossless projection.
+
+**Config caches (bookkeeping, not learnable).** `self.config`, `self.reason_cfg = config["model"]["reason_model"]`, `self.pyramid_cfg = config["model"]["pyramid"]`, `self.builder_cfg = config["model"]["builder"]`, `self.use_positional_query_init`, and `self.train_rm_cfg = config["training"]["reason_model"]` are cached at construction time to avoid repeated deep-dict lookups in the hot forward path. They store no parameters.
+
+#### 4.1.2 Output dataclasses
+
+Each forward stage returns a typed dataclass instead of a loose `dict`, so downstream losses access fields by name. Defined in `concept_builder.py`:
+
+| Dataclass       | Returned by                       | Fields (shapes)                                                                                                                                                                                                                                                                                                                                                                                                                   |
+|-----------------|-----------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `EncoderOutput` | `encode_cot`                      | `hidden_states [B, L, D_encoder]`, `attention_mask [B, L]`                                                                                                                                                                                                                                                                                                                                                                        |
+| `LevelOutput`   | per-level inside `_build_pyramid` | `concepts [B, L_k, D]` (= `C_k`), `attention_weights [B, L_k, L]` (= `A_k`), `reconstruction [B, L, D]` (= `R_k`)                                                                                                                                                                                                                                                                                                                 |
+| `PyramidOutput` | `_build_pyramid` / `forward`      | `concepts: List[Tensor]` (= `[C_0, ..., C_{K-1}]`), `level_outputs: List[LevelOutput]`, `encoder_hidden_states` (`H_CoT`), `projected_hidden` (`H_proj`), `reconstructed_hidden` (`H_hat_K`), `reconstructed_encoder_hidden` (`back_proj(H_hat_K)`), `residual_hidden` (`H_rest_K`), `num_levels`, `level_lengths`, `attention_mask`, optional `reasoning_logits`, `reasoning_target_ids`, `reasoning_texts`, `generation_texts`. |
+
+`PyramidOutput` exposes three convenience accessors used by the loss layer: `total_concepts → Σ L_k`, `all_attentions → [A_0, ..., A_{K-1}]`, `all_reconstructions → [R_0, ..., R_{K-1}]`, and `cat_concepts() → [B, Σ L_k, D]`.
+
+#### 4.1.3 Forward-pass pipeline
+
+`forward(batch: BuilderInput) → PyramidOutput` is a three-step pipeline:
+
+**Step 1 — `encode_cot(cot_answers)`** (returns `EncoderOutput`)
 ```
-H_CoT = Encoder(CoT)                      # Encode CoT to hidden states
-H_proj = LayerNorm(Linear(H_CoT))         # Project to concept space
-H_rest_0 = H_proj
+backbone = self._get_backbone()           # the Transformer backbone, NOT the lm_head
+H_CoT    = backbone(input_ids=tok(CoT), attention_mask=...).last_hidden_state
+                                          # [B, L, D_encoder]
+```
+The `lm_head` is deliberately **skipped** here; it is reserved for Step 3 (reasoning loss). The helper `_get_backbone()` returns the right inner module regardless of whether `reason_model` is plain (`reason_model.model`) or PEFT-wrapped (`reason_model.base_model.model`); all later embedding and forward calls go through it.
 
-for k in range(K):  # K levels
-    # Soft boundaries via learnable queries
-    A_k = softmax(Q_k @ H_rest_k^T / (sqrt(D) × τ))     # [B, L_k, L]
-    C_k = level_proj(A_k @ H_rest_k)                     # [B, L_k, D]
-    
-    # Residual update (VAR f_hat/f_rest)
-    R_k = A_k^T @ C_k                                    # [B, L, D]
-    H_hat_{k+1} = H_hat_k + R_k
-    H_rest_{k+1} = H_rest_k - R_k
+**Step 2 — `_build_pyramid(H_CoT, attention_mask)`** (returns `PyramidOutput` with empty reasoning fields)
+```
+H_proj   = input_proj_norm(input_proj(H_CoT))             # [B, L, D]
+H_rest   = H_proj.clone()                                   # H_rest_0
+H_hat    = zeros_like(H_proj)                               # H_hat_0
+for k in 0..K-1:
+    Q_k       = concept_queries[k]                          # [L_k, D]
+    scores    = (Q_k_batched @ H_rest^⊤) / (√D · τ)         # [B, L_k, L]
+    scores    = scores.masked_fill(pad_mask == 0, -inf)     # ignore padding
+    A_k       = softmax(scores, dim=-1)                     # [B, L_k, L]
+    C_k       = level_projs[k](A_k @ H_rest)                # [B, L_k, D]
+    R_k       = A_k^⊤ @ C_k                                  # [B, L, D]
+    H_hat    += R_k
+    H_rest   -= R_k
+H_recon = back_proj(H_hat)                                  # [B, L, D_encoder]
+```
+Key points:
+- The padding mask is applied **before** softmax, then `nan_to_num` cleans up any all-`-inf` rows (concepts whose context is fully masked).
+- The decomposition is **purely residual**: each level only sees `H_rest_k`, never previous concepts directly.
+- `level_projs[k]` is per-level (not shared across k) because the residual statistics drift as coarse content is removed.
 
-# Back-project to encoder space for reconstruction loss
-H_recon = back_proj(H_hat_K)              # [B, L, D_encoder]
-L_recon = ||H_recon - H_CoT||²
+**Step 3 — `_prepare_reasoning(pyramid, q_ids, q_mask, sol_ids, sol_mask)`** (mutates `pyramid` in place, only when `batch.has_solution`)
+```
+concept_embeds = back_proj(pyramid.cat_concepts())             # [B, Σ L_k, D_encoder]
+Q_embeds       = embed_tokens(q_ids)                             # [B, L_Q, D_encoder]
+S_embeds       = embed_tokens(sol_ids)                           # [B, L_S, D_encoder]
+seq            = cat([Q_embeds, concept_embeds, S_embeds], dim=1)
+mask           = cat([q_mask, ones(Σ L_k), sol_mask], dim=1)
+logits         = reason_model(inputs_embeds=seq, attention_mask=mask).logits
+solution_logits = logits[:, L_Q + Σ L_k - 1 : L_Q + Σ L_k + L_S - 1, :]
+targets        = sol_ids.clone();  targets[sol_mask == 0] = -100
+pyramid.reasoning_logits     = solution_logits
+pyramid.reasoning_target_ids = targets
+pyramid.reasoning_texts      = tokenizer.batch_decode(solution_logits.argmax(-1))
+```
+This runs the full `reason_model` (backbone + lm_head) on `[Q ; back_proj(concepts) ; S]` to validate that the pyramid retains enough information to bridge `Q → S`.
+
+A companion method `generate_solution(pyramid, q_ids, q_mask, max_new_tokens)` performs *free* autoregressive generation on `[Q ; back_proj(concepts)]` (no solution input) and returns decoded strings — used at evaluation time to compare teacher-forced vs. autoregressive quality. To avoid feeding right-padding tokens into `reason_model.generate`, it calls `pack_qcs_sequences` (from `lcp.utils`) which re-packs each row as `[real_Q_i | concepts | tail_pad]` so the prompt has no internal padding.
+
+`back_decode(x)` is a thin wrapper around `back_proj(x)` kept as a separate method so it can later evolve into a fuller decoder (LayerNorm, MLPs) without changing call sites. `_get_backbone()` is the analogous helper for backbone access (plain vs. PEFT-wrapped).
+
+#### 4.1.4 Initialisation (`_init_weights`)
+
+| Component         | Init scheme                                                                                                                                          | Reason                                                                                                                                                                                                 |
+|-------------------|------------------------------------------------------------------------------------------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `input_proj`      | Xavier-uniform weight, zero bias                                                                                                                     | Standard linear init.                                                                                                                                                                                  |
+| `concept_queries` | If `use_positional_query_init=true`: `xavier_uniform + α · PE(j/L_k)` with sinusoidal PE at normalised positions `j/L_k`. Else: pure xavier-uniform. | The positional bias gives query `Q_{k,j}` a prior on segment `j` of the CoT, accelerating discovery of segment-concept correspondence (Section 6.2). `α` is read from `builder.positional_init_alpha`. |
+| `level_projs`     | Xavier-uniform weight, zero bias                                                                                                                     | Standard linear init.                                                                                                                                                                                  |
+| `back_proj`       | `back_proj.weight ← input_proj.weight.T` (no bias)                                                                                                   | Pseudo-inverse start: if `input_proj` maps `H_CoT → H_proj`, then `back_proj` initially maps `H_proj ≈ H_CoT`. Both layers remain free to learn.                                                       |
+| `temperature`     | `ones(1)`                                                                                                                                            | Neutral starting sharpness (τ = 1).                                                                                                                                                                    |
+
+#### 4.1.5 Loss hooks (computed externally in `losses.py`)
+
+The Builder module itself does **not** compute losses; it returns a `PyramidOutput` whose fields are exactly what `compute_builder_loss` consumes. The four-term objective is:
+
+```
+L_builder = w_recon · L_recon + w_order · L_order + w_residual · L_residual + w_reasoning · L_reasoning
+
+L_recon     = ‖reconstructed_encoder_hidden − encoder_hidden_states‖²          # back_proj(H_hat_K) vs. H_CoT
+L_order     = ordering loss over [A_0, ..., A_{K-1}] (Section 3.2)
+L_residual  = ‖residual_hidden‖₁                                              # ‖H_rest_K‖₁ — concept-space sparsity prior
+L_reasoning = CE(reasoning_logits, reasoning_target_ids)                      # NTP on solution tokens
 ```
 
-**Output**: Groundtruth concept pyramid [C_0, C_1, ..., C_{K-1}]
+**Mechanism (one-line summary)**: at each level `k`, the Builder takes the current residual `H_rest_k`, uses `L_k` learnable queries to extract a rank-`L_k` summary `C_k`, broadcasts it back to sequence length as `R_k = A_k^⊤ C_k`, adds `R_k` to `H_hat` and subtracts it from `H_rest`, and hands the remainder to the next level (whose `2×`-wider query bank attends again).
 
-**Loss** (Stage 1 dual objectives):
-```
-L_builder = L_recon + λ_order × L_ordering + λ_residual × L_residual + λ_reasoning × L_reasoning
-
-- L_recon: ||back_proj(H_hat_K) - H_CoT||²  (reconstruction in encoder space)
-- L_ordering: Intra-level concept ordering (Section 3.2)
-- L_residual: L1 norm of final residual ||f_rest_K||  (concept-space regularization)
-- L_reasoning: NTP cross-entropy — teacher-forced [Q, concepts, S] → predict Solution tokens
-    (ensures pyramid is useful for reasoning, not just reconstruction)
-```
-
-**Key Properties**:
-- Builder is only used during training to generate groundtruth
-- All mechanisms from Sections 2-3 are employed (soft attention, residual flow, query expansion)
-- The output serves as training targets for the Predictor
+**Key properties**:
+- The Builder is used **only during training**; at inference time the Predictor takes over and Builder weights are not loaded into memory.
+- Only the *trainable shell* (`input_proj`, `input_proj_norm`, `concept_queries`, `temperature`, `level_projs`, `back_proj`) plus optionally `reason_model`'s LoRA adapters are updated; the backbone itself is frozen by default.
+- `PyramidOutput` is the single contract between Builder and Predictor: the Predictor consumes `pyramid.concepts` (detached) as its training targets.
 
 ### 4.2 ConceptPredictor (Phase 2: Generation)
 
