@@ -32,14 +32,18 @@ explaining the mapping. This is because:
 
 ### 1.2 Key Variables (following VAR.md Section 5.2.2)
 
-| Variable    | VAR Image Domain                | Our Text Domain                          | Physical Meaning              |
-|-------------|---------------------------------|------------------------------------------|-------------------------------|
-| **H_proj**  | z = Encoder(image)              | H_proj = Linear(Encoder(CoT))            | CoT information to decompose  |
-| **H_rest**  | f_rest = "still needs encoding" | H_rest_k = H_proj - Σ_{i<k} R_i          | Residual at level k           |
-| **H_hat**   | f_hat = "already encoded"       | H_hat_k = Σ_{i<k} R_i                    | Accumulated reconstruction    |
-| **A_{k,j}** | (implicit in VQ)                | A_{k,j} = softmax(Q_{k,j} @ H_rest_k^T)  | Attention weights for C_{k,j} |
-| **C_{k,j}** | h_k = codebook[idx_k]           | C_{k,j} = level_proj(A_{k,j} @ H_rest_k) | Concept (purely residual)     |
-| **R_k**     | f_hat += h_k_up                 | R_k = A_k^T @ C_k                        | Reconstruction from level k   |
+| Variable    | VAR Image Domain                | Our Text Domain                                  | Physical Meaning                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+|-------------|---------------------------------|--------------------------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| **H_proj**  | z = Encoder(image)              | H_proj = Linear(Encoder(CoT))                    | CoT information to decompose                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| **H_rest**  | f_rest = "still needs encoding" | H_rest_k = H_proj - Σ_{i<k} R_i                  | Residual at level k                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| **H_hat**   | f_hat = "already encoded"       | H_hat_k = Σ_{i<k} R_i                            | Accumulated reconstruction                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| **Q_{k,j}** | —                               | `concept_queries[k][j]` ∈ ℝ^D, learnable         | **Query expansion mechanism** (`concept_builder.py:450-468`). `concept_queries` is an `nn.ParameterList` with K entries of shape `[L_k, D]` where **L_k = 2^k** (1 → 2 → 4 → 8 → 16 → 32 for K=6). Each level k owns its own bank of L_k query vectors; the per-level growth in L_k is precisely what makes the concept count expand layer-by-layer and produces the pyramid's inter-level granularity. Q_{k,j} is the j-th query at level k and learns what structural segment to attend to. LCP has **no codebook / no VQ step** — concepts are produced by pure continuous soft attention over H_rest_k. |
+| **τ**       | —                               | `temperature` ∈ ℝ, learnable scalar              | Attention sharpness in the softmax denominator (`√D · τ`).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| **A_{k,j}** | —                               | A_{k,j} = softmax(Q_{k,j} @ H_rest_k^T / (√D·τ)) | Attention weights for C_{k,j} (continuous, no discretization).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| **C_{k,j}** | —                               | C_{k,j} = level_proj(A_{k,j} @ H_rest_k)         | Concept (purely residual; no codebook lookup).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| **R_k**     | f_hat += h_k_up                 | R_k = A_k^T @ C_k                                | Reconstruction from level k                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+
+`Q_{k,j}` and `τ` are the **only learnable parameters that drive the attention** — every other variable in this table is either a derived tensor (`A`, `C`, `R`, `H_*`) or a fixed input (`H_proj`).
 
 ### 1.3 Two Structural Dimensions
 
@@ -81,6 +85,8 @@ Level 5 = [C_{5,0},  C_{5,1},  ...,  C_{5,31}]
 **Inter-level** governs **what granularity** of information is captured.
 **Intra-level** governs **which segment** of the CoT is captured at that granularity.
 
+Both dimensions are mediated by the **learnable query bank** `concept_queries`: each `Q_{k,j}` is the parameter that *picks out* segment j at granularity k by competing for soft-attention mass over `H_rest_k`. Increasing k means more queries (`L_k = 2^k`) competing for the same residual, which is what produces finer segmentation. The query bank is therefore the trainable instrument that realises the two structural dimensions above; without it, residual decomposition would have no controllable read-out.
+
 ### 1.4 Overall Architecture: From CoT to Concept Pyramid to Solution
 
 This section provides a high-level overview of how the hybrid design achieves the research goal: **compressing CoT into a hierarchical concept pyramid for efficient reasoning**.
@@ -102,26 +108,32 @@ with disjoint objectives.
    Input: (Q, CoT, S)                                   [CoT is visible here]
                  │
                  ▼
-    ┌────────────────────────────────────────────────────────┐
-    │ frozen reason_model.embed(CoT)  →  H_CoT   [B, L, D_e] │
-    │ encode: LayerNorm(Linear) → H_proj         [B, L, D]   │
-    └────────────────────────────────────────────────────────┘
+    ┌────────────────────────────────────────────────────────────────────┐
+    │ reason_model backbone(CoT)        → H_CoT  [B, L, D_e]  (FROZEN + opt LoRA)
+    │ H_proj = input_proj_norm(input_proj(H_CoT))         [B, L, D]
+    │            └─ input_proj         : Linear(D_e → D)            (TRAINABLE)
+    │            └─ input_proj_norm    : LayerNorm(D)               (TRAINABLE)
+    └────────────────────────────────────────────────────────────────────┘
                  │
-                 ▼                       ┌─────────────── residual ledger ──────────────┐
-    ┌─────────────────────────────┐      │ H_hat_0 = 0        H_rest_0 = H_proj          │
-    │ K = 6 levels, L_k = 1..32   │      │ H_hat_{k+1} = H_hat_k + R_k                    │
-    │ for k in 0..K-1:            │◄─────┤ H_rest_{k+1}= H_rest_k − R_k                   │
-    │   A_k = softmax(Q_k·H_restᵀ) │      │ R_k = A_kᵀ · C_k          (rank ≤ L_k)         │
-    │   C_k = level_proj(A_k·H_rest)│     └────────────────────────────────────────────────┘
-    └─────────────────────────────┘
+                 ▼                       ┌────── residual decomposition ──────┐
+    ┌────────────────────────────────────────────┐ │ H_hat_0  = 0                         │
+    │ K = 6 levels, L_k = 2^k ∈ {1,2,4,8,16,32}   │ │ H_rest_0 = H_proj                    │
+    │ TRAINABLE attention parameters:             │ │                                      │
+    │   Q_k = concept_queries[k]   ∈ [L_k, D]     │ │ for each level k:                    │
+    │   τ   = temperature          ∈ ℝ            │ │   H_hat_{k+1}  = H_hat_k  + R_k       │
+    │   level_projs[k] : Linear(D → D)            │◄│   H_rest_{k+1} = H_rest_k − R_k       │
+    │ for k in 0..K-1:                            │ │   R_k = A_kᵀ · C_k    (rank ≤ L_k)    │
+    │   A_k = softmax(Q_k · H_restᵀ / (√D · τ))   │ └──────────────────────────────────────┘
+    │   C_k = level_projs[k](A_k · H_rest)        │
+    └────────────────────────────────────────────┘
                  │ produces pyramid: [C_0, C_1, ..., C_{K-1}]  ← groundtruth for Stage 2
                  │
      ┌───────────┴───────────┬────────────────────┬─────────────────────────┐
      ▼                       ▼                    ▼                         ▼
   L_recon               L_ordering            L_residual              L_reasoning
   ‖back_proj(H_hat_K)   exp_pos[C_{k,j}]      ‖H_rest_K‖₁         CE on S via
-    − H_CoT‖²            < exp_pos[C_{k,j+1}]                     frozen reason_model
-                                                                   fed [Q; C; S]
+    − H_CoT‖²            < exp_pos[C_{k,j+1}]                     reason_model fed
+  (back_proj : Linear(D → D_e), TRAINABLE)                        [Q; back_proj(C); S]
 
 ═══════════════════════════════════════════════════════════════════════════════
                     STAGE 2 — ConceptPredictor (TRAIN)
@@ -186,6 +198,17 @@ boundaries are the **only** places where gradients do NOT flow:
 
 **Stage 1 — ConceptPyramidBuilder** (`examples/lcp/concept_builder.py`)
 
+Trainable parameters (everything else is frozen, except optional LoRA adapters on `reason_model`):
+
+| Parameter         | Type / shape                              | Created by `__init__` line in `concept_builder.py` |
+|-------------------|-------------------------------------------|----------------------------------------------------|
+| `input_proj`      | `nn.Linear(D_encoder, D)` (with bias)     | `self.input_proj = nn.Linear(...)`                 |
+| `input_proj_norm` | `nn.LayerNorm(D)`                         | `self.input_proj_norm = nn.LayerNorm(...)`         |
+| `concept_queries` | `nn.ParameterList` of K, each `[L_k, D]`  | `self.concept_queries = nn.ParameterList([...])`   |
+| `temperature` (τ) | `nn.Parameter(torch.ones(1))`             | `self.temperature = nn.Parameter(torch.ones(1))`   |
+| `level_projs`     | `nn.ModuleList` of K, each `Linear(D, D)` | `self.level_projs = nn.ModuleList([...])`          |
+| `back_proj`       | `nn.Linear(D, D_encoder, bias=False)`     | `self.back_proj = nn.Linear(...)`                  |
+
 ```
 Input : (Q, CoT, S)                         # Q = question, S = solution
 Forward :
@@ -212,6 +235,7 @@ Loss    : L_builder = w_recon·L_recon + w_order·L_order
 
 Only the encode/attend/residual modules and `back_proj` are trainable. The
 backbone `reason_model` is **frozen** throughout Stage 1 (optionally LoRA-adapted).
+Concretely, the trainable Stage-1 parameters are: `input_proj`, `input_proj_norm`, **`concept_queries` (the K-entry `nn.ParameterList`, `[L_k, D]` per level)**, **`temperature` (τ)**, `level_projs`, `back_proj` — plus optional LoRA adapters on `reason_model`.
 
 **Stage 2 — ConceptPredictor** (`examples/lcp/concept_predictor.py`)
 
@@ -263,11 +287,11 @@ Output : [Ĉ_0, Ĉ_1, ..., Ĉ_{K-1}]    # no explicit CoT is ever generated
 
 End-to-end flow (what actually changes between stages):
 
-| Stage                   | Trainable params                                          | Backbone         | Sees CoT?   | Loss                                         |
-|-------------------------|-----------------------------------------------------------|------------------|-------------|----------------------------------------------|
-| Builder                 | encode / queries / level_proj / back_proj (+ LoRA)        | frozen (+LoRA)   | Yes         | L_recon + L_order + L_residual + L_reasoning |
-| Predictor — SHARED      | level_emb, position_emb, concept_head                     | aliased, frozen  | No (Q only) | L_concept + L_reasoning                      |
-| Predictor — INDEPENDENT | back_proj, level_emb, position_emb, concept_head (+ LoRA) | own copy (+LoRA) | No (Q only) | L_concept + L_reasoning                      |
+| Stage                   | Trainable params                                                                                   | Backbone         | Sees CoT?   | Loss                                         |
+|-------------------------|----------------------------------------------------------------------------------------------------|------------------|-------------|----------------------------------------------|
+| Builder                 | input_proj, input_proj_norm, **concept_queries**, **temperature**, level_projs, back_proj (+ LoRA) | frozen (+LoRA)   | Yes         | L_recon + L_order + L_residual + L_reasoning |
+| Predictor — SHARED      | level_emb, position_emb, concept_head                                                              | aliased, frozen  | No (Q only) | L_concept + L_reasoning                      |
+| Predictor — INDEPENDENT | back_proj, level_emb, position_emb, concept_head (+ LoRA)                                          | own copy (+LoRA) | No (Q only) | L_concept + L_reasoning                      |
 
 #### 1.4.2 Key Design Principles
 
