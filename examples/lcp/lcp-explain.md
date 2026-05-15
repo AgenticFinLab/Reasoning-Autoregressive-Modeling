@@ -93,10 +93,15 @@ This section provides a high-level overview of how the hybrid design achieves th
 
 #### 1.4.1 The Two-Stage Pipeline
 
-LCP is organised as **two sequential training stages** and a single
+LCP is organised as **two sequential training stages** and an
 autoregressive inference path. The two stages share a common notion of a
 "concept pyramid" C = [C_0, C_1, ..., C_{K-1}], but train disjoint modules
-with disjoint objectives.
+with disjoint objectives. Stage 2 is implemented by **one canonical
+predictor** (`examples/lcp/concept_predictor.py`): a VAR-faithful
+single-sequence architecture that constructs all approximation tokens
+*before* the LLM, packs them into a single sequence with `Q` and `S`, and
+trains both the concept pyramid and the reasoning NTP loss in **one**
+packed forward.
 
 **Bird's-eye view of the whole pipeline**
 
@@ -127,6 +132,7 @@ with disjoint objectives.
     │   C_k = level_projs[k](A_k · H_rest)        │
     └────────────────────────────────────────────┘
                  │ produces pyramid: [C_0, C_1, ..., C_{K-1}]  ← groundtruth for Stage 2
+                 │ also exports f_hat_per_level = [f_hat_0, ..., f_hat_{K-1}]   (canvas TF input)
                  │
      ┌───────────┴───────────┬────────────────────┬─────────────────────────┐
      ▼                       ▼                    ▼                         ▼
@@ -136,65 +142,83 @@ with disjoint objectives.
   (back_proj : Linear(D → D_e), TRAINABLE)                        [Q; back_proj(C); S]
 
 ═══════════════════════════════════════════════════════════════════════════════
-                    STAGE 2 — ConceptPredictor (TRAIN)
+      STAGE 2 — ConceptPredictor (TRAIN) — single packed forward (canonical)
 ═══════════════════════════════════════════════════════════════════════════════
 
           (Builder frozen) ──► groundtruth pyramid C_gt = [C_0, ..., C_{K-1}]
+                              + canvas f_hats   = [f_hat_0, ..., f_hat_{K-1}]
                                           │ detach()
-          Input: (Q, C_gt, S)   [Q and C_gt are teacher-forced; no CoT used]
-                 │                        │                       │
-                 ▼                        ▼                       ▼
-    ┌─────────────────────────────────────────────────────────────────────┐
-    │  back_proj(C_gt)  +  level_embedding  +  position_embedding         │
-    │                                                                     │
-    │  pack_qcs_sequences → one contiguous row per sample:                │
-    │                                                                     │
-    │  ┌──────────────┬───────────────────────────────────┬────────────┐  │
-    │  │   Q tokens   │ C_0 C_1,C_1 C_2,C_2,C_2,C_2 ... │  S tokens  │  │
-    │  │  (real Q_len)│         Σ L_k concepts            │ (solution) │  │
-    │  └──────────────┴───────────────────────────────────┴────────────┘  │
-    │                                                                     │
-    │  reason_model (causal LM, SHARED or INDEPENDENT) — one pass         │
-    │                                                                     │
-    │     hidden states H [B, T, D_enc]                                   │
-    │              ├── gather concept positions → concept_head → Ĉ_k      │
-    │              └── gather solution positions → lm_head → logits_S     │
-    └─────────────────────────────────────────────────────────────────────┘
-                 │                                       │
-                 ▼                                       ▼
-          L_concept  = (1/K) Σ_k MSE(Ĉ_k, C_k)   L_reasoning = CE(logits_S, S)
+          Input: (Q, f_hats, S)   [Q, f_hats, S all teacher-forced; no CoT used]
+
+  ┌─────── Pre-LLM approx-token construction (per level, K times) ────────┐
+  │   for k in 0..K-1:                                                    │
+  │     context_k   = back_proj(f_hat_k)                  [B, L, D_enc]   │
+  │     queries_k   = level_queries[k]                    [L_k, D_enc]    │
+  │     attn_k, α_k = extract_attn(query_norm(queries_k),                 │
+  │                                context_norm(context_k))               │
+  │     approx_k    = post_norm(attn_k + queries_k) + lvl_embed[k]        │
+  │   approx_tokens = cat(approx_0..approx_{K-1})    [B, total_C, D_enc]  │
+  └───────────────────────────────────────────────────────────────────────┘
+
+  ┌─────────────── Per-row packing (RoPE-safe, no inner padding) ─────────┐
+  │  ┌──────────┬──────────────────────────┬──────────┬──────────┐        │
+  │  │ real_Q_i │ approx_tokens (all K)    │ real_S_i │ tail_pad │        │
+  │  │ q_len[i] │         total_C          │ s_len[i] │ padding  │        │
+  │  └──────────┴──────────────────────────┴──────────┴──────────┘        │
+  │  ◄──────────────────── T (packed length) ──────────────────►          │
+  └───────────────────────────────────────────────────────────────────────┘
+
+  ┌─────────────── Single LLM forward + scale-causal 4D mask ─────────────┐
+  │  reason_model(inputs_embeds=packed, attention_mask=mask4d,            │
+  │               output_hidden_states=True)                              │
+  │                                                                       │
+  │  Mask layout (per row):                                               │
+  │    Q-region   : token-causal                                          │
+  │    level-k    : bidirectional within, sees all levels j ≤ k           │
+  │    S-region   : token-causal, sees Q + all approx tokens              │
+  │    PAD keys   : masked everywhere (NaN-safe diagonal allowed)         │
+  │                                                                       │
+  │  Outputs: hidden [B, T, D_enc],  logits [B, T, V]                     │
+  └───────────────────────────────────────────────────────────────────────┘
+
+  ┌─────────────── Two readouts from the SAME hidden states ──────────────┐
+  │  ① concept_head at approx-token positions  → [Ĉ_0, ..., Ĉ_{K-1}]      │
+  │  ② lm_head      at solution-token positions → reasoning_logits         │
+  └───────────────────────────────────────────────────────────────────────┘
+
+  Losses (computed in losses.py from PredictorOutput):
+          L_concept  = (1/K) Σ_k loss_fn(Ĉ_k, C_k.detach())
+          L_reasoning = CE(reasoning_logits, reasoning_target_ids)
 
 ═══════════════════════════════════════════════════════════════════════════════
-                    INFERENCE — AR generation from Q only
+              INFERENCE — AR generation from Q only (K passes)
 ═══════════════════════════════════════════════════════════════════════════════
 
                           Input: Q      (no CoT, no S)
-                                │
-                                ▼
-    ┌────── Step 0: prime KV cache ──────────────────────────────┐
-    │ h = reason_model(embed(Q))                                 │
-    │ Ĉ_0 = concept_head(h[last_real_Q])                          │
-    │ cache = past_kv                                             │
-    └────────────────────────────────────────────────────────────┘
-                                │
-           ┌────────────────────┴──── loop t = 1..Σ L_k − 1 ────────────┐
-           ▼                                                            │
-    ┌────── Step t: one concept per step ─────────────────────────┐     │
-    │ x = back_proj(Ĉ_{t-1}) + level_emb[t-1] + position_emb[t-1] │     │
-    │ h = reason_model(x, past_kv=cache, position_ids=q_len+t-1)  │─────┘
-    │ Ĉ_t = concept_head(h[-1]);   cache ← updated KV             │
-    └─────────────────────────────────────────────────────────────┘
-                                │
-                                ▼
-                 Output: [Ĉ_0, Ĉ_1, ..., Ĉ_{K-1}]
-              (downstream decoding of S not part of this document)
+
+  ┌─────── Self-maintained f_hat canvas, K sequential packed passes ──────┐
+  │                                                                       │
+  │   f_hat ← zeros [B, L_canvas, D]                                      │
+  │   for k in 0..K-1:                                                    │
+  │     approx_k, α_k = _construct_approx_tokens(k, f_hat)                │
+  │     pack ← [real_Q_i | approx_0..k | tail_pad]                        │
+  │     hidden = reason_model(pack, scale_causal_mask).hidden_states[-1]  │
+  │     Ĉ_k = concept_head(hidden at level-k approx positions)            │
+  │     R_k = α_kᵀ @ Ĉ_k                                  [B, L_canvas, D]│
+  │     f_hat = f_hat + R_k                                               │
+  │                                                                       │
+  │   Output: [Ĉ_0, Ĉ_1, ..., Ĉ_{K-1}]                                    │
+  │   Solution: generate_solution(predicted_concepts, Q) — separate call  │
+  └───────────────────────────────────────────────────────────────────────┘
 ```
 
-The three boxes above correspond to the three operating modes of the codebase:
-`train_builder.py` (top), `train_predictor.py` (middle), and
-`predictor._forward_inference` (bottom). The arrows that cross stage
-boundaries are the **only** places where gradients do NOT flow:
-`C_gt` is `detach()`ed and the Builder is frozen during Stage 2.
+The diagram above captures the three operating modes of the codebase:
+`train_builder.py` (Stage 1), `train_predictor.py` (Stage 2 — one packed
+forward per batch), and `predictor._forward_inference` (Inference — K
+sequential passes with a self-maintained `f_hat` canvas). The arrows that
+cross stage boundaries are the **only** places where gradients do NOT
+flow: `C_gt` and `f_hats` are `detach()`ed and the Builder is frozen
+during Stage 2.
 
 **Stage 1 — ConceptPyramidBuilder** (`examples/lcp/concept_builder.py`)
 
@@ -237,81 +261,85 @@ Only the encode/attend/residual modules and `back_proj` are trainable. The
 backbone `reason_model` is **frozen** throughout Stage 1 (optionally LoRA-adapted).
 Concretely, the trainable Stage-1 parameters are: `input_proj`, `input_proj_norm`, **`concept_queries` (the K-entry `nn.ParameterList`, `[L_k, D]` per level)**, **`temperature` (τ)**, `level_projs`, `back_proj` — plus optional LoRA adapters on `reason_model`.
 
-**Stage 2 — ConceptPredictor** (`examples/lcp/concept_predictor.py`)
+**Stage 2 — ConceptPredictor (canonical, single-sequence)**
+
+The predictor (`examples/lcp/concept_predictor.py`) implements one
+VAR-faithful architecture: it constructs all approximation tokens
+*before* the LLM via cross-attention from `level_queries[k]` over
+`back_proj(f_hat_k)`, packs them into a single sequence with `Q` and `S`,
+and reads BOTH the concept pyramid and the reasoning logits from a
+single scale-causal forward pass.
 
 ```
-Input : (Q, C_gt = [C_0, ..., C_{K-1}], S)  # C_gt comes from frozen Builder
+Input : (Q, gt_f_hats = [f_hat_0, ..., f_hat_{K-1}], S)   # f_hats from frozen Builder
 Forward (teacher-forced, ONE backbone pass):
-    # 1. back-decode groundtruth concepts to encoder space
-    X_cat   = back_proj(concat(C_0, ..., C_{K-1}))           # (B, Σ L_k, D_enc)
-    # 2. add level embedding and within-level position embedding
-    X_cat  += level_embeddings(_level_ids_flat)
-    X_cat  += position_embeddings(_pos_ids_flat)
-    # 3. pack [Q_b; X_cat_b; S_b] row-by-row (no internal padding)
-    packed, masks, positions = pack_qcs_sequences(...)
-    # 4. run the (shared or independent) backbone ONCE
-    H = reason_model(inputs_embeds=packed,
-                     attention_mask=masks.attention_mask,
-                     output_hidden_states=True).hidden_states[-1]
-    # 5. two readouts from the SAME hidden states
-    Ĉ_k  = concept_head(gather_concept_readout(H, masks, k))  # for k=0..K-1
-    logits_S = lm_head(gather_solution_logits(H, masks))
-Outputs : PredictorOutput {
-    predicted_concepts = [Ĉ_0, ..., Ĉ_{K-1}],   # continuous regression targets
-    gt_concepts        = [C_0, ..., C_{K-1}],
-    reasoning_logits   = logits_S,
-    reasoning_target_ids                         # S shifted by 1, pad = -100
-}
-Loss    : L_predictor = w_concept·L_concept + w_reason·L_reasoning
+    # 1. Pre-LLM approx-token construction (per level)
+    for k in 0..K-1:
+        context_k     = back_proj(f_hat_k)                       # (B, L, D_enc)
+        approx_k, α_k = extract_attn(query_norm(level_queries[k]),
+                                     context_norm(context_k))    # cross-attn
+        approx_k      = post_norm(approx_k + level_queries[k]) + lvl_embed[k]
+    approx_tokens = cat(approx_0..approx_{K-1})                  # (B, total_C, D_enc)
+    # 2. Per-row pack [real_Q | approx_tokens | real_S | tail_pad]
+    pack = pack_qcs_sequences(Q_embeds, q_mask, approx_tokens, S_embeds, s_mask)
+    # 3. Build per-row scale-causal 4D mask  [B, 1, T, T]
+    mask4d = _build_scale_causal_mask_packed(pack.q_len, pack.s_len, level_lengths, T)
+    # 4. Single LLM forward (full reason_model: hidden + logits)
+    out = reason_model(inputs_embeds=pack.packed_embeds, attention_mask=mask4d,
+                       output_hidden_states=True)
+    hidden = out.hidden_states[-1]                               # (B, T, D_enc)
+    logits = out.logits                                          # (B, T, V)
+    # 5. Two readouts from the SAME hidden states
+    Ĉ_k             = concept_head(hidden[approx-token positions of level k])
+    reasoning_logits = gather_solution_logits(logits, pack)
+Outputs : PredictorOutput { predicted_concepts, gt_concepts,
+                             reasoning_logits, reasoning_target_ids }
+Inference: K sequential packed passes, self-maintained f_hat canvas.
+           Each pass: build approx_0..k from current f_hat → LLM forward →
+                      Ĉ_k = concept_head(hidden_k); R_k = α_kᵀ @ Ĉ_k; f_hat += R_k.
 ```
 
-`concept_head` is a small `Linear(D_enc) → GELU → Linear(D)` MLP; the
-backbone can be **SHARED** with the Builder (aliased `reason_model` /
-`back_proj`, LoRA forbidden) or **INDEPENDENT** (own copy with optional LoRA).
-
-**Inference** (autoregressive, Q-only)
-
-```
-Input : Q
-Step 0 : run reason_model on embed(Q) → hidden h_last → Ĉ_0
-         cache KV, remember q_len
-Step t :                          # for t = 1 .. Σ L_k − 1
-    x = back_proj(Ĉ_{t-1}) + level_emb[lvl(t-1)] + pos_emb[pos(t-1)]
-    h = reason_model(inputs_embeds=x,
-                     past_key_values=cache,
-                     position_ids=[q_len + t − 1])          # explicit RoPE id
-    Ĉ_t = concept_head(h[-1])
-    cache = updated KV
-Output : [Ĉ_0, Ĉ_1, ..., Ĉ_{K-1}]    # no explicit CoT is ever generated
-```
+**Trainable components**: `reason_model` (own copy + optional LoRA),
+`back_proj`, `level_queries` (K-entry `nn.ParameterList`, `[L_k, D_enc]`
+per level), `query_norm` / `context_norm` / `post_norm`, `extract_attn`
+(MultiheadAttention), `lvl_embed` (`Embedding(K, D_enc)`), `concept_head`
+(`Linear(D_enc, D_enc) → GELU → Linear(D_enc, D)`). The Builder is held
+fully frozen.
 
 End-to-end flow (what actually changes between stages):
 
-| Stage                   | Trainable params                                                                                   | Backbone         | Sees CoT?   | Loss                                         |
-|-------------------------|----------------------------------------------------------------------------------------------------|------------------|-------------|----------------------------------------------|
-| Builder                 | input_proj, input_proj_norm, **concept_queries**, **temperature**, level_projs, back_proj (+ LoRA) | frozen (+LoRA)   | Yes         | L_recon + L_order + L_residual + L_reasoning |
-| Predictor — SHARED      | level_emb, position_emb, concept_head                                                              | aliased, frozen  | No (Q only) | L_concept + L_reasoning                      |
-| Predictor — INDEPENDENT | back_proj, level_emb, position_emb, concept_head (+ LoRA)                                          | own copy (+LoRA) | No (Q only) | L_concept + L_reasoning                      |
+| Stage     | Trainable params                                                                                                            | Backbone         | Sees CoT?   | Loss                                         |
+|-----------|-----------------------------------------------------------------------------------------------------------------------------|------------------|-------------|----------------------------------------------|
+| Builder   | input_proj, input_proj_norm, **concept_queries**, **temperature**, level_projs, back_proj (+ LoRA)                          | frozen (+LoRA)   | Yes         | L_recon + L_order + L_residual + L_reasoning |
+| Predictor | reason_model (+ LoRA), back_proj, level_queries, query_norm, context_norm, extract_attn, post_norm, lvl_embed, concept_head | own copy (+LoRA) | No (Q only) | L_concept + L_reasoning                      |
 
 #### 1.4.2 Key Design Principles
 
 **1. Builder-Predictor Separation**
-- **Builder**: Uses soft attention + residual flow to extract groundtruth from CoT
-- **Predictor**: Uses decoder-only Transformer to autoregressively generate concepts
-- **Rationale**: Builder defines "what is a good pyramid", Predictor learns "how to generate it"
+- **Builder**: Uses soft attention + residual flow to extract groundtruth from CoT.
+- **Predictor**: Generates the same pyramid from `Q` alone via the
+  canonical single-sequence architecture (pre-LLM cross-attention over
+  the cumulative `f_hat` canvas, then ONE packed LLM forward with a
+  scale-causal 4D mask).
+- **Rationale**: Builder defines "what is a good pyramid"; Predictor
+  learns "how to generate it".
 
 **2. Preserved Core Mechanisms**
 All mechanisms from Section 1.3 are retained:
-- **Query expansion**: 1→2→4→8→16→32 learnable queries per level
-- **Soft attention (soft boundaries)**: Competition-based segment-concept correspondence
-- **Residual reconstruction**: Coarse-to-fine information decomposition
-- **Intra-level ordering**: Concepts ordered by CoT position
-- **Purely residual**: No cross-scale conditioning in the builder (VAR.md principle)
+- **Query expansion**: 1→2→4→8→16→32 learnable queries per level (now
+  `level_queries`, used as cross-attention queries over `f_hat`).
+- **Soft attention (soft boundaries)**: Competition-based segment-concept correspondence.
+- **Residual reconstruction**: Coarse-to-fine information decomposition;
+  level k conditions only on `f_hat_k = Σ_{j<k} R_j` (cumulative canvas),
+  not on raw concept stacks.
+- **Intra-level ordering**: Concepts ordered by CoT position (Builder loss).
+- **Purely residual**: No cross-scale conditioning in the builder (VAR.md principle).
 
 **3. Training-Inference Alignment**
-- Training: Predictor sees groundtruth concepts (teacher forcing)
-- Inference: Predictor generates concepts step-by-step
-- Both use same causal structure: level k depends on levels < k
+- Training: Predictor sees the Builder's `gt_f_hats` (teacher forcing on the canvas).
+- Inference: Predictor self-maintains `f_hat` via
+  `R_k = α_kᵀ @ Ĉ_k` after each level.
+- Both use the same scale-causal structure: level k depends only on levels j ≤ k.
 
 #### 1.4.3 Why This Design Works
 
@@ -768,7 +796,16 @@ Why? Because `H_hat_k` is the *position-aware, smeared* accumulation that captur
 
 Any Predictor that stacks concepts alone (without canvas reconstruction or a proxy for it) silently violates the rank-accumulation invariant and will need to re-learn `A_j^T` internally for every `j < k` — an expensive waste of parameters.
 
-**Actionable check**: `concept_predictor.py`'s level-conditioning path (e.g., `_upsample_prev_to_level` or analogous) must either reconstruct `H_hat_k` explicitly or provide positional/level embeddings rich enough that the Transformer can reconstruct it in-attention. This is the single most important Predictor correctness property inherited from §2.5.
+**How `concept_predictor.py` honours this rule.** The current (and only)
+predictor implements the **canvas-based** design directly: the function
+`_construct_approx_tokens(k, f_hat_k)` cross-attends `level_queries[k]`
+over `back_proj(f_hat_k)`, where `f_hat_k = Σ_{j<k} R_j` is the cumulative
+reconstruction canvas (taken from the frozen Builder during training and
+self-maintained on a fixed `[B, L_canvas, D]` canvas during inference).
+The LLM therefore **never sees raw concept stacks** — it only ever sees
+the pre-LLM-extracted approximation tokens that already represent
+`f_hat_k` in canvas form. This is the single most important Predictor
+correctness property inherited from §2.5.
 
 ### 2.5.10 One-Line Mnemonic (For Everyday Use)
 
@@ -1092,1045 +1129,314 @@ L_reasoning = CE(reasoning_logits, reasoning_target_ids)                      # 
 
 ### 4.2 ConceptPredictor (Phase 2: Generation)
 
-The Predictor learns to autoregressively generate the concept pyramid
-from `Q` alone, mimicking the Builder's output. It **reuses a causal
-decoder-only LLM (`reason_model`) as its backbone** rather than introducing
-a separate Transformer; the entire concept pyramid is materialised inside
-the same sequence that the LLM already natively consumes.
+The Predictor learns to generate the concept pyramid from `Q` alone,
+using a causal decoder-only LLM (`reason_model`) as its backbone. It is
+**single-sequence and VAR-faithful**: a fixed packed layout per row is
+fed through ONE LLM forward at training time, and concept prediction +
+reasoning NTP are read out from the same hidden states. There are no
+alternative modes (no flat-AR variant, no shared/independent toggle).
+The key idea is that **per-level approximation tokens are constructed
+before entering the LLM**, so the LLM sees a compact sequence whose
+length does not depend on the (potentially large) raw context length
+of `f_hat_k`.
 
 #### 4.2.1 Components (`ConceptPredictor.__init__`)
 
-| Component             | Shape / Type                                     | Role                                                                                                    |
-|-----------------------|--------------------------------------------------|---------------------------------------------------------------------------------------------------------|
-| `reason_model`        | HuggingFace causal LM                            | Shared backbone; processes `[Q; back-decoded concepts; S]` as ordinary `inputs_embeds`.                 |
-| `back_proj`           | `Linear(D, D_enc, bias=False)`                   | Maps concept-space D to encoder/embedding-space D_enc so concepts can be fed to the LLM.                |
-| `level_embeddings`    | `nn.Embedding(K, D_enc)`                         | Per-level embedding (index k = 0..K-1) added to every concept at level k; analogous to VAR's `lvl_emb`. |
-| `position_embeddings` | `nn.Embedding(max_k L_k, D_enc)`                 | Within-level position embedding for index j; lets the backbone distinguish `C_{k,0}` from `C_{k,1}`.    |
-| `concept_head`        | `Linear(D_enc, D_enc) → GELU → Linear(D_enc, D)` | Maps backbone hidden state back to concept space to produce Ĉ.                                          |
-| `_level_ids_flat`     | buffer `int64 [Σ L_k]`                           | Precomputed flat level ids `[0, 1,1, 2,2,2,2, ...]` for level-embedding lookup.                         |
-| `_pos_ids_flat`       | buffer `int64 [Σ L_k]`                           | Precomputed flat within-level ids `[0, 0,1, 0,1,2,3, ...]`.                                             |
+| Component       | Shape / Type                                             | Role                                                                                                             |
+|-----------------|----------------------------------------------------------|------------------------------------------------------------------------------------------------------------------|
+| `builder`       | frozen `ConceptPyramidBuilder`                           | Produces GT concepts and per-level cumulative `f_hat_k` during training. All parameters frozen.                  |
+| `reason_model`  | own `AutoModelForCausalLM` (+ optional LoRA via PEFT)    | Predictor's own backbone (loaded from `predictor_cfg.model_name`). Base weights frozen; LoRA adapters trainable. |
+| `tokenizer`     | own `AutoTokenizer`                                      | Tokenises questions and (when present) solutions for the predictor's own vocabulary.                             |
+| `back_proj`     | `Linear(D, D_enc, bias=False)`                           | Lifts concept-space (`D`) to encoder/embedding-space (`D_enc`) for `f_hat` and predicted concepts.               |
+| `level_queries` | `ParameterList([Tensor[L_k, D_enc] for k in 0..K-1])`    | Per-level learnable queries. Cross-attend to `back_proj(f_hat_k)` to extract `L_k` approximation tokens.         |
+| `query_norm`    | `LayerNorm(D_enc)`                                       | Pre-norm on query side of pre-LLM cross-attention.                                                               |
+| `context_norm`  | `LayerNorm(D_enc)`                                       | Pre-norm on context (KV) side of pre-LLM cross-attention.                                                        |
+| `extract_attn`  | `MultiheadAttention(D_enc, num_heads, batch_first=True)` | Pre-LLM cross-attention shared across all levels; constructs approximation tokens.                               |
+| `post_norm`     | `LayerNorm(D_enc)`                                       | Post-norm after attention + residual on raw queries.                                                             |
+| `lvl_embed`     | `Embedding(K, D_enc)`                                    | Per-level identity tag added to every approximation token at level `k` (analogous to VAR's `lvl_emb`).           |
+| `concept_head`  | `Linear(D_enc, D_enc) → GELU → Linear(D_enc, D)`         | Maps backbone hidden state at approx-token positions back to concept space to produce Ĉ_k.                       |
 
-There is **no** `q_proj`, no `q_proj_norm`, no separate `concept_transformer`,
-and no `start_token`; the question is injected simply by running its token
-embeddings through `reason_model` as the first part of the packed sequence.
+The `_inference_canvas_length` (default 128) sets the fixed canvas size
+used at inference time when the Builder is unavailable. There is **no**
+`level_embeddings` table on individual concept tokens, no
+`position_embeddings`, no `q_proj`, no `start_token`, and no
+`use_shared_model` toggle: the predictor always owns its own copy of
+`reason_model`, `back_proj`, and `tokenizer`.
 
-#### 4.2.2 Backbone modes: SHARED vs INDEPENDENT (`use_shared_model`)
+#### 4.2.2 Pre-LLM approximation-token construction (`_construct_approx_tokens`)
 
-The Predictor supports two mutually exclusive backbone configurations,
-selected via `model.predictor.use_shared_model` in the YAML config:
-
-| Aspect                  | SHARED (`use_shared_model: true`)                                  | INDEPENDENT (`use_shared_model: false`)                                               |
-|-------------------------|--------------------------------------------------------------------|---------------------------------------------------------------------------------------|
-| `reason_model`          | **Aliased** to `builder.reason_model` (no new weights)             | **Own copy**, loaded from `predictor_model_name`                                      |
-| `back_proj`             | **Aliased** to `builder.back_proj`                                 | **Own copy** (fresh, trainable)                                                       |
-| `tokenizer`             | **Aliased** to `builder.tokenizer`                                 | **Own instance** (from `predictor_model_name`)                                        |
-| LoRA on `reason_model`  | **Forbidden** (fail-fast: raises at init)                          | **Allowed** (default target_modules `[q_proj, v_proj]`, r=16, α=32)                   |
-| Extra trainable weights | `level_embeddings`, `position_embeddings`, `concept_head` only     | `back_proj`, `level_embeddings`, `position_embeddings`, `concept_head`, LoRA adapters |
-| Config example          | `configs/lcp/GSM8K/train_predictor_Qwen2.5-0.5B_2level_shared.yml` | `configs/lcp/GSM8K/train_predictor_Qwen2.5-0.5B_2level_independent.yml`               |
-
-**Design intent.** SHARED mode tests whether the *same* LLM that built the
-pyramid can also predict it, using only a small MLP head on top. INDEPENDENT
-mode decouples Builder and Predictor capacities: the Predictor may use a
-larger backbone and/or LoRA to compensate for the absence of CoT.
-
-**Visual: what is shared vs what is owned**
+For each level `k`, the predictor first turns the cumulative reconstruction
+`f_hat_k ∈ ℝ^{B × ctx × D}` (from the Builder during training, or self-
+maintained at inference) into exactly `L_k` approximation tokens of size
+`D_enc`, **before** anything reaches the LLM:
 
 ```
-           SHARED MODE (use_shared_model=True)                INDEPENDENT MODE (use_shared_model=False)
-  ┌───────────────────────────────────────┐       ┌─────────────────────────────────────┐
-  │          ConceptPyramidBuilder         │       │          ConceptPyramidBuilder         │
-  │  reason_model (frozen) ●────────────┐ │       │  reason_model (frozen)                │
-  │  back_proj            ●──────────┐│ │       │  back_proj                            │
-  │  concept_queries, level_proj, ...      ││ │       │  concept_queries, level_proj, ...      │
-  └────────────────────────────────────────┘│ │       └─────────────────────────────────────┘
-                            alias◄──────┘│ │
-                            alias◄────────┘ │       (no alias; Predictor owns its copy)
-                                                 │
-  ┌────────────────────────────────────────┘       ┌─────────────────────────────────────┐
-  │         ConceptPredictor               │       │         ConceptPredictor               │
-  │  reason_model   ◁── aliased (same obj)   │       │  reason_model    (NEW instance)        │
-  │  back_proj      ◁── aliased               │       │  back_proj       (NEW instance)        │
-  │  tokenizer      ◁── aliased               │       │  tokenizer       (NEW instance)        │
-  │                                         │       │                                         │
-  │  level_embeddings    ◆ trainable         │       │  level_embeddings    ◆ trainable         │
-  │  position_embeddings ◆ trainable         │       │  position_embeddings ◆ trainable         │
-  │  concept_head        ◆ trainable         │       │  concept_head        ◆ trainable         │
-  │                                         │       │  back_proj           ◆ trainable         │
-  │  LoRA                ✖ FORBIDDEN         │       │  LoRA on q_proj/v_proj ◆ optional adapters│
-  └────────────────────────────────────────┘       └─────────────────────────────────────┘
-
-                   ●  shared object (Python alias, literally the same tensor)
-                   ◆  owned & trainable by Predictor
-                   ✖  construction fails fast if configured
+f_hat_k             [B, ctx, D]                      # cumulative canvas
+   │
+   ▼ back_proj  (D → D_enc)
+context             [B, ctx, D_enc]
+   │
+   │  queries = level_queries[k]                    [L_k, D_enc]
+   │  q_n = query_norm(queries.expand(B, L_k, D_enc))
+   │  c_n = context_norm(context)
+   ▼
+extract_attn(q_n, c_n, c_n)  → attn_out [B, L_k, D_enc],
+                              attn_w   [B, L_k, ctx]
+   │
+   ▼ residual on RAW queries + post-norm
+approx_tokens   = post_norm(attn_out + queries)      [B, L_k, D_enc]
+approx_tokens  += lvl_embed.weight[k]                # level identity
 ```
 
-#### 4.2.3 Training forward pass (`_forward_training`, unified single pass)
+The context length `ctx` is whatever the Builder produced (training) or
+the canvas length `L_canvas` (inference). The output shape `[B, L_k,
+D_enc]` is **fixed by the level**, not by `ctx` — this is what makes the
+downstream LLM input a compact `[L_Q + Σ L_k]` sequence regardless of how
+long the underlying CoT / canvas is.
 
-Given a batch of `(Q, C_gt = [C_0, ..., C_{K-1}], S)`, the Predictor does
-**one** teacher-forced pass through `reason_model`:
+#### 4.2.3 Per-row packed layout and scale-causal mask
 
-```
-# 1. Back-decode groundtruth concepts to encoder space, then add level and position embeddings
-C_flat   = concat_along_slots([C_0, ..., C_{K-1}])          # (B, Σ L_k, D)
-X_concept= back_proj(C_flat)                                 # (B, Σ L_k, D_enc)
-X_concept+= level_embeddings(_level_ids_flat)                # broadcast over batch
-X_concept+= position_embeddings(_pos_ids_flat)
-
-# 2. Per-row packing: remove any internal padding between Q, C, S
-packed, masks, positions = pack_qcs_sequences(
-    q_embeds=embed_tokens(Q),        q_mask,
-    c_embeds=X_concept,              c_mask,
-    s_embeds=embed_tokens(S),        s_mask,
-)
-# masks carries per-row concept-position indices so we can gather later
-
-# 3. ONE pass through the (shared or independent) backbone
-out = reason_model(
-    inputs_embeds=packed,
-    attention_mask=masks.attention_mask,
-    position_ids=positions,
-    output_hidden_states=True,
-)
-H = out.hidden_states[-1]                                     # (B, T, D_enc)
-
-# 4. Two independent readouts from the SAME H
-#    — concept readout: positions that correspond to the concept segment
-H_concepts = gather_concept_readout(H, masks)                 # (B, Σ L_k, D_enc)
-predicted  = concept_head(H_concepts)                         # (B, Σ L_k, D)
-[Ĉ_0, ..., Ĉ_{K-1}] = split_levels(predicted, level_lengths)
-
-#    — reasoning readout: positions that correspond to solution tokens
-reasoning_logits = gather_solution_logits(H, masks, lm_head=reason_model.lm_head)
-reasoning_target_ids = build_solution_targets(S_ids, s_mask, pad_id=-100)
-```
-
-Key properties of this forward path:
-
-**Visual: the packed sequence and its two readouts**
-
-For a single row `b` in the batch (K=3, L = [1, 2, 4] for illustration):
+After approximation tokens for all `K` levels are concatenated, each row
+is packed (via `pack_qcs_sequences`) into:
 
 ```
- position : 0 1 2 ... q_len-1 | q_len      ...  q_len+6 | q_len+7 ... q_len+7+L_S-1
- kind     : Q Q Q ...    Q    | C_{0,0} C_{1,0} C_{1,1} C_{2,0} C_{2,1} C_{2,2} C_{2,3} | S S ...
- level k  : · · · ...    ·    |   0       1       1       2       2       2       2    | · · ...
- pos   j  : · · · ...    ·    |   0       0       1       0       1       2       3    | · · ...
-                                    │         │       │
-                                    │         │       └─ position_embeddings(j=1)
-                                    │         └───── level_embeddings(k=1)
-                                    └───────── back_proj(C_{0,0}) + …
-
-                                          CAUSAL MASK (from the backbone)
-                                   every position sees only itself + all earlier
-
- READOUT A (concept head)                     READOUT B (lm_head)
-  positions ↑ predict the NEXT concept         positions ↑ predict NEXT solution token
-  (take q_len−1 → predicts C_{0,0}; then        (take last_C → predicts S_0; then
-   each concept’s hidden predicts the next)     each S_t → predicts S_{t+1})
-
-                           ↓ both readouts come from the SAME
-                             hidden states H produced by ONE pass
+[real_Q_i | approx_tokens_0 | approx_tokens_1 | ... | approx_tokens_{K-1} | real_S_i | tail_pad]
+  q_len[i]    L_0              L_1                    L_{K-1}              s_len[i]    …
 ```
 
-Under the causal mask the dependency structure is:
+This layout has four scale regions per row:
+
+- **scale 0** (`Q`): `q_len[i]` real question tokens (left-aligned).
+- **scale 1..K** (`approx`): `L_k` approximation tokens for each level
+  `k`, contiguous in level order.
+- **scale K+1** (`S`): `s_len[i]` real solution tokens (training only).
+- **pad**: anywhere outside the above ranges.
+
+`_build_scale_causal_mask_packed` materialises a per-row 4D additive mask
+that encodes the following visibility rule (let `t_q` be the query, `t_k`
+the key, both packed positions):
+
+| Same scale?      | Visibility within scale        |
+|------------------|--------------------------------|
+| `Q`              | token-causal (`t_q ≥ t_k`)     |
+| `approx` level k | **bidirectional** within level |
+| `S`              | token-causal (`t_q ≥ t_k`)     |
+
+| Cross-scale (scale_q vs scale_k)    | Visibility                         |
+|-------------------------------------|------------------------------------|
+| `Q` → anything later                | masked                             |
+| `approx` level k → `Q`              | visible                            |
+| `approx` level k → `approx` level j | visible iff `j ≤ k` (scale-causal) |
+| `approx` level k → `S`              | masked                             |
+| `S` → `Q`, `S` → `approx` (any k)   | visible                            |
+| anything → pad                      | masked                             |
+
+This matches VAR's scale-causal pattern at the level granularity, while
+allowing the `L_k` approximation tokens within a single level to fully
+exchange information — they describe the *same* level and have no
+intrinsic order.
+
+#### 4.2.4 Training forward pass (`forward`, single packed pass)
+
+Given a `BuilderInput` batch with questions and solutions:
 
 ```
-       Q ────────────────────────────────────────────────────┐
-                                                                       ▼
-       Q,C_{0,0} ─────────────────────────────────────────────► C_{1,0}
-       Q,C_{0,0},C_{1,0} ──────────────────────────────────► C_{1,1}
-       Q,C_{0,0},C_{1,0},C_{1,1} ───────────────────────► C_{2,0}
-       …
-       Q,C_{0,0},…,C_{2,3} ────────────────────────────────────► S_0
-       …
+# Phase 1 — frozen Builder produces GT pyramid (no_grad, detached)
+pyramid       = builder(batch)
+gt_concepts   = [c.detach() for c in pyramid.concepts]            # K × [B, L_k, D]
+gt_f_hats     = [f.detach() for f in pyramid.f_hat_per_level]     # K × [B, ctx, D]
+
+# Tokenise Q (and S if present) with the predictor's OWN tokenizer
+question_ids, q_mask = tokenizer(batch.questions, ...)
+if batch.has_solution:
+    solution_ids, s_mask = tokenizer(batch.solutions, ...)
+
+# Phase 2 — build approx tokens for all levels and pack
+Q_embeds = backbone.get_input_embeddings()(question_ids)          # [B, L_Q, D_enc]
+approx_tokens = cat([_construct_approx_tokens(k, gt_f_hats[k])[0]
+                     for k in range(K)], dim=1)                    # [B, Σ L_k, D_enc]
+S_embeds = backbone.get_input_embeddings()(solution_ids)           # or None
+
+pack = pack_qcs_sequences(Q_embeds, q_mask,
+                          approx_tokens, S_embeds, s_mask)
+
+attn_4d = _build_scale_causal_mask_packed(
+    q_len=pack.q_len, s_len=pack.s_len,
+    level_lengths=level_lengths, T=pack.T, ...)
+
+# ONE LLM forward (concept + reasoning paths share these hidden states)
+out    = reason_model(inputs_embeds=pack.packed_embeds,
+                      attention_mask=attn_4d,
+                      output_hidden_states=True)
+hidden = out.hidden_states[-1]                                    # [B, T, D_enc]
+logits = out.logits                                               # [B, T, V]
+
+# Readout A — concept predictions at approx-token positions
+#   col = q_len[i] + j   for j in [0, Σ L_k)
+approx_hidden = gather(hidden, rows=B, cols=q_len[:, None] + arange(ΣL_k))
+predicted_concepts = split(concept_head(approx_hidden), level_lengths)
+
+# Readout B — reasoning NTP logits at solution-predicting positions
+out.reasoning_logits     = gather_solution_logits(logits, pack)
+out.reasoning_target_ids = build_solution_targets(solution_ids, s_mask, pack)
 ```
 
-So **inter-level causality (k depends on < k) and intra-level right-to-left
-ordering (j depends on < j at the same level) both fall out of the backbone's
-natural causal mask** — no custom "scale-level mask" is built anywhere in the
-code.
-
-- **One backbone pass powers two losses.** The same `H` produces both the
-  concept MSE (via `concept_head`) and the reasoning CE (via the frozen
-  `lm_head`). No separate forward is needed.
-- **No internal padding inside a row.** `pack_qcs_sequences` concatenates
-  `[Q_b; C_b; S_b]` for each row `b`, yielding a contiguous sequence that
-  the LLM sees as a single natural utterance. Padding, if any, is pushed to
-  the right edge of the batch.
-- **Teacher forcing at the concept positions.** Because `X_concept` is built
-  from **groundtruth** `C_gt` (detached from Builder), every concept
-  sees only previous concepts plus `Q`, exactly like NTP on text tokens.
-- **Identity via additive embeddings.** Within a level, concepts share the
-  same causal context; the only way the backbone can distinguish
-  `C_{k,0}` from `C_{k,1}` is through `position_embeddings`. Level identity
-  across K levels is provided analogously by `level_embeddings`.
-- **Causality is natural, not specialised.** We do **not** build a
-  scale-level causal mask by hand. The backbone's own causal mask, applied
-  to the packed `[Q; C; S]` sequence, yields the correct dependency
-  pattern: every concept sees `Q` plus earlier concepts only; the
-  solution tokens see `Q` plus all concepts.
-
-#### 4.2.4 Inference forward pass (`_forward_inference`, autoregressive with KV cache)
-
-At test time the Builder is not used; the Predictor generates
-`[Ĉ_0, ..., Ĉ_{K-1}]` from `Q` alone:
+**Visual: the packed sequence and its two readouts** (K=3, L=[1,2,4]):
 
 ```
-# Step 0 — prime the KV cache with Q
-h_Q, past_kv = reason_model(inputs_embeds=embed_tokens(Q),
-                             attention_mask=q_mask,
-                             use_cache=True,
-                             output_hidden_states=True)
-q_len        = q_mask.sum(dim=-1)                              # per-row real length
-last_real_idx= (q_mask * arange_like(q_mask)).argmax(-1)       # side-agnostic
-Ĉ_0         = concept_head(h_Q[:, last_real_idx, :])          # first concept
+ position : 0 1 2 ... q-1 | q  q+1  q+2  q+3  q+4  q+5  q+6 | q+7 q+8 ... q+7+L_S-1
+ kind     : Q Q Q ...  Q  | a  a    a    a    a    a    a   |  S   S  ...    S
+ level k  : .   .  ...  . | 0  1    1    2    2    2    2   |  .   .  ...    .
+                            │  │         │
+                            │  │         └─ lvl_embed[k=2] added to all 4 approx tokens of level 2
+                            │  └────────── lvl_embed[k=1] added to both approx tokens of level 1
+                            └───────────── lvl_embed[k=0] added to single approx token of level 0
 
-# Step t = 1 .. Σ L_k - 1 — feed one concept at a time
-for t in range(1, total_slots):
-    x = back_proj(Ĉ_{t-1}) \
-        + level_embeddings(level_ids[t-1]) \
-        + position_embeddings(pos_ids[t-1])
-    out = reason_model(
-        inputs_embeds=x,
-        past_key_values=past_kv,
-        position_ids=torch.tensor([q_len + t - 1]),            # explicit RoPE id
-        use_cache=True,
-        output_hidden_states=True,
-    )
-    past_kv = out.past_key_values
-    Ĉ_t     = concept_head(out.hidden_states[-1][:, -1, :])
+            SCALE-CAUSAL 4D MASK (per row, see §4.2.3)
+
+ READOUT A (concept_head)                  READOUT B (reason_model.lm_head)
+  hidden[approx_token positions]            logits[solution-predicting positions]
+  → Ĉ_0, Ĉ_1, ..., Ĉ_{K-1}                  → reasoning_logits
+              ↘                          ↙
+              both come from ONE forward over `hidden`
 ```
 
-- **KV-cache reuse:** after priming on `Q`, every new concept costs only
-  `O(1)` transformer steps. The cache is updated in place.
-- **Explicit `position_ids = q_len + t − 1`:** required for RoPE
-  consistency; without this, the model would re-interpret step `t` as
-  position `0`, desynchronising the positional encoding.
-- **Side-agnostic length via argmax:** `last_real_idx` works for both
-  left-padded and right-padded Q batches.
+Key properties:
 
-### 4.3 ConceptPredictorParallel (Option Y: Per-Level Queries + Cross-Attention)
+- **Single LLM forward, two losses.** Concept MSE (via `concept_head`)
+  and reasoning CE (via `reason_model.lm_head`) are produced from the
+  same `hidden` / `logits` tensors. No second pass.
+- **Pre-LLM cross-attention compresses `f_hat_k` to `L_k` tokens.** The
+  LLM sees a sequence of length `L_Q + Σ L_k (+ L_S)`, independent of
+  `ctx`. This is the text-domain analog of VAR's spatial downsampling.
+- **Scale-causal visibility.** Level-`k` approximation tokens can attend
+  to `Q` plus all earlier levels (and to each other within level `k`),
+  but cannot peek at later levels or at `S`. Solution tokens see `Q` and
+  all approximation tokens, then are token-causal among themselves.
+- **Per-level identity via `lvl_embed`.** Within a level, the `L_k`
+  approximation tokens are made distinguishable by the learned
+  `level_queries[k]`; identity *across* levels is provided additively by
+  `lvl_embed[k]`. Position embeddings on individual concepts are not
+  needed because intra-level visibility is bidirectional.
+- **Teacher forcing through `f_hat`.** At training time `gt_f_hats[k]` is
+  detached from the Builder, so the predictor sees the same cumulative
+  canvas at level `k` that the Builder constructed from GT CoT, exactly
+  matching the inference protocol.
 
-> **Context.** §4.2 described the default predictor (**Option X**): a flat
-> autoregressive loop that generates one concept at a time. This section
-> describes **Option Y** (`ConceptPredictorParallel` in
-> `examples/lcp/concept_predictor_parallel.py`), an alternative predictor
-> that generates **all `L_k` concepts of a level in a single step** via
-> cross-attention. Both options share the exact same losses (§5) and are
-> interchangeable at the training-script level.
+#### 4.2.5 Inference forward pass (`_forward_inference`, K sequential passes)
 
-#### 4.3.1 Overview and Motivation
-
-##### 4.3.1.1 What Problem Does Option Y Solve?
-
-Option X generates the concept pyramid **one concept at a time** — a flat
-autoregressive loop of `Σ L_k = 63` steps for `K = 6` levels. Option Y
-introduces a **per-level parallel** architecture: all concepts within a
-single level are produced **simultaneously** via cross-attention, reducing
-the inference loop from 63 steps to just `K = 6` passes.
-
-```
-Option X (flat AR):     63 sequential LLM steps  (one concept per step)
-Option Y (per-level):    6 sequential LLM passes  (one LEVEL per pass, all L_k concepts at once)
-                         ───────────────────────
-                         10.5× fewer sequential LLM calls
-```
-
-##### 4.3.1.2 Architectural Positioning
+At test time the Builder is not used. The predictor self-maintains the
+`f_hat` canvas of fixed length `L_canvas` and runs `K` sequential packed
+passes, growing the approx-token segment by `L_k` tokens per level:
 
 ```
-                    LCP Two-Stage Pipeline
-┌────────────────────────────────────────────────────────────┐
-│ Stage 1: ConceptPyramidBuilder                               │
-│   Input: (Q, CoT, S)  →  Output: C_gt = [C_0, ..., C_{K-1}] │
-│   (frozen during Stage 2)                                    │
-└────────────────────────────────────────────────────────────┘
-                              │ detach()
-                              ▼
-┌────────────────────────────────────────────────────────────┐
-│ Stage 2: ConceptPredictor                                    │
-│                                                              │
-│   ┌────────────────────────┐  ┌─────────────────────────┐ │
-│   │ Option X: Flat AR       │  │ Option Y: Per-Level Query │ │
-│   │ (concept_predictor.py)  │  │ (concept_predictor_       │ │
-│   │                         │  │      parallel.py)         │ │
-│   │ 63 steps, 1 concept/step│  │ K steps, L_k concepts/    │ │
-│   │                         │  │     step via cross-attn   │ │
-│   └─────────────────────────┘  └──────────────────────────┘ │
-│                                                              │
-│   Both produce identical PredictorOutput                     │
-│   Both share the same losses.py                              │
-└────────────────────────────────────────────────────────────┘
+f_hat = zeros [B, L_canvas, D]
+Q_embeds = backbone.get_input_embeddings()(question_ids)   # [B, L_Q, D_enc]
+approx_token_list = []
+
+for k in 0 .. K-1:
+    # 1. Pre-LLM approximation-token construction from current f_hat
+    approx_tokens_k, attn_w = _construct_approx_tokens(k, f_hat)
+    #     approx_tokens_k: [B, L_k, D_enc]
+    #     attn_w:          [B, L_k, L_canvas]
+    approx_token_list.append(approx_tokens_k)
+    approx_tokens_0k = cat(approx_token_list, dim=1)        # [B, Σ_{j≤k} L_j, D_enc]
+
+    # 2. Pack [real_Q | approx_tokens_0..k | tail_pad] (no S region)
+    pack = pack_qcs_sequences(Q_embeds, q_mask,
+                              approx_tokens_0k, None, None)
+    attn_4d = _build_scale_causal_mask_packed(
+        q_len=pack.q_len, s_len=pack.s_len,
+        level_lengths=level_lengths[: k+1], T=pack.T, ...)
+
+    # 3. Single backbone forward; gather hidden at level-k approx positions
+    hidden = backbone(inputs_embeds=pack.packed_embeds,
+                      attention_mask=attn_4d,
+                      output_hidden_states=True).hidden_states[-1]
+    prev   = sum(level_lengths[:k])
+    cols   = pack.q_len[:, None] + prev + arange(L_k)
+    Ĉ_k   = concept_head(hidden[rows, cols])                # [B, L_k, D]
+    predicted_concepts.append(Ĉ_k)
+
+    # 4. Reconstruction: lift attention weights from queries onto canvas
+    R_k    = bmm(attn_w.transpose(1,2), Ĉ_k)                # [B, L_canvas, D]
+    f_hat += R_k
 ```
 
-##### 4.3.1.3 Key Notation
+This is the predictor-side analogue of the Builder's
+`f_hat = Σ_{j<k} A_j^T @ C_j`: at inference the contribution of level `k`
+to the canvas is `R_k = α_k^T @ Ĉ_k`, where `α_k` are the cross-attention
+weights produced by `_construct_approx_tokens(k, f_hat)`.
 
-Inherited from §1 of this document; summarised here for convenience:
+Key properties:
 
-| Symbol      | Meaning                              | Default Value       |
-|-------------|--------------------------------------|---------------------|
-| **K**       | Number of pyramid levels             | 6                   |
-| **L_k**     | Concepts at level k                  | 2^k (1,2,4,8,16,32) |
-| **D**       | Concept space dimension              | 896                 |
-| **D_enc**   | Encoder / LLM hidden dimension       | 896                 |
-| **B**       | Batch size                           | 4                   |
-| **L_Q**     | Question token count                 | 40                  |
-| **total_C** | Total number of concepts: Σ L_k      | 63                  |
-| **C_k**     | All concepts at level k: [B, L_k, D] |                     |
-| **Ĉ_k**     | Predicted concepts at level k        |                     |
+- **Fixed-length canvas.** `f_hat` always has shape `[B, L_canvas, D]`;
+  only its content evolves as more levels are predicted.
+- **No KV cache.** Because `f_hat` (and therefore the approximation
+  tokens for previously processed levels) changes between passes, the
+  packed sequence is fully recomputed at each pass.
+- **Same scale-causal mask as training.** Each pass uses
+  `_build_scale_causal_mask_packed` over the partial layout
+  `[real_Q | approx_tokens_0..k]`, ensuring the model never attends to
+  levels it has not yet predicted.
+- **Self-consistent with training.** The same `_construct_approx_tokens`
+  module that produced approx tokens from GT `f_hat_k` during training
+  is reused at inference — no module is trained-only or inference-only.
 
-#### 4.3.2 Core Idea: Two-Stage Internal Architecture
+#### 4.2.6 Solution generation (`generate_solution`)
 
-Option Y separates the forward pass into two internal stages **within a
-single model**:
-
-```
-┌───────────────────────────────────────────────────────────────────┐
-│  INTERNAL Stage 1: Content Backbone (LLM)                           │
-│                                                                     │
-│  Purpose: Contextualise ALL input content into rich hidden states   │
-│  Input:   [Q_embeds, back_decode(C_0..C_{K-1}) + level_emb + pos_emb] │
-│  Output:  Hidden states H [B, L_Q + 63, D_enc]                      │
-│                                                                     │
-│  ✓ Real content only (question tokens + concept embeddings)         │
-│  ✗ NO learnable queries in the LLM sequence                         │
-└────────────────────────────────┬─────────────────────────────────────┘
-                               │ H (LLM hidden states)
-                               ▼
-┌───────────────────────────────────────────────────────────────────┐
-│  INTERNAL Stage 2: Per-Level Cross-Attention Head                    │
-│                                                                     │
-│  Purpose: EXTRACT predictions for each level from H                 │
-│  Mechanism: Learnable level_queries[k] cross-attend to H prefix     │
-│  Output:  Ĉ_k for each k ∈ [0, K)                                   │
-│                                                                     │
-│  ✓ All K levels run in PARALLEL (no sequential dependency)          │
-│  ✓ Each level sees only Q + levels < k (information consistency)    │
-└───────────────────────────────────────────────────────────────────┘
-```
-
-**Fundamental principle.** Learnable parameters (queries) and real content
-(Q tokens, concept embeddings) **never share the same LLM input sequence**.
-The LLM processes only content; the queries live in a separate
-cross-attention head.
-
-#### 4.3.3 Architectural Symmetry with the Builder
-
-Option Y mirrors the Builder's design philosophy (§4.1):
+After `_forward_inference` produces `predicted_concepts`, free
+autoregressive solution generation is delegated to `reason_model.generate`
+over a packed `[real_Q | back_proj(Σ Ĉ) ]` prefix:
 
 ```
-    Builder (Stage 1)                     Predictor Option Y (Stage 2)
-    ─────────────────                     ────────────────────────────
-
-    encoder(CoT)                          reason_model([Q, back_decode(C_<k)])
-         │                                           │
-         ▼                                           ▼
-    H_CoT [B, L, D_enc]                  H [B, prefix_len_k, D_enc]
-         │                                           │
-    concept_queries[k] @ H_CoT           level_queries[k] @ H_prefix_k
-         │                                           │
-         ▼                                           ▼
-    C_k [B, L_k, D]                      Ĉ_k [B, L_k, D]
-    (concept space)                       (concept space)
+concepts_flat   = cat(predicted_concepts, dim=1)              # [B, Σ L_k, D]
+concept_embeds  = back_proj(concepts_flat)                    # [B, Σ L_k, D_enc]
+pack            = pack_qcs_sequences(Q_embeds, q_mask,
+                                     concept_embeds, None, None)
+generated_ids   = reason_model.generate(
+    inputs_embeds=pack.packed_embeds,
+    attention_mask=pack.packed_mask,
+    max_new_tokens=max_new_tokens,
+    eos_token_id=tokenizer.eos_token_id,
+    pad_token_id=tokenizer.pad_token_id,
+    do_sample=False)
+new_ids         = generated_ids[:, pack.packed_embeds.shape[1] :]
+return tokenizer.batch_decode(new_ids, skip_special_tokens=True)
 ```
 
-Both use **learnable queries** to extract per-level outputs via attention.
-The Builder attends over CoT hidden states; the Predictor attends over LLM
-hidden states of `[Q + previous levels]`.
+Note that `generate_solution` re-uses the **predicted concepts as raw
+back-projected embeddings** (no `_construct_approx_tokens`, no `lvl_embed`
+added). This is purely a reasoning prefix for `.generate` and does not
+feed back into the concept-prediction loop.
 
-#### 4.3.4 Detailed Component Analysis
-
-##### 4.3.4.1 Component Table
-
-| Component             | Shape                                | Role                                                         |
-|-----------------------|--------------------------------------|--------------------------------------------------------------|
-| `reason_model`        | HuggingFace causal LM                | Content backbone; produces hidden states H                   |
-| `back_proj`           | Linear(D → D_enc)                    | Lifts concept-space to encoder-space for LLM input           |
-| `level_embeddings`    | Embedding(K, D_enc)                  | Level embedding for index k (k = 0..5)                       |
-| `position_embeddings` | Embedding(max(L_k), D_enc)           | Within-level position embedding for index j (j = 0..L_k-1)   |
-| **`level_queries`**   | **ParameterList of K: [L_k, D_enc]** | **Core of Option Y — learnable queries for cross-attention** |
-| `query_norm`          | LayerNorm(D_enc)                     | Pre-norm on query side of cross-attention                    |
-| `context_norm`        | LayerNorm(D_enc)                     | Pre-norm on context (KV) side of cross-attention             |
-| `cross_attn`          | MultiheadAttention(D_enc, 8 heads)   | Shared cross-attention module across all levels              |
-| `post_norm`           | LayerNorm(D_enc)                     | Post-norm after attention + residual                         |
-| `concept_head`        | Linear → GELU → Linear (D_enc → D)   | Projects attention output to concept space                   |
-
-##### 4.3.4.2 Level Queries — The Core Innovation
+#### 4.2.7 Initialisation (`_init_weights`) and trainable parameters
 
 ```
-level_queries[k] ∈ ℝ^{L_k × D_enc}
-
-    level_queries[0] : [ 1, 896]    ← 1 learnable vector
-    level_queries[1] : [ 2, 896]    ← 2 learnable vectors
-    level_queries[2] : [ 4, 896]    ← 4 learnable vectors
-    level_queries[3] : [ 8, 896]    ← 8 learnable vectors
-    level_queries[4] : [16, 896]    ← 16 learnable vectors
-    level_queries[5] : [32, 896]    ← 32 learnable vectors
-    ─────────────────────────────
-    Total: 63 × 896 ≈ 56,448 parameters
+level_queries      : N(0, 0.02)               # one per level, [L_k, D_enc]
+lvl_embed.weight   : N(0, 0.02)               # [K, D_enc]
+back_proj.weight   : Xavier uniform           # [D_enc, D]
+concept_head       : Xavier uniform on each Linear, zeros on bias
+extract_attn       : PyTorch defaults
+reason_model base  : FROZEN
+reason_model LoRA  : trainable (when configured via predictor_cfg.lora)
 ```
 
-Each `level_queries[k]` learns "what information to extract" from the LLM's
-context for level `k`. They function like **DETR-style object queries** —
-each query vector "asks" for a specific concept from the contextualised
-hidden states.
-
-##### 4.3.4.3 Cumulative Lengths and Context Windows
-
-```python
-cum_lengths = [0, 1, 3, 7, 15, 31, 63]
-
-# For level k, the context prefix includes Q + all concepts from levels < k:
-prefix_len_k = L_Q + cum_lengths[k]
-```
-
-| Level k | cum_lengths[k] | prefix_len_k | Context includes           |
-|---------|----------------|--------------|----------------------------|
-| 0       | 0              | 40           | Q only                     |
-| 1       | 1              | 41           | Q + C_0 (1 concept)        |
-| 2       | 3              | 43           | Q + C_0 + C_1 (3 concepts) |
-| 3       | 7              | 47           | Q + C_0..C_2 (7 concepts)  |
-| 4       | 15             | 55           | Q + C_0..C_3 (15 concepts) |
-| 5       | 31             | 71           | Q + C_0..C_4 (31 concepts) |
-
-**Critical.** Level k's context **excludes** level k itself — the
-prediction must not see its own ground-truth.
-
-#### 4.3.5 Training Forward Pass
-
-##### 4.3.5.1 High-Level Pipeline
-
-```
-═══════════════════════════════════════════════════════════════════════════
-TRAINING: Single LLM Pass + K Parallel Cross-Attentions
-═══════════════════════════════════════════════════════════════════════════
-
-Input: question_ids [B, L_Q], gt_concepts = [C_0, ..., C_{K-1}]
-
-┌────────────── Internal Stage 1: Content Backbone ──────────────────┐
-│                                                                     │
-│  Step 1: Prepare concept embeddings                                 │
-│     concepts_flat = torch.cat(gt_concepts, dim=1)  → [B, 63, D]     │
-│     concept_embeds = back_proj(concepts_flat)       → [B, 63, D_enc]│
-│     concept_embeds += level_embeddings(level_ids)                   │
-│     concept_embeds += position_embeddings(pos_ids)                  │
-│                                                                     │
-│  Step 2: Prepare question embeddings                                │
-│     Q_embeds = embed_tokens(question_ids)           → [B, 40, D_enc]│
-│                                                                     │
-│  Step 3: Concatenate and run LLM                                    │
-│     inputs_embeds = cat([Q_embeds, concept_embeds]) → [B,103,D_enc] │
-│     H = reason_model(inputs_embeds)                 → [B,103,D_enc] │
-│                                                                     │
-└─────────────────────────────┬─────────────────────────────────────┘
-                               │
-┌─────────────────────────────▼─────────────────────────────────────┐
-│  Internal Stage 2: Per-Level Cross-Attention (PARALLEL)             │
-│                                                                     │
-│  for k = 0, 1, 2, 3, 4, 5:                                          │
-│      prefix_end = L_Q + cum_lengths[k]                              │
-│      context_k  = H[:, :prefix_end, :]    (truncated hidden prefix) │
-│      Ĉ_k        = _extract_level(k, context_k)                     │
-│                                                                     │
-│  Result:                                                            │
-│      Ĉ_0 [B,  1, D]  from context [B, 40, D_enc]                   │
-│      Ĉ_1 [B,  2, D]  from context [B, 41, D_enc]                   │
-│      Ĉ_2 [B,  4, D]  from context [B, 43, D_enc]                   │
-│      Ĉ_3 [B,  8, D]  from context [B, 47, D_enc]                   │
-│      Ĉ_4 [B, 16, D]  from context [B, 55, D_enc]                   │
-│      Ĉ_5 [B, 32, D]  from context [B, 71, D_enc]                   │
-│                                                                     │
-└────────────────────────────────────────────────────────────────────┘
-```
-
-##### 4.3.5.2 Concrete Numerical Example
-
-Let `B = 4`, `L_Q = 40`, `K = 6`, `level_lengths = [1, 2, 4, 8, 16, 32]`,
-`D = D_enc = 896`.
-
-```
-1. gt_concepts input:
-     C_0: [4,  1, 896]
-     C_1: [4,  2, 896]
-     C_2: [4,  4, 896]
-     C_3: [4,  8, 896]
-     C_4: [4, 16, 896]
-     C_5: [4, 32, 896]
-
-2. concepts_flat = cat(gt_concepts, dim=1):  [4, 63, 896]
-
-3. back_proj(concepts_flat):                  [4, 63, 896]
-   (D = D_enc = 896, so this is a learned rotation, not a dim change)
-
-4. Level and position embeddings added:
-     level_ids_flat = [0, 1,1, 2,2,2,2, 3×8, 4×16, 5×32]
-     pos_ids_flat   = [0, 0,1, 0,1,2,3, 0..7, 0..15, 0..31]
-
-     concept_embeds += level_embeddings(level_ids_flat)
-     concept_embeds += position_embeddings(pos_ids_flat)
-
-5. Q_embeds = embed_tokens(question_ids):     [4, 40, 896]
-
-6. inputs_embeds = cat([Q, concepts]):         [4, 103, 896]
-                                                    ↑
-                                              40 + 63 = 103
-
-7. H = reason_model.backbone(inputs_embeds):   [4, 103, 896]
-   (causal attention: each position sees only previous positions)
-
-8. Cross-attention extraction (per level):
-     k=0: context = H[:, :40, :]   → [4, 40, 896]
-           level_queries[0] [1, 896] → expand → [4, 1, 896]
-           Ĉ_0 = extract(0, context) → [4, 1, 896]
-
-     k=1: context = H[:, :41, :]   → [4, 41, 896]
-           level_queries[1] [2, 896] → expand → [4, 2, 896]
-           Ĉ_1 = extract(1, context) → [4, 2, 896]
-
-     ... (k=2..5 analogous)
-```
-
-##### 4.3.5.3 Why Training is "Parallel" at Stage 2
-
-After the single LLM pass produces `H`, **all K cross-attentions are
-independent** — they share no state with each other. Level 3's
-cross-attention does not depend on level 2's output. They each simply read
-a different slice of the **same** `H` tensor:
-
-```
-H = [||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||||]
-     ↑                                      ↑                                                            ↑
-     position 0                        position 40                                               position 102
-     (first Q token)                   (first concept position)                              (last concept position)
-
-Level 0 reads: H[:, 0:40, :]                    ← Q only
-Level 1 reads: H[:, 0:41, :]                    ← Q + 1 concept position
-Level 2 reads: H[:, 0:43, :]                    ← Q + 3 concept positions
-Level 3 reads: H[:, 0:47, :]                    ← Q + 7 concept positions
-Level 4 reads: H[:, 0:55, :]                    ← Q + 15 concept positions
-Level 5 reads: H[:, 0:71, :]                    ← Q + 31 concept positions
-
-All are READ-ONLY slices of H. No write dependency between levels.
-→ Can be computed in parallel (or in any order).
-```
-
-#### 4.3.6 The Cross-Attention Mechanism (`_extract_level`)
-
-##### 4.3.6.1 Full Data Flow
-
-For level `k = 3` (`L_k = 8`, `prefix_len = 47`, `D_enc = 896`, `B = 4`,
-`num_heads = 8`):
-
-```
-┌──────────────────────────────────────────────────────────────┐
-│  _extract_level(level_idx=3, context=[4, 47, 896])              │
-│                                                                 │
-│  1. Expand queries:                                             │
-│     queries = level_queries[3]              [8, 896]            │
-│     queries = queries.unsqueeze(0).expand() [4, 8, 896]         │
-│                                                                 │
-│  2. Pre-LayerNorm (stabilises training):                        │
-│     q_normed = query_norm(queries)          [4, 8, 896]         │
-│     c_normed = context_norm(context)        [4, 47, 896]        │
-│                                                                 │
-│  3. Multi-head cross-attention:                                 │
-│     attn_out = cross_attn(                                      │
-│         query=q_normed,     # Q: [4, 8, 896]                    │
-│         key=c_normed,       # K: [4, 47, 896]                   │
-│         value=c_normed      # V: [4, 47, 896]                   │
-│     )                       → attn_out: [4, 8, 896]             │
-│                                                                 │
-│     Internal to cross_attn (8 heads, d_head=112):               │
-│       per-head Q: [4, 8, 8, 112]                                │
-│       per-head K: [4, 8, 47, 112]                               │
-│       scores:     [4, 8, 8, 47]  = Q @ K^T / √112               │
-│       probs:      [4, 8, 8, 47]  = softmax(scores)              │
-│       per-head V: [4, 8, 47, 112]                               │
-│       raw_out:    [4, 8, 8, 112] = probs @ V                    │
-│       concat:     [4, 8, 896]    = reshape + out_proj           │
-│                                                                 │
-│  4. Residual connection:                                        │
-│     out = attn_out + queries  (NOT normed queries)  [4, 8, 896] │
-│                                                                 │
-│  5. Post-LayerNorm:                                             │
-│     out = post_norm(out)                            [4, 8, 896] │
-│                                                                 │
-│  6. Concept head (MLP):                                         │
-│     out = Linear(896→896) → GELU → Linear(896→896) [4, 8, 896] │
-│     = Ĉ_3                                                       │
-│                                                                 │
-└──────────────────────────────────────────────────────────────┘
-```
-
-##### 4.3.6.2 Visual: What the Cross-Attention "Sees"
-
-```
-For level k=3, each of the 8 query vectors attends over 47 context positions:
-
-        Query 0  Query 1  Query 2  ...  Query 7      (8 learnable queries)
-           │        │        │              │
-           ▼        ▼        ▼              ▼
-    ┌──────────────────────────────────────────────┐
-    │   Context positions 0..46                    │
-    │                                              │
-    │   [Q_0, Q_1, ..., Q_39, C_{0,0}, C_{1,0},    │
-    │    C_{1,1}, C_{2,0}, C_{2,1}, C_{2,2},       │
-    │    C_{2,3}]                                   │
-    │                                              │
-    │   = 40 Q tokens + 7 concept positions        │
-    │     (C_0: 1 concept, C_1: 2, C_2: 4)         │
-    └───────────────────────────────────────────────┘
-           │        │        │              │
-           ▼        ▼        ▼              ▼
-    attn_out_0  attn_out_1  attn_out_2 ... attn_out_7
-
-    Each attn_out_i = weighted sum of context positions
-    Weights = softmax(query_i @ context / √d_head)
-
-    NO causal mask on cross-attention — queries see ALL context positions.
-    (The causal restriction is already in the LLM's own processing of H.)
-```
-
-##### 4.3.6.3 Why the Residual Add (`attn_out + queries`)
-
-```
-out = post_norm(attn_out + queries)    ← residual on RAW queries (not normed)
-
-Purpose: If the cross-attention head is near-zero at initialisation
-(common with random init), the residual ensures the concept_head still
-receives a meaningful signal from the learnable queries themselves.
-
-Without residual:  concept_head(≈ 0) → degenerate Ĉ_k at init
-With residual:     concept_head(queries) → non-zero, query-seeded Ĉ_k at init
-
-This stabilises early training — the model can always produce a baseline
-prediction from its queries, then gradually improve by attending to context.
-```
-
-#### 4.3.7 Inference Forward Pass — K Sequential Passes
-
-##### 4.3.7.1 Why Inference Cannot Be Fully Parallel
-
-During **training**, `gt_concepts` are available (teacher forcing), so the
-LLM processes all 63 concept positions in one pass. During **inference**,
-we do not have `gt_concepts` — we must generate them level-by-level,
-feeding each level's prediction as input for the next LLM pass.
-
-```
-Training:  gt available → 1 LLM pass + K parallel cross-attentions
-Inference: no gt        → K LLM passes (growing KV cache) + K cross-attentions
-```
-
-##### 4.3.7.2 Full Inference Flow Diagram
-
-```
-═══════════════════════════════════════════════════════════════════════════
-INFERENCE: K=6 Sequential LLM Passes with KV Cache
-═══════════════════════════════════════════════════════════════════════════
-
-Pass 0 (prime with Q):
-    ┌───────────────────────────────────────────────────────────┐
-    │ x = embed_tokens(Q)                    [4, 40, 896]      │
-    │ out = LLM(x, use_cache=True)                             │
-    │ pkv = out.past_key_values              (KV cache: 40 pos) │
-    │ context = out.last_hidden_state        [4, 40, 896]      │
-    │                                                          │
-    │ Ĉ_0 = _extract_level(0, context)      [4,  1, 896]      │
-    └───────────────────────────────────────────────────────────┘
-         │ Ĉ_0
-
-Pass 1 (feed Ĉ_0, predict level 1):
-    ┌───────────────────────────────────────────────────────────┐
-    │ x = back_proj(Ĉ_0) + lvl_emb(0) + pos_emb(0) [4, 1, 896] │
-    │ out = LLM(x, past_key_values=pkv)                        │
-    │ pkv updated                            (KV cache: 41 pos) │
-    │ context = cat(context, out.hidden)     [4, 41, 896]      │
-    │                                                          │
-    │ Ĉ_1 = _extract_level(1, context)      [4,  2, 896]      │
-    └───────────────────────────────────────────────────────────┘
-         │ Ĉ_1
-
-Pass 2 (feed Ĉ_1 = 2 positions, predict level 2):
-    ┌───────────────────────────────────────────────────────────┐
-    │ x = back_proj(Ĉ_1) + level_emb + pos_emb  [4, 2, 896]    │
-    │ out = LLM(x, past_key_values=pkv)                        │
-    │ pkv updated                            (KV cache: 43 pos) │
-    │ context = cat(context, out.hidden)     [4, 43, 896]      │
-    │                                                          │
-    │ Ĉ_2 = _extract_level(2, context)      [4,  4, 896]      │
-    └───────────────────────────────────────────────────────────┘
-         │ Ĉ_2
-
-Pass 3 (feed Ĉ_2 = 4 positions, predict level 3):
-    ┌───────────────────────────────────────────────────────────┐
-    │ x = back_proj(Ĉ_2) + level_emb + pos_emb  [4, 4, 896]    │
-    │ out = LLM(x, past_key_values=pkv)                        │
-    │ pkv updated                            (KV cache: 47 pos) │
-    │ context = cat(context, out.hidden)     [4, 47, 896]      │
-    │                                                          │
-    │ Ĉ_3 = _extract_level(3, context)      [4,  8, 896]      │
-    └───────────────────────────────────────────────────────────┘
-
-Pass 4 (feed Ĉ_3 = 8 positions):   context → [4, 55, 896],  Ĉ_4 [4, 16, 896]
-Pass 5 (feed Ĉ_4 = 16 positions):  context → [4, 71, 896],  Ĉ_5 [4, 32, 896]
-```
-
-##### 4.3.7.3 KV Cache Growth Table
-
-| Pass | New tokens fed to LLM | Cumulative KV cache | Cross-attn context size | Output       |
-|------|-----------------------|---------------------|-------------------------|--------------|
-| 0    | 40 (Q)                | 40                  | [B, 40, 896]            | Ĉ_0 [B,1,D]  |
-| 1    | 1 (Ĉ_0)               | 41                  | [B, 41, 896]            | Ĉ_1 [B,2,D]  |
-| 2    | 2 (Ĉ_1)               | 43                  | [B, 43, 896]            | Ĉ_2 [B,4,D]  |
-| 3    | 4 (Ĉ_2)               | 47                  | [B, 47, 896]            | Ĉ_3 [B,8,D]  |
-| 4    | 8 (Ĉ_3)               | 55                  | [B, 55, 896]            | Ĉ_4 [B,16,D] |
-| 5    | 16 (Ĉ_4)              | 71                  | [B, 71, 896]            | Ĉ_5 [B,32,D] |
-
-Total tokens processed: `40 + 1 + 2 + 4 + 8 + 16 = 71` (not `40 + 63 = 103`,
-because `Ĉ_5` is never fed back).
-
-##### 4.3.7.4 State Variables Across Passes
-
-Three pieces of state are maintained across passes:
-
-```
-pkv (past_key_values):
-    The LLM's KV cache. Grows by L_{k-1} entries per pass.
-    Used by the LLM for self-attention over all previously processed positions.
-
-running_mask:
-    Attention mask covering all positions in the cache.
-    Extended by L_{k-1} ones per pass.
-    Shape: [B, cumulative_positions]
-
-context:
-    Running concatenation of LLM hidden states.
-    Used ONLY by the cross-attention head (NOT by the LLM, which uses its own KV cache).
-    Shape: [B, cumulative_positions, D_enc]
-
-    IMPORTANT: The LLM never reads `context` — it uses pkv.
-    The cross-attention head never reads pkv — it uses `context`.
-    Two separate state streams for two separate purposes.
-```
-
-#### 4.3.8 Comparison: Option X vs Option Y
-
-##### 4.3.8.1 Architecture Comparison
-
-```
-┌──────────────────────────────────────────────────────────────────────────┐
-│  Option X (Flat AR)                                                    │
-│                                                                        │
-│  Training:                                                             │
-│    [Q; C_0; C_1,0; C_1,1; ...; C_5,31; S]  ← packed into ONE sequence │
-│    ONE backbone pass → concept_head at each concept position           │
-│    Causal mask naturally enforces inter/intra-level dependencies       │
-│                                                                        │
-│  Inference:                                                            │
-│    Step 0: LLM(Q)         → Ĉ_{0,0}                                   │
-│    Step 1: LLM(Ĉ_{0,0})  → Ĉ_{1,0}                                   │
-│    Step 2: LLM(Ĉ_{1,0})  → Ĉ_{1,1}                                   │
-│    ...                                                                 │
-│    Step 62: LLM(Ĉ_{5,30})→ Ĉ_{5,31}                                  │
-│                                                                        │
-│    Total: 63 sequential LLM forward calls (1 concept per call)         │
-└──────────────────────────────────────────────────────────────────────────┘
-
-┌──────────────────────────────────────────────────────────────────────────┐
-│  Option Y (Per-Level Parallel)                                         │
-│                                                                        │
-│  Training:                                                             │
-│    [Q; back_decode(all C) + level_emb + pos_emb]  ← content backbone │
-│    ONE backbone pass → K parallel cross-attentions                     │
-│                                                                        │
-│  Inference:                                                            │
-│    Pass 0: LLM(Q)         → cross_attn → Ĉ_0 (1 concept)              │
-│    Pass 1: LLM(Ĉ_0)      → cross_attn → Ĉ_1 (2 concepts at once)     │
-│    Pass 2: LLM(Ĉ_1)      → cross_attn → Ĉ_2 (4 concepts at once)     │
-│    ...                                                                 │
-│    Pass 5: LLM(Ĉ_4)      → cross_attn → Ĉ_5 (32 concepts at once)    │
-│                                                                        │
-│    Total: 6 sequential LLM forward calls (1 level per call)            │
-└──────────────────────────────────────────────────────────────────────────┘
-```
-
-##### 4.3.8.2 Detailed Comparison Table
-
-| Aspect                      | Option X (Flat AR)                   | Option Y (Per-Level Parallel)       |
-|-----------------------------|--------------------------------------|-------------------------------------|
-| **Inference steps**         | Σ L_k = 63                           | K = 6                               |
-| **Intra-level dependency**  | Sequential (C_{k,j} depends on j-1)  | None (all L_k concepts in parallel) |
-| **Inter-level dependency**  | Inherent via sequence order          | Explicit via context window cutoff  |
-| **Learnable queries**       | None (backbone hidden → head)        | level_queries[k]: [L_k, D_enc]      |
-| **Extra parameters**        | ~0 (just concept_head)               | ~56k (queries) + cross_attn weights |
-| **Training architecture**   | Pure causal LM                       | Causal LM + cross-attention head    |
-| **Concept differentiation** | Position in sequence + level/pos emb | Separate query identity             |
-| **VAR analogy**             | Token-level AR                       | Scale-level AR (like VAR itself!)   |
-
-##### 4.3.8.3 The VAR Alignment Insight
-
-```
-VAR Generation Process:
-    Scale 1×1:  generate 1 token     (1 step)
-    Scale 2×2:  generate 4 tokens    (1 step, parallel)
-    Scale 4×4:  generate 16 tokens   (1 step, parallel)
-    ...
-    Scale 32×32: generate 1024 tokens (1 step, parallel)
-    → K steps total, each step generates all tokens at one scale simultaneously
-
-Option Y Generation Process:
-    Level 0:  generate 1 concept     (1 LLM pass + 1 cross-attn)
-    Level 1:  generate 2 concepts    (1 LLM pass + 1 cross-attn, parallel)
-    Level 2:  generate 4 concepts    (1 LLM pass + 1 cross-attn, parallel)
-    ...
-    Level 5:  generate 32 concepts   (1 LLM pass + 1 cross-attn, parallel)
-    → K passes total, each pass generates all concepts at one level simultaneously
-
-Option Y IS the direct textual analog of VAR's scale-by-scale generation!
-```
-
-#### 4.3.9 Why Per-Level Parallelism Works
-
-##### 4.3.9.1 Information Independence Within a Level
-
-From §2.3 of this document:
-
-> The builder must be purely residual — each level only sees the current
-> residual `H_rest_k`, with NO conditioning on previous levels' concepts.
-
-This means concepts within the same level are extracted from the **same**
-residual `H_rest_k`, with no cross-dependency among them. They are
-independent projections of the same source:
-
-```
-C_{k,0} = level_proj(A_{k,0} @ H_rest_k)
-C_{k,1} = level_proj(A_{k,1} @ H_rest_k)
-...
-C_{k,L_k-1} = level_proj(A_{k,L_k-1} @ H_rest_k)
-
-These are L_k INDEPENDENT readouts from the same tensor.
-→ No inherent sequential dependency among them.
-→ A model that predicts all L_k simultaneously is architecturally valid.
-```
-
-##### 4.3.9.2 Cross-Attention as a Multi-Query Soft Readout
-
-The cross-attention mechanism naturally handles multiple simultaneous
-predictions:
-
-```
-For level k with L_k queries:
-
-    scores[i, j] = query_i @ context_j / √d      for all (i, j)
-    probs[i, :]  = softmax(scores[i, :])          per query, over context
-    out[i]       = Σ_j probs[i, j] × context[j]   per query, weighted sum
-
-Each of the L_k queries independently computes its own attention weights
-over the shared context. No query "steals" from another — they all see the
-same context, but learn to attend to different parts of it.
-
-This is exactly how DETR's object queries work:
-    - 100 queries, each detects one object independently
-    - All attend to the same image features
-    - Hungarian matching assigns GT to queries
-
-Our setting:
-    - L_k queries, each predicts one concept independently
-    - All attend to the same LLM hidden prefix
-    - Position correspondence assigns GT to queries (by index order)
-```
-
-##### 4.3.9.3 What Option Y Loses vs Option X
-
-Option X's flat AR generates `C_{k,j}` conditioned on `C_{k,j-1}`
-(intra-level autoregression). Option Y generates all `C_{k,0..L_k-1}`
-simultaneously — they cannot condition on each other.
-
-```
-Option X intra-level dependency:
-    C_{k,0} → C_{k,1} → C_{k,2} → ... → C_{k,L_k-1}
-    (each concept sees all previous concepts at the same level)
-
-Option Y intra-level dependency:
-    C_{k,0}   C_{k,1}   C_{k,2}   ...   C_{k,L_k-1}
-    (each concept sees only Q + levels < k, NOT siblings)
-```
-
-**Is this a problem?** Likely not, because:
-
-1. The Builder's ground-truth concepts are already independently extracted
-   (no intra-level conditioning).
-2. The learnable queries provide per-index identity — `Query_0 ≠ Query_1`
-   even without seeing each other's output.
-3. The context from the LLM already contains rich representations of
-   `Q + prior levels`.
-4. VAR itself uses this exact pattern (parallel intra-scale) with great
-   success.
-
-#### 4.3.10 The Reasoning Loss Path (`_prepare_reasoning`)
-
-After concept prediction, Option Y can optionally compute reasoning CE
-loss:
-
-```
-Sequence layout for reasoning:
-    [Q_embeds | back_decode(predicted_concepts) | S_embeds]
-    [B, 40]   [B, 63]                           [B, L_S]
-    ──────────────────────────────────────────────────────
-    Total: [B, 40 + 63 + L_S, D_enc]
-
-    logits from position (40+63-1) to (40+63+L_S-1) predict solution tokens.
-
-    Gradient path:
-        predicted_concepts → back_decode → reason_model → CE loss
-        (backprop flows through the concept predictions)
-```
-
-This is identical to Option X's reasoning path — ensuring both options
-produce the same `PredictorOutput` and use the same `losses.py` code.
-
-#### 4.3.11 Worked Example: GSM8K Question
-
-##### 4.3.11.1 Setup
-
-```
-Question: "If a bag has 5 red balls and 3 blue balls, how many balls total?"
-Q tokenized: ["If", "a", "bag", "has", "5", "red", "balls", "and", "3", "blue", ...]
-L_Q = 40 tokens (after padding)
-
-Builder produces gt_concepts:
-    C_0 [1, 1, 896]:  "arithmetic addition problem"      (global theme)
-    C_1 [1, 2, 896]:  ["setup: quantities", "compute: sum"]
-    C_2 [1, 4, 896]:  ["5 red", "3 blue", "addition op", "result 8"]
-    C_3 [1, 8, 896]:  (finer decomposition...)
-    C_4 [1, 16, 896]: (even finer...)
-    C_5 [1, 32, 896]: (finest-grained details)
-```
-
-##### 4.3.11.2 Training Pass (Teacher-Forced)
-
-```
-1. All 63 gt concepts → back_proj + level/pos embeddings → 63 embeddings
-2. Concatenate with Q: [Q(40) | concepts(63)] = 103 positions
-3. LLM processes all 103 positions (causal mask):
-     Position 0-39:   Q context builds up
-     Position 40:     C_{0,0} sees Q
-     Position 41-42:  C_{1,0}, C_{1,1} see Q + C_0
-     Position 43-46:  C_{2,0..3} see Q + C_0 + C_1
-     ...
-
-4. Hidden H [1, 103, 896] extracted
-
-5. Level 0 cross-attention:
-     level_queries[0] (1 vector) attends to H[:, :40, :] (Q only)
-     → Ĉ_0 should predict "arithmetic addition problem"
-
-6. Level 2 cross-attention:
-     level_queries[2] (4 vectors) attends to H[:, :43, :] (Q + C_0 + C_1)
-     Query 0 learns to extract: "5 red"
-     Query 1 learns to extract: "3 blue"
-     Query 2 learns to extract: "addition op"
-     Query 3 learns to extract: "result 8"
-```
-
-##### 4.3.11.3 Inference Pass (No GT)
-
-```
-Pass 0: LLM processes Q (40 tokens)
-    → context [1, 40, 896]
-    → Ĉ_0 = cross_attn(level_queries[0], context)
-    → Ĉ_0 ≈ "arithmetic addition" [1, 1, 896]
-
-Pass 1: Feed back_proj(Ĉ_0) + level/pos embeddings (1 new token)
-    → context grows to [1, 41, 896]
-    → Ĉ_1 = cross_attn(level_queries[1], context)
-    → Ĉ_1 ≈ ["setup", "compute"] [1, 2, 896]
-
-Pass 2: Feed back_proj(Ĉ_1) + level/pos embeddings (2 new tokens)
-    → context grows to [1, 43, 896]
-    → Ĉ_2 = cross_attn(level_queries[2], context)
-    → Ĉ_2 ≈ ["5 red", "3 blue", "add", "8"] [1, 4, 896]
-
-... (passes 3-5 analogous, producing progressively finer concepts)
-```
-
-#### 4.3.12 Implementation Details
-
-##### 4.3.12.1 Shared vs Independent Model
-
-Option Y supports the same two backbone modes as Option X (see §4.2.2):
-
-```
-SHARED (use_shared_model=True):
-    predictor.reason_model = builder.reason_model  (alias)
-    predictor.back_proj    = builder.back_proj      (alias)
-    → Only level_queries, cross_attn, concept_head, norms are new parameters
-
-INDEPENDENT (use_shared_model=False):
-    predictor.reason_model = new AutoModelForCausalLM  (own copy)
-    predictor.back_proj    = new Linear(D, D_enc)      (own copy)
-    → All parameters are independent; LoRA optional
-```
-
-##### 4.3.12.2 Weight Initialization
-
-```python
-level_queries:         N(0, 0.02)   # Small init, symmetry-breaking
-level_embeddings:      N(0, 0.02)
-position_embeddings:   N(0, 0.02)
-concept_head (Linear): Xavier uniform
-back_proj (if owned):  Xavier uniform
-cross_attn:            PyTorch default (Xavier uniform for in_proj, zeros for bias)
-```
-
-##### 4.3.12.3 Memory and Compute Comparison
-
-```
-Option X training (B=4, L_Q=40, total_C=63, K=6):
-    LLM input: [B, ~103+L_S, D_enc] (one pass, includes solution)
-    No cross-attention module
-    Extra params: concept_head only (~1.6M)
-
-Option Y training (B=4, L_Q=40, total_C=63, K=6):
-    LLM input: [B, 103, D_enc] (one pass, no solution in this path)
-    + 6 cross-attention calls (varying context sizes)
-    Extra params: concept_head + cross_attn + norms + level_queries (~5M)
-
-Option X inference:
-    63 LLM forward calls (1 token each, after initial Q pass)
-    Total KV growth: 63 positions
-
-Option Y inference:
-    5 LLM forward calls (1, 2, 4, 8, 16 tokens each, after initial Q pass)
-    Total KV growth: 31 positions (C_5 is predicted but never fed back)
-    + 6 cross-attention calls
-
-    Speedup: 63/6 ≈ 10.5× fewer LLM calls
-    (cross-attention is much cheaper than a full LLM forward)
-```
-
-#### 4.3.13 Summary
-
-##### 4.3.13.1 One-Line Summary
-
-> **Option Y replaces flat autoregressive concept generation (63 steps)
-> with per-level cross-attention readout (6 passes): the LLM contextualises
-> content only, and a separate learned query bank extracts all `L_k`
-> concepts at each level simultaneously — directly mirroring VAR's
-> scale-parallel token generation.**
-
-##### 4.3.13.2 Key Design Properties
-
-| Property                            | Mechanism                                                     |
-|-------------------------------------|---------------------------------------------------------------|
-| Intra-level parallelism             | Cross-attention with L_k independent queries                  |
-| Inter-level autoregression          | K sequential LLM passes, each feeding previous level's output |
-| Information consistency             | Context truncated to exclude level k itself                   |
-| No learnable params in LLM sequence | Queries live in separate cross-attention head                 |
-| VAR alignment                       | Scale-by-scale generation (K steps, not Σ L_k steps)          |
-| Builder symmetry                    | Both use learnable queries to extract from context            |
-| Loss compatibility                  | Identical PredictorOutput → same losses.py                    |
-| Inference efficiency                | 10.5× fewer sequential LLM calls than Option X                |
+The set of always-trainable parameters is therefore: `back_proj`,
+`level_queries`, `query_norm`, `context_norm`, `extract_attn`,
+`post_norm`, `lvl_embed`, `concept_head`, plus optional LoRA adapters on
+`reason_model`.
+
+#### 4.2.8 Summary
+
+> **The predictor compresses each level's cumulative canvas `f_hat_k`
+> into exactly `L_k` approximation tokens via a pre-LLM cross-attention
+> head, packs them into a single `[Q | approx | S]` sequence with a
+> per-row scale-causal 4D mask, runs ONE LLM forward, and reads concept
+> predictions and reasoning logits off the same hidden states. At
+> inference, the same machinery is run `K` times, each pass extending the
+> approx segment and updating a fixed-length `f_hat` canvas via
+> attention-transpose reconstruction.**
 
 ### 4.4 Why This Separation?
 
@@ -2385,18 +1691,19 @@ Note: The Predictor may also benefit from level embeddings initialized from the 
 
 VAR explicitly separates extraction (VQ-VAE) from generation (Transformer). We follow the same principle:
 
-| VAR Component                | Our Equivalent                             | Role                                            |
-|------------------------------|--------------------------------------------|-------------------------------------------------|
-| **Phase 1: VQ-VAE**          | **ConceptPyramidBuilder**                  | Extract groundtruth from full information (CoT) |
-| Encoder                      | `reason_model.embed` + encode MLP          | Encode CoT to hidden states                     |
-| Multi-scale quantizer        | Soft attention + residual                  | Extract hierarchical concepts                   |
-| Codebook                     | `concept_queries`                          | Learnable "vocabulary" of concept patterns      |
-| f_hat / f_rest               | H_hat / H_rest                             | Residual decomposition                          |
-| **Phase 2: VAR Transformer** | **ConceptPredictor**                       | Generate autoregressively from condition        |
-| Decoder-only Transformer     | `reason_model` (shared or independent LLM) | Predict next concept given previous             |
-| Scale embeddings             | `level_embeddings` + `position_embeddings` | Mark level k and within-level index j           |
-| Prediction head              | `concept_head` MLP                         | Project backbone hidden state to concept space  |
-| VAE Decoder                  | `reason_model.lm_head` reused on solution  | Decode final output tokens from concepts        |
+| VAR Component                | Our Equivalent                              | Role                                            |
+|------------------------------|---------------------------------------------|-------------------------------------------------|
+| **Phase 1: VQ-VAE**          | **ConceptPyramidBuilder**                   | Extract groundtruth from full information (CoT) |
+| Encoder                      | `reason_model.embed` + encode MLP           | Encode CoT to hidden states                     |
+| Multi-scale quantizer        | Soft attention + residual                   | Extract hierarchical concepts                   |
+| Codebook                     | `concept_queries`                           | Learnable "vocabulary" of concept patterns      |
+| f_hat / f_rest               | H_hat / H_rest                              | Residual decomposition                          |
+| **Phase 2: VAR Transformer** | **ConceptPredictor**                        | Generate autoregressively from condition        |
+| Decoder-only Transformer     | `reason_model` (own copy + LoRA)            | Single packed forward over [Q                   |
+| Scale embeddings             | `lvl_embed` (per-level identity tag)        | Marks level k for each approx token             |
+| Pre-LLM scale extraction     | `level_queries` × `extract_attn` over f_hat | L_k tokens per level via cross-attention        |
+| Prediction head              | `concept_head` MLP (D_enc → D)              | Project LLM hidden at approx positions to C_hat |
+| VAE Decoder                  | `reason_model.lm_head` reused on solution   | Decode final output tokens from concepts        |
 
 ### 7.2 Key Differences
 
@@ -2444,14 +1751,15 @@ VAR explicitly separates extraction (VQ-VAE) from generation (Transformer). We f
 
 ### 8.2 What Is Guaranteed by Construction (Predictor)
 
-| Guarantee                                             | Mechanism                                                                                 | Strength                  |
-|-------------------------------------------------------|-------------------------------------------------------------------------------------------|---------------------------|
-| Inter-level causality (level k depends on levels < k) | Packed `[Q; C; S]` sequence + backbone's native causal mask                               | **Hard** (architectural)  |
-| Intra-level concept identity (C_{k,0} ≠ C_{k,1})      | `position_embeddings` added to every concept                                              | **Hard** (architectural)  |
-| Backbone reuse without new Transformer                | `reason_model` processes concepts as `inputs_embeds`; `concept_head` is the only new head | **Hard** (architectural)  |
-| Teacher forcing alignment                             | Groundtruth `C_gt` from frozen Builder, detached                                          | **Hard** (training setup) |
-| SHARED-mode weight integrity                          | Predictor aliases Builder's `reason_model` / `back_proj`; LoRA forbidden (fail-fast)      | **Hard** (architectural)  |
-| Inference-time RoPE consistency                       | Explicit `position_ids = q_len + t − 1` passed on every AR step                           | **Hard** (architectural)  |
+| Guarantee                                              | Mechanism                                                                                                                 | Strength                  |
+|--------------------------------------------------------|---------------------------------------------------------------------------------------------------------------------------|---------------------------|
+| Scale-causal visibility (level k sees only levels j≤k) | Per-row 4D additive mask in `_build_scale_causal_mask_packed` (Q-causal, intra-level bidir, cross-level causal, S-causal) | **Hard** (architectural)  |
+| Intra-level concept identity (Ĉ_{k,0} ≠ Ĉ_{k,1})       | `level_queries[k]` are L_k distinct learnable vectors; queries cross-attend independently over f_hat_k                    | **Hard** (architectural)  |
+| Per-level identity tag                                 | `lvl_embed[k]` added to every approx token of level k after the post-norm residual                                        | **Hard** (architectural)  |
+| VAR-faithful conditioning                              | LLM only ever sees `back_proj(f_hat_k)` (cumulative canvas), never raw concept stacks                                     | **Hard** (architectural)  |
+| Teacher forcing alignment                              | `gt_f_hats` and `gt_concepts` taken from frozen Builder, detached                                                         | **Hard** (training setup) |
+| Single-pass training                                   | One packed `[real_Q                                                                                                       | approx_0..K-1             |
+| Inference fixed-canvas consistency                     | f_hat lives on `[B, L_canvas, D]` canvas; reconstruction `R_k = α_k^T @ Ĉ_k` updates the same canvas                      | **Hard** (architectural)  |
 
 ### 8.3 What Is Encouraged but Not Guaranteed
 

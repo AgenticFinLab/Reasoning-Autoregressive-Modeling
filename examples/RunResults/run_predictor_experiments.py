@@ -163,11 +163,11 @@ def estimate_predictor_memory_mb(
         lora_or_frozen = True
         backbone_trains = False
     else:
-        model_name = pred_block.get("predictor_model_name")
+        model_name = pred_block.get("model_name")
         if not model_name:
             raise ValueError(
                 f"INDEPENDENT predictor config {config_path.name} has "
-                f"predictor_model_name=null — required when "
+                f"model_name=null — required when "
                 f"use_shared_model=False."
             )
         # Frozen builder (for gt_concepts) + trainable predictor backbone.

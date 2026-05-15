@@ -74,7 +74,7 @@ sys.path.insert(0, str(PROJECT_ROOT / "examples"))
 
 from lmbase.utils.env_tools import get_device
 from lcp.concept_builder import ConceptPyramidBuilder
-from lcp.data_loader import NLCPV4DataLoader
+from lcp.data_loader import LCPDataLoader
 from lcp.eval_builder import (
     MODE_TEACHER_FORCED,
     compute_reasoning_accuracy,
@@ -424,7 +424,7 @@ def run_checkpoint_eval(config: dict) -> dict | None:
     train_cfg = config["training"]
     env_cfg = config["environment"]
 
-    eval_dataloader = NLCPV4DataLoader(
+    eval_dataloader = LCPDataLoader(
         data_cfg=eval_data_cfg,
         batch_size=train_cfg["batch_size"],
         include_solution=True,

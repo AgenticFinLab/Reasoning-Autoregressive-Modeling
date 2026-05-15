@@ -1,4 +1,4 @@
-"""NLCP V4 Concept Pyramid Builder: Groundtruth Concept Extraction.
+"""lcp Concept Pyramid Builder: Groundtruth Concept Extraction.
 
 DESIGN SOURCE:
     Based on hybrid-analysis.md: Concept Pyramid Architecture
@@ -269,6 +269,14 @@ class PyramidOutput:
         reasoning_texts: Teacher-forced decoded predictions.
             Argmax of reasoning_logits decoded via tokenizer.
             List of B strings. None if no solution provided.
+        f_hat_per_level: Per-level cumulative reconstruction snapshots.
+            List of K tensors, each [B, L, D].
+            f_hat_per_level[k] = Sigma_{j<k} R_j = reconstructed_accumulator
+            BEFORE level k is processed.
+            f_hat_per_level[0] = zeros (nothing encoded yet).
+            f_hat_per_level[k] = sum of R_0..R_{k-1}.
+            Used by the Predictor (Option Y) as teacher-forcing input
+            following the VAR f_hat principle (VAR.md Section 5.3.2).
     """
 
     concepts: List[torch.Tensor]
@@ -280,6 +288,7 @@ class PyramidOutput:
     residual_hidden: torch.Tensor
     num_levels: int
     level_lengths: List[int]
+    f_hat_per_level: Optional[List[torch.Tensor]] = None
     attention_mask: Optional[torch.Tensor] = None
     reasoning_logits: Optional[torch.Tensor] = None
     reasoning_target_ids: Optional[torch.Tensor] = None
@@ -1158,6 +1167,7 @@ class ConceptPyramidBuilder(nn.Module):
 
         all_level_concepts: List[torch.Tensor] = []
         all_level_outputs: List[LevelOutput] = []
+        f_hats: List[torch.Tensor] = []
 
         # =================================================================
         # Step 3: Extract all levels with residual decomposition
@@ -1173,6 +1183,10 @@ class ConceptPyramidBuilder(nn.Module):
         #     Each level only sees current residual f_rest, nothing else.
         for level_idx in range(self.pyramid_cfg["num_levels"]):
             # level_idx: k ∈ {0, 1, ..., K-1}
+
+            # ── Snapshot f_hat BEFORE this level (for Predictor teacher-forcing) ──
+            # f_hat_k = Σ_{j<k} R_j. At k=0 this is zeros.
+            f_hats.append(reconstructed_accumulator.clone())
 
             # ── 3a: Get learnable queries for this level ──────────────
             # PRINCIPLE (Section 1.1): L_k = 2^k learnable queries per level
@@ -1299,6 +1313,7 @@ class ConceptPyramidBuilder(nn.Module):
             residual_hidden=residual_hidden,
             num_levels=self.pyramid_cfg["num_levels"],
             level_lengths=list(self.pyramid_cfg["level_lengths"]),
+            f_hat_per_level=f_hats,
             attention_mask=attention_mask,
         )
 

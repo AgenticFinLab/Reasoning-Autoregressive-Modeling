@@ -29,7 +29,7 @@ from lcp.concept_builder import (
     LevelOutput,
     PyramidOutput,
 )
-from lcp.data_loader import NLCPV4DataLoader
+from lcp.data_loader import LCPDataLoader
 from lcp.losses import compute_builder_loss
 from lmbase.utils.env_tools import get_device
 from ram.utils import load_config
@@ -113,9 +113,9 @@ def run_pipeline(config, device):
     # ==================================================================
     # Step 2: Load Real GSM8K Data
     # ==================================================================
-    log_section("Step 2: Load GSM8K Data via NLCPV4DataLoader")
+    log_section("Step 2: Load GSM8K Data via LCPDataLoader")
 
-    dataloader = NLCPV4DataLoader(
+    dataloader = LCPDataLoader(
         data_cfg=config["data"],
         batch_size=batch_size,
         include_solution=True,

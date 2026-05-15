@@ -1,4 +1,4 @@
-"""NLCP V4: Implicit Reasoning via Hierarchical Concept Compression.
+"""lcp: Latent Concept Pyramid for Implicit Reasoning via Hierarchical Concept Compression.
 
 USAGE:
     from lcp import ConceptPyramidBuilder
@@ -25,16 +25,17 @@ DESIGN SOURCE:
 
     Inspired by: docs/VAR.md
     - VAR separates VQ-VAE (extraction) and Transformer (generation)
-    - NLCP V4 follows same principle: Builder (extraction) + Predictor (generation)
+    - lcp follows the same principle: Builder (extraction) + Predictor (generation)
 
 MODULE STRUCTURE:
-    - concept_builder: Phase 1 — ConceptPyramidBuilder (training only)
-    - concept_predictor: Phase 2 — ConceptPredictor (next-level prediction)
+    - concept_builder: Stage 1 — ConceptPyramidBuilder (training only)
+    - concept_predictor: Stage 2 — ConceptPredictor (next-level prediction)
     - losses: Loss functions (reconstruction, ordering, residual, reasoning)
     - eval_builder: Builder evaluation loop, logging, and standalone CLI
     - eval_predictor: Predictor evaluation loop, logging, and standalone CLI
-    - data_loader: DataLoader for Builder training
+    - data_loader: DataLoader for Builder/Predictor training
     - train_builder: Training script for ConceptPyramidBuilder
+    - train_predictor: Training script for ConceptPredictor
     - builder_training_analysis: Post-training analysis and visualization
 """
 
@@ -44,26 +45,24 @@ from lcp.concept_builder import (
     LevelOutput,
     PyramidOutput,
 )
-from lcp.concept_predictor import ConceptPredictor
-from lcp.concept_predictor_parallel import ConceptPredictorParallel
-from lcp.data_loader import BuilderInput, NLCPV4DataLoader
+from lcp.concept_predictor import ConceptPredictor, PredictorOutput
+from lcp.data_loader import BuilderInput, LCPDataLoader
 from lcp.eval_builder import evaluate_builder
 from lcp.eval_predictor import evaluate_predictor
 from lcp.losses import compute_builder_loss
 
 __all__ = [
-    # Concept Pyramid Builder (Phase 1: training only)
+    # Concept Pyramid Builder (Stage 1: training only)
     "ConceptPyramidBuilder",
-    # Concept Predictor (Phase 2: next-level prediction)
+    # Concept Predictor (Stage 2: next-level prediction)
     "ConceptPredictor",
-    "ConceptPredictorParallel",
     # Builder input / output dataclasses
     "BuilderInput",
     "EncoderOutput",
     "LevelOutput",
     "PyramidOutput",
     # DataLoader
-    "NLCPV4DataLoader",
+    "LCPDataLoader",
     # Evaluation / loss computation
     "compute_builder_loss",
     "evaluate_builder",

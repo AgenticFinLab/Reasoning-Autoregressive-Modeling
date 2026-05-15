@@ -101,6 +101,7 @@ to ``Path(-p).parent.parent`` when an override checkpoint is given.
 import argparse
 import logging
 import random
+import re as _re
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -108,6 +109,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+from matplotlib.patches import Patch
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -116,7 +118,7 @@ sys.path.insert(0, str(PROJECT_ROOT / "examples"))
 from lmbase.utils.env_tools import get_device
 from lcp.concept_builder import ConceptPyramidBuilder
 from lcp.concept_predictor import ConceptPredictor, PredictorOutput
-from lcp.data_loader import BuilderInput, NLCPV4DataLoader
+from lcp.data_loader import BuilderInput, LCPDataLoader
 from lcp.eval_predictor import _strip_solutions, _tokenize_qs
 from lcp.train_predictor import (
     _inherit_pyramid_from_builder,
@@ -339,8 +341,6 @@ def _locate_best_checkpoint(checkpoint_dir: Path) -> Optional[Path]:
         if matches:
             # Latest by step, falling back to lexical order.
             def _step(p: Path) -> int:
-                import re as _re
-
                 m = _re.search(r"-step(\d+)", p.name)
                 return int(m.group(1)) if m else 0
 
@@ -448,7 +448,7 @@ def collect_batch(
     data_cfg["split"] = split
 
     env_cfg = config["environment"]
-    loader = NLCPV4DataLoader(
+    loader = LCPDataLoader(
         data_cfg=data_cfg,
         batch_size=batch_size,
         include_solution=True,
@@ -745,8 +745,6 @@ def _plot_norm_drift(
     ax.set_ylabel(r"$\|C_{k,j}\|$")
     ax.set_title(f"{experiment_name}: Norm drift — predicted vs GT")
     ax.grid(True, alpha=0.3, axis="y")
-    from matplotlib.patches import Patch
-
     legend_items = [
         Patch(facecolor="tab:blue", alpha=0.55, label="predicted"),
         Patch(facecolor="tab:orange", alpha=0.55, label="ground truth"),

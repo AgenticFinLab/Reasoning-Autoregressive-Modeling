@@ -59,6 +59,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(PROJECT_ROOT / "examples"))
 
 from ram.utils import apply_storage_root, load_config, print_storage_paths
+from lcp.eval_builder import compute_reasoning_accuracy
 
 logger = logging.getLogger(__name__)
 
@@ -284,8 +285,6 @@ def _backfill_reasoning_accuracy(eval_hist: list, log_dir: Path) -> None:
         texts = texts_by_key.get(key)
         solutions = solutions_by_key.get(key)
         if texts and solutions:
-            from lcp.eval_builder import compute_reasoning_accuracy
-
             acc_result = compute_reasoning_accuracy(texts, solutions)
             r["reasoning_accuracy"] = acc_result["accuracy"]
             num_filled += 1
@@ -320,7 +319,7 @@ def run_checkpoint_eval(config: dict) -> dict | None:
     from lmbase.utils.env_tools import get_device
     from lcp.concept_builder import ConceptPyramidBuilder
     from lcp.concept_predictor import ConceptPredictor
-    from lcp.data_loader import NLCPV4DataLoader
+    from lcp.data_loader import LCPDataLoader
     from lcp.eval_predictor import evaluate_predictor
     from lcp.eval_builder import MODE_TEACHER_FORCED
 
@@ -366,7 +365,7 @@ def run_checkpoint_eval(config: dict) -> dict | None:
     train_cfg = config["training"]
     env_cfg = config["environment"]
 
-    eval_dataloader = NLCPV4DataLoader(
+    eval_dataloader = LCPDataLoader(
         data_cfg=eval_data_cfg,
         batch_size=train_cfg["batch_size"],
         include_solution=True,

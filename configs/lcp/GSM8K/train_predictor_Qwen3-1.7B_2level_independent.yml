@@ -1,0 +1,162 @@
+# =============================================================================
+# NLCP V4 Concept Predictor Training Configuration - INDEPENDENT (LoRA) variant
+# =============================================================================
+# Purpose: Train ConceptPredictor on GSM8K with Qwen/Qwen3-1.7B, K=2.
+# Variant: use_shared_model = FALSE
+#   - reason_model   : FRESH AutoModelForCausalLM.from_pretrained(...), own copy
+#                      Base frozen, LoRA adapter trainable.
+#   - back_proj      : FRESH nn.Linear(D, D_enc), trainable from scratch.
+#   - Trainable     : level_embeddings, position_embeddings, concept_head,
+#                      back_proj, reason_model LoRA.
+#
+# Pairs with: train_predictor_Qwen3-1.7B_2level_shared.yml for a direct
+# A/B comparison.  This variant has MORE capacity to adapt to the Stage-2
+# task (LoRA + own back_proj) at the cost of roughly +1x reason_model
+# memory and slower steps.
+#
+# Why INDEPENDENT can safely LoRA:
+#   This predictor owns a SEPARATE reason_model module tree.  The Builder
+#   continues to run forward through its own (Stage-1) reason_model to
+#   produce gt_concepts; the two module trees do not share parameters,
+#   so LoRA gradient updates here cannot corrupt the Builder.
+#
+# Usage:
+#   python examples/nlcpV4/train_predictor.py \
+#       -c configs/nlcpV4/GSM8K/train_predictor_Qwen3-1.7B_2level_independent.yml
+# =============================================================================
+
+# Data configuration (identical to the paired Builder config)
+# -----------------------------------------------------------------------------
+data:
+  data_name: GSM8K
+  data_path: EXPERIMENT/data/GSM8K
+  split: train
+  subset: ''
+  shuffle: true
+  drop_last: true
+
+# Environment configuration
+# -----------------------------------------------------------------------------
+environment:
+  dotenv_path: .env
+  seed: 42
+  dataloader_num_workers: 0
+  device_map:
+    model:
+      device: auto
+      priority: 1
+
+# Model configuration
+# -----------------------------------------------------------------------------
+# builder   : Stage-1 handoff.  Even in INDEPENDENT mode the Builder is
+#             needed at training time to produce gt_concepts per batch.
+#             Its weights are frozen and NOT shared with the predictor's
+#             reason_model in this variant.
+#   config_path     : builder config used to construct the Builder
+#                     module graph AND to inherit the pyramid geometry
+#                     (num_levels, level_lengths, hidden_dim, num_heads,
+#                     max_seq_len).  The predictor config itself does
+#                     NOT re-declare `model.pyramid`: the trainer reads
+#                     it from this file to avoid drift.
+#   checkpoint_path : trained Builder checkpoint.  `best_eval` is
+#                     preferred for Stage-2; fall back to `best` only
+#                     if eval was disabled in Stage 1.
+#   strict_load     : fail-fast if any Builder weight is missing.
+#
+# predictor : ConceptPredictor-specific knobs.
+#   use_shared_model      : FALSE in this variant.
+#                           => fresh reason_model + fresh back_proj.
+#                           => model_name is REQUIRED.
+#   model_name  : HF id for the predictor's own reason_model.
+#                           Same family as the Builder keeps comparison
+#                           clean; different choices (e.g. instruct vs
+#                           base) are valid ablations.
+#   num_layers  : null = keep all layers; >0 = truncate to
+#                           first N layers (unit-test helper).
+#   dropout               : Applied inside concept_head.
+# -----------------------------------------------------------------------------
+model:
+  builder:
+    config_path: configs/nlcpV4/GSM8K/AutoWeighted/train_builder_Qwen3-1.7B_2level.yml
+    checkpoint_path: EXPERIMENT/nlcpV4/builder/GSM8K_Qwen3-1.7B_2level_AutoWeighted/checkpoints/checkpoint_best_eval.pt
+    strict_load: true
+
+  predictor:
+    use_shared_model: false
+    model_name: Qwen/Qwen3-1.7B
+    num_layers: null
+    dropout: 0.0
+
+# Training configuration
+# -----------------------------------------------------------------------------
+# In INDEPENDENT mode the trainable surface area is:
+#     level_embeddings
+#     position_embeddings
+#     concept_head
+#     back_proj           (D -> D_enc linear, fresh copy)
+#     reason_model LoRA   (depends on r and target_modules)
+#
+# predictor:
+#   freeze : true  => reason_model base weights frozen (standard LoRA setup).
+#                     LoRA adapter parameters remain trainable even when
+#                     this is true (see _init_reason_model logic).
+#   lora   : LoraConfig arguments.  Must be non-null here.
+#     r              : LoRA rank.  Higher = more capacity, slower.
+#     lora_alpha     : Scaling factor.  Conventionally 2x r.
+#     target_modules : Attention projections to adapt.
+#     lora_dropout   : Dropout on LoRA paths.
+#     bias           : "none" is standard; do not change lightly.
+#
+# loss_weights:
+#   concept_loss_weight  : MSE between predicted and gt concepts.
+#   reasoning_loss_weight: Next-token CE on solution tokens, computed
+#                          in the same unified forward as concept MSE.
+# -----------------------------------------------------------------------------
+training:
+  batch_size: 4
+  num_epochs: 10
+  learning_rate: 0.0001
+  weight_decay: 0.01
+  warmup_ratio: 0.1
+  gradient_clip: 1.0
+
+  predictor:
+    freeze: true
+    lora:
+      r: 16
+      lora_alpha: 32
+      target_modules:
+        - q_proj
+        - v_proj
+      lora_dropout: 0.05
+      bias: none
+
+  loss_weights:
+    concept_loss_weight: 1.0
+    reasoning_loss_weight: 1.0
+
+# Logging configuration
+# -----------------------------------------------------------------------------
+log:
+  save_folder: EXPERIMENT/nlcpV4/predictor/GSM8K_Qwen3-1.7B_2level_independent
+  checkpoint_path: EXPERIMENT/nlcpV4/predictor/GSM8K_Qwen3-1.7B_2level_independent/checkpoints
+  log_path: EXPERIMENT/nlcpV4/predictor/GSM8K_Qwen3-1.7B_2level_independent/logs
+  log_level: INFO
+  log_step_interval: 10
+  checkpoint_step_interval: 1000
+  checkpoint_clean: true
+
+# Evaluation configuration
+# -----------------------------------------------------------------------------
+evaluation:
+  eval_step_interval: 500   # -1 = disabled
+  mode: teacher_forced  # one of: teacher_forced | free_generation | both
+  generation_max_tokens: 512      # max new tokens for free generation
+  intermediate_vector_save: 1  # 0 = skip vector dumps (e.g. pyramid.pt), 1 = save intermediate vectors
+  data:
+    data_name: GSM8K
+    data_path: EXPERIMENT/data/GSM8K
+    split: test
+    subset: ''
+    log_num_samples: 40      # samples for log_step_interval eval; (0,1] = proportion, >1 = count
+    eval_num_samples: 1.0    # samples for eval_step_interval eval; (0,1] = proportion, >1 = count

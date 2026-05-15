@@ -1,0 +1,124 @@
+# =============================================================================
+# AutoWeighted variant (EXTRAPOLATED; Qwen3-8B not in Loss_prepare.json)
+# =============================================================================
+# Reference : examples/nlcpV4/loss-weights-analysis-gsm8k.md (Part II, §8-§12)
+# Weight rule (§9.2): w_i* = min(1, c_i / L_bar_i)
+# Caps (§9.3):
+#   recon_loss_weight    = 10 / raw_recon    if raw_recon    > 10, else 1.0
+#   ordering_loss_weight =  6 / raw_ordering if raw_ordering >  6, else 1.0
+#   residual_loss_weight = 1.0  (always; c_res = +inf)
+#   reasoning_loss_weight = 1.0 (always; c_rea = +inf)
+# Extrapolated raw means (Qwen3-8B not yet measured):
+#   ordering : mu_ord(L=6) = 11.390  (per-level average, §9.6; model-invariant)
+#              w_ord = 6 / 11.390 = 0.5268  -> weighted = 6.000
+#   recon    : Qwen3-family-invariant and uncapped per §9.7
+#   residual : mu_res(L=6) = 0.825   (per-level average, §3.1)
+#   reasoning: Qwen3-family envelope (NTP-CE, §4.4)
+# After weighting:
+#   wt : recon=~7.2  ordering=6.000  residual=0.825  reasoning=~6.1
+# NOTE: Re-measure via examples/RunResults/loss_prepare.py once Qwen3-8B
+#       is included, then regenerate via examples/nlcpV4/loss_weight_compute.py
+#       (see §11.3).
+# =============================================================================
+
+# =============================================================================
+# NLCP V4 Concept Pyramid Builder Training Configuration
+# =============================================================================
+# Purpose: Train ConceptPyramidBuilder on GSM8K with Qwen/Qwen3-8B
+# Pyramid Levels: 6 (ablation study)
+# Usage:
+#   python examples/nlcpV4/train_builder.py -c configs/nlcpV4/GSM8K/AutoWeighted/train_builder_Qwen3-8B_6level.yml
+# =============================================================================
+
+# Data configuration
+# -----------------------------------------------------------------------------
+data:
+  data_name: GSM8K
+  data_path: EXPERIMENT/data/GSM8K
+  split: train
+  subset: ''
+  shuffle: true
+  drop_last: true
+
+# Environment configuration
+# -----------------------------------------------------------------------------
+environment:
+  dotenv_path: .env
+  seed: 42
+  dataloader_num_workers: 0
+  device_map:
+    model:
+      device: auto
+      priority: 1
+
+# Model configuration
+# -----------------------------------------------------------------------------
+model:
+  reason_model:
+    reason_model_name: Qwen/Qwen3-8B
+    reason_model_num_layers: -1
+    torch_dtype: float32
+    # torch_dtype: bfloat16   # DANGER: bf16 LayerNorm/softmax/MSE can NaN
+    # torch_dtype: float16    # DANGER: fp16 even more fragile than bf16
+  pyramid:
+    hidden_dim: 4096
+    # Must equal encoder hidden_size to avoid lossy projection (VAR-faithful)
+    num_heads: 8
+    num_levels: 6
+    level_lengths:
+    - 1
+    - 2
+    - 4
+    - 8
+    - 16
+    - 32
+    max_seq_len: 512
+  builder:
+    use_positional_query_init: true
+    positional_init_alpha: 0.5
+
+# Training configuration
+# -----------------------------------------------------------------------------
+training:
+  batch_size: 4
+  num_epochs: 10
+  learning_rate: 0.00005
+  weight_decay: 0.01
+  warmup_ratio: 0.1
+  gradient_clip: 1.0
+  reason_model:
+    freeze: true
+    lora: null
+  loss_weights:
+    reasoning_loss_weight: 1.0000
+    ordering_loss_weight: 0.5268
+    recon_loss_weight: 1.0000
+    ordering_margin: 1.0
+    residual_loss_weight: 1.0000
+  ordering_loss_type: margin
+
+# Logging configuration
+# -----------------------------------------------------------------------------
+log:
+  save_folder: EXPERIMENT/nlcpV4/builder/GSM8K_Qwen3-8B_6level_AutoWeighted
+  checkpoint_path: EXPERIMENT/nlcpV4/builder/GSM8K_Qwen3-8B_6level_AutoWeighted/checkpoints
+  log_path: EXPERIMENT/nlcpV4/builder/GSM8K_Qwen3-8B_6level_AutoWeighted/logs
+  log_level: INFO
+  log_step_interval: 10
+  checkpoint_step_interval: 1000
+  checkpoint_clean: true
+
+# Evaluation configuration
+# -----------------------------------------------------------------------------
+evaluation:
+  eval_step_interval: 500   # -1 = disabled
+  mode: teacher_forced  # one of: teacher_forced | free_generation | both
+  generation_max_tokens: 512      # max new tokens for free generation
+  intermediate_vector_save: 1  # 0 = skip vector dumps (e.g. pyramid.pt), 1 = save intermediate vectors
+  data:
+    data_name: GSM8K
+    data_path: EXPERIMENT/data/GSM8K
+    split: test
+    subset: ''
+    log_num_samples: 40      # samples for log_step_interval eval; (0,1] = proportion, >1 = count
+    eval_num_samples: 1.0    # samples for eval_step_interval eval; (0,1] = proportion, >1 = count

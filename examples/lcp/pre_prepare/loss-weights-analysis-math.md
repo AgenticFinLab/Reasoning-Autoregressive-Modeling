@@ -1,4 +1,4 @@
-# NLCP V4 Builder Loss Analysis and Weight Design — MATH
+# lcp Builder Loss Analysis and Weight Design — MATH
 
 > **Scope.** This document is the MATH counterpart of
 > [`loss-weights-analysis-gsm8k.md`](file:///Users/sjia/Documents/AgenticFinLab/Projects/Reasoning-Autoregressive-Modeling/examples/lcp/loss-weights-analysis-gsm8k.md).

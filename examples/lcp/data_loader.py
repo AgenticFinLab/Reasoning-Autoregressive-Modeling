@@ -1,4 +1,4 @@
-"""NLCP V4 DataLoader: raw text batches for Builder training.
+"""lcp DataLoader: raw text batches for Builder training.
 
 Tokenization happens inside ConceptPyramidBuilder.forward().
 """
@@ -34,7 +34,7 @@ class BuilderInput:
         return len(self.solutions) > 0
 
 
-class NLCPV4DataLoader:
+class LCPDataLoader:
     """Wraps lmbase registry to yield BuilderInput batches."""
 
     def __init__(

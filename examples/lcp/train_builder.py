@@ -1,4 +1,4 @@
-"""Train NLCP V4 ConceptPyramidBuilder.
+"""Train lcp ConceptPyramidBuilder.
 
 Usage:
     # Basic: train with the config's own log paths (relative to project root).
@@ -104,9 +104,9 @@ sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(PROJECT_ROOT / "examples"))
 
 from lmbase.utils.env_tools import get_device
-from lcp import _resume_io
+from lmbase.utils import resume_ops
 from lcp.concept_builder import ConceptPyramidBuilder
-from lcp.data_loader import NLCPV4DataLoader
+from lcp.data_loader import LCPDataLoader
 from lcp.eval_builder import (
     evaluate_builder,
     log_eval_results,
@@ -432,8 +432,8 @@ def train_builder(
     # critical there, but we keep the two files in lockstep for
     # operator sanity.
     if resume:
-        _resume_io.rotate_if_exists(log_dir / "training.log")
-        _resume_io.rotate_if_exists(log_dir / "terminal_output.jsonl")
+        resume_ops.rotate_if_exists(log_dir / "training.log")
+        resume_ops.rotate_if_exists(log_dir / "terminal_output.jsonl")
 
     logging.basicConfig(
         level=getattr(logging, log_cfg["log_level"].upper()),
@@ -483,9 +483,9 @@ def train_builder(
     # resume and fresh-start code paths take different arguments.
     # Precedence: --swanlab-id  >  on-disk swanlab.json  >  hard
     # error (on resume) or fresh allocation (on non-resume).
-    swanlab_meta = _resume_io.load_swanlab_meta(log_dir)
+    swanlab_meta = resume_ops.load_swanlab_meta(log_dir)
     if resume:
-        swanlab_id = _resume_io.resolve_swanlab_id(
+        swanlab_id = resume_ops.resolve_swanlab_id(
             cli_swanlab_id, swanlab_meta, log_dir, resume=True
         )
         swanlab.init(
@@ -511,13 +511,13 @@ def train_builder(
         run = swanlab.get_run()
         swanlab_id = getattr(run, "id", None) or ""
         if swanlab_id:
-            _resume_io.init_swanlab_meta(
+            resume_ops.init_swanlab_meta(
                 log_dir, "ReasoningAR", experiment_name, swanlab_id
             )
             logger.info(
                 "SwanLab initialized (id=%s, recorded to %s)",
                 swanlab_id,
-                log_dir / _resume_io.SWANLAB_META_FILENAME,
+                log_dir / resume_ops.SWANLAB_META_FILENAME,
             )
         else:
             # Disabled/offline mode returns id=None. Log a warning
@@ -539,7 +539,7 @@ def train_builder(
 
     optimizer = AdamW(trainable_params, lr=learning_rate, weight_decay=weight_decay)
 
-    dataloader = NLCPV4DataLoader(
+    dataloader = LCPDataLoader(
         data_cfg=data_cfg,
         batch_size=batch_size,
         include_solution=True,
@@ -574,7 +574,7 @@ def train_builder(
 
     if eval_enabled:
         eval_data_cfg = eval_cfg["data"]
-        eval_dataloader = NLCPV4DataLoader(
+        eval_dataloader = LCPDataLoader(
             data_cfg=eval_data_cfg,
             batch_size=batch_size,
             include_solution=True,
@@ -638,16 +638,16 @@ def train_builder(
         # No CLI path: auto-discover the latest checkpoint under the
         # configured checkpoint_dir. Fail loudly if nothing is found —
         # silent fresh-starts on --resume would lose all continuity.
-        resume_path = _resume_io.find_latest_checkpoint(checkpoint_dir)
+        resume_path = resume_ops.find_latest_checkpoint(checkpoint_dir)
         logger.info("Auto-discovered resume checkpoint: %s", resume_path)
         start_epoch, global_step, best_loss, best_eval_loss = load_checkpoint(
             resume_path, builder, optimizer, scheduler
         )
         # Load-and-extend the history lists so epoch-end rewrites
         # below append to, rather than clobber, the previous run.
-        history = _resume_io.load_history(log_dir / "training_history.json")
-        eval_history = _resume_io.load_history(log_dir / "eval_history.json")
-        eval_sample_history = _resume_io.load_history(
+        history = resume_ops.load_history(log_dir / "training_history.json")
+        eval_history = resume_ops.load_history(log_dir / "eval_history.json")
+        eval_sample_history = resume_ops.load_history(
             log_dir / "eval_sample_history.json"
         )
         # Record the resume event in swanlab.json (counts + last
@@ -655,7 +655,7 @@ def train_builder(
         # file actually exists — otherwise the operator passed
         # --swanlab-id manually and we have nothing to update.
         if swanlab_meta is not None:
-            _resume_io.record_resume_event(
+            resume_ops.record_resume_event(
                 log_dir, resume_path, start_epoch, global_step
             )
         logger.info(

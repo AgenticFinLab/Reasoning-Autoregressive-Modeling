@@ -35,7 +35,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[3]
 # swanlab / data_loader / lmbase).  ``utils.py`` has zero lcp-internal
 # dependencies, so a pure-tensor test can run on a bare ``torch`` install.
 _UTILS_PATH = PROJECT_ROOT / "examples" / "lcp" / "utils.py"
-_MOD_NAME = "_nlcpv4_utils_under_test"
+_MOD_NAME = "_lcp_utils_under_test"
 _spec = importlib.util.spec_from_file_location(_MOD_NAME, str(_UTILS_PATH))
 _utils = importlib.util.module_from_spec(_spec)
 # Register in ``sys.modules`` BEFORE exec so @dataclass can resolve the

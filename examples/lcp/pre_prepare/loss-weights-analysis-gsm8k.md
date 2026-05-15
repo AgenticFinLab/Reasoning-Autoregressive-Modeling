@@ -1,4 +1,4 @@
-# NLCP V4 Builder Loss Analysis and Weight Design — GSM8K
+# lcp Builder Loss Analysis and Weight Design — GSM8K
 
 > **Document structure.** Part I (§1–§7) is a purely empirical
 > characterization of the four raw loss components across the 36-config

@@ -153,9 +153,11 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict, List, Sequence, Tuple
 
+import matplotlib as _mpl
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+from matplotlib.lines import Line2D
 from transformers import AutoTokenizer
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -677,8 +679,6 @@ def _plot_attention_text_overlay(
                 ),
             )
 
-        import matplotlib as _mpl
-
         sm = plt.cm.ScalarMappable(
             cmap=cmap, norm=_mpl.colors.Normalize(vmin=0.0, vmax=1.0)
         )
@@ -779,8 +779,6 @@ def _plot_attention_text_per_concept(
                         linewidth=0.3,
                     ),
                 )
-
-            import matplotlib as _mpl
 
             sm = plt.cm.ScalarMappable(
                 cmap=cmap, norm=_mpl.colors.Normalize(vmin=0.0, vmax=1.0)
@@ -1298,8 +1296,6 @@ def _plot_aggregate_concept_pca_per_level(
         sample_colors = [plt.cm.tab20(i % 20) for i in range(N)]
     else:
         sample_colors = [plt.cm.viridis(i / max(N - 1, 1)) for i in range(N)]
-
-    from matplotlib.lines import Line2D  # local — only used here
 
     for k in range(K):
         L_k = level_lengths[k]

@@ -1,8 +1,8 @@
-# NLCP V4 Loss Analysis
+# lcp Loss Analysis
 
 ## Overview
 
-NLCP V4 has **two stages**, each with its own loss function. All loss logic lives in a single module ([`losses.py`](examples/lcp/losses.py)) so that the training scripts only invoke `compute_builder_loss` or `compute_predictor_loss` and never reimplement the math.
+lcp has **two stages**, each with its own loss function. All loss logic lives in a single module ([`losses.py`](examples/lcp/losses.py)) so that the training scripts only invoke `compute_builder_loss` or `compute_predictor_loss` and never reimplement the math.
 
 ### Stage 1 — ConceptPyramidBuilder (`compute_builder_loss`)
 
@@ -520,7 +520,7 @@ In SHARED mode the predictor *aliases* the Builder's `reason_model`, `tokenizer`
 
 ### 7.3 Stage 2 (Predictor) — INDEPENDENT mode (`use_shared_model: false`)
 
-In INDEPENDENT mode the predictor owns its own `reason_model` (loaded fresh from `predictor_model_name`) and its own `back_proj`. The Builder continues to run forward through its *own* module tree to produce `gt_concepts`, so the two backbones do not share parameters and LoRA updates on the predictor's backbone cannot corrupt the Builder.
+In INDEPENDENT mode the predictor owns its own `reason_model` (loaded fresh from `model_name`) and its own `back_proj`. The Builder continues to run forward through its *own* module tree to produce `gt_concepts`, so the two backbones do not share parameters and LoRA updates on the predictor's backbone cannot corrupt the Builder.
 
 | Parameter                     | Shape                          | Updated by which losses | Notes                                                                                                                                                    |
 |-------------------------------|--------------------------------|-------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------|
@@ -544,7 +544,7 @@ In INDEPENDENT mode the predictor owns its own `reason_model` (loaded fresh from
 
 ### 8.1 Stage 1: Builder vs VQ-VAE
 
-| Aspect              | VAR (VQVAE Stage 1)                                       | NLCP V4 Builder                                          |
+| Aspect              | VAR (VQVAE Stage 1)                                       | lcp Builder                                              |
 |---------------------|-----------------------------------------------------------|----------------------------------------------------------|
 | Encoder             | CNN encoder (trainable)                                   | Frozen LLM backbone                                      |
 | Target              | Encoder output `f_BChw`                                   | `H_CoT` from frozen backbone                             |
@@ -562,7 +562,7 @@ VAR operates entirely in the encoder's native dimension — no dimension change,
 f_BChw [B,C,H,W] → quantize → f_hat [B,C,H,W] → MSE(f_hat, f_BChw)
 ```
 
-NLCP V4 must project down then back up because D_encoder ≠ D:
+lcp must project down then back up because D_encoder ≠ D:
 ```
 H_CoT [B,L,D_enc] → input_proj → H_proj [B,L,D] → pyramid → f_hat [B,L,D] → back_proj → [B,L,D_enc] → MSE(·, H_CoT)
 ```
@@ -571,7 +571,7 @@ This means `back_proj` must learn a meaningful inverse of `input_proj`. The init
 
 ### 8.2 Stage 2: Predictor vs VAR Transformer
 
-| Aspect                 | VAR Stage-2 Transformer                                          | NLCP V4 Predictor                                                 |
+| Aspect                 | VAR Stage-2 Transformer                                          | lcp Predictor                                                     |
 |------------------------|------------------------------------------------------------------|-------------------------------------------------------------------|
 | Condition              | Class label embedding                                            | `Q` token sequence (embedded via shared `embed_tokens`)           |
 | Target                 | Discrete codebook indices `idx_k` per scale                      | Continuous concept vectors `C_k` per level                        |
@@ -583,7 +583,7 @@ This means `back_proj` must learn a meaningful inverse of `input_proj`. The init
 | Backbone               | Dedicated transformer with scale embeddings                      | Reused LLM backbone (shared with Builder OR independent + LoRA)   |
 | Inference              | AR over scales with KV cache                                     | AR over 63 flat slots with KV cache + explicit `position_ids`     |
 
-**Takeaway.** NLCP V4 Stage-2 is shaped like a continuous-valued VAR Stage-2, with two twists:
+**Takeaway.** lcp Stage-2 is shaped like a continuous-valued VAR Stage-2, with two twists:
 1. The "codebook" is replaced by a continuous concept space (hence MSE instead of CE for the primary loss).
 2. An **auxiliary reasoning CE** is bolted onto the same forward so the predictor's concept tokens remain anchored to solution-generation utility — the same anchor Stage-1 already uses.
 

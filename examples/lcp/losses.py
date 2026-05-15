@@ -1,4 +1,4 @@
-"""Loss functions for NLCP V4 (ConceptPyramidBuilder + ConceptPredictor).
+"""Loss functions for lcp (ConceptPyramidBuilder + ConceptPredictor).
 
 This module centralises ALL loss computation logic:
 

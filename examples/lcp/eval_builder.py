@@ -1,4 +1,4 @@
-"""NLCP V4 Builder evaluation: library + standalone CLI.
+"""lcp Builder evaluation: library + standalone CLI.
 
 ================================================================================
   OVERVIEW
@@ -178,7 +178,7 @@ sys.path.insert(0, str(PROJECT_ROOT / "examples"))
 
 from lmbase.utils.env_tools import get_device
 from lcp.concept_builder import ConceptPyramidBuilder
-from lcp.data_loader import BuilderInput, NLCPV4DataLoader
+from lcp.data_loader import BuilderInput, LCPDataLoader
 from lcp.losses import compute_builder_loss
 from ram.utils import apply_storage_root, load_config
 
@@ -615,7 +615,7 @@ def _dump_builder_sample(
 @torch.no_grad()
 def evaluate_builder(
     builder: ConceptPyramidBuilder,
-    eval_dataloader: NLCPV4DataLoader,
+    eval_dataloader: LCPDataLoader,
     loss_weights: dict,
     ordering_loss_type: str,
     max_batches: int,
@@ -920,7 +920,7 @@ def _load_builder(
 
 def parse_args() -> argparse.Namespace:
     """CLI flags for standalone Builder evaluation."""
-    parser = argparse.ArgumentParser(description="NLCP V4 Builder Evaluation")
+    parser = argparse.ArgumentParser(description="lcp Builder Evaluation")
     parser.add_argument(
         "-c",
         "--config",
@@ -983,7 +983,7 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _build_eval_dataloader(config: dict) -> NLCPV4DataLoader:
+def _build_eval_dataloader(config: dict) -> LCPDataLoader:
     """Construct the eval-split dataloader with ``batch_size=1``.
 
     batch_size is hard-coded here because the per-sample folder layout
@@ -992,7 +992,7 @@ def _build_eval_dataloader(config: dict) -> NLCPV4DataLoader:
     """
     eval_cfg = config["evaluation"]
     eval_data_cfg = eval_cfg["data"]
-    return NLCPV4DataLoader(
+    return LCPDataLoader(
         data_cfg=eval_data_cfg,
         batch_size=1,
         include_solution=True,
@@ -1032,7 +1032,7 @@ def main() -> None:
     cli_logger = logging.getLogger("eval_builder")
 
     cli_logger.info("=" * 72)
-    cli_logger.info("  NLCP V4 Builder Evaluation")
+    cli_logger.info("  lcp Builder Evaluation")
     cli_logger.info("=" * 72)
     cli_logger.info("Config      : %s", config_path)
     cli_logger.info("Storage root: %s", args.storage_root)

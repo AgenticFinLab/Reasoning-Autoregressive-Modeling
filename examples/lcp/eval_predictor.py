@@ -1,4 +1,4 @@
-"""NLCP V4 Predictor evaluation module and standalone CLI.
+"""lcp Predictor evaluation module and standalone CLI.
 
 This module owns everything Predictor-specific:
   - Library entry point ``evaluate_predictor`` used by both training-time
@@ -50,7 +50,7 @@ sys.path.insert(0, str(PROJECT_ROOT / "examples"))
 from lmbase.utils.env_tools import get_device
 from lcp.concept_builder import ConceptPyramidBuilder
 from lcp.concept_predictor import ConceptPredictor
-from lcp.data_loader import BuilderInput, NLCPV4DataLoader
+from lcp.data_loader import BuilderInput, LCPDataLoader
 from lcp.eval_builder import (
     MODE_BOTH,
     MODE_FREE_GENERATION,
@@ -238,7 +238,7 @@ def _dump_predictor_sample(
 def evaluate_predictor(
     predictor: ConceptPredictor,
     builder: ConceptPyramidBuilder,
-    eval_dataloader: NLCPV4DataLoader,
+    eval_dataloader: LCPDataLoader,
     loss_weights: dict,
     max_length: int,
     device: str,
@@ -702,7 +702,7 @@ def _load_predictor(
 
 def parse_args() -> argparse.Namespace:
     """CLI flags for standalone Predictor evaluation."""
-    parser = argparse.ArgumentParser(description="NLCP V4 Predictor Evaluation")
+    parser = argparse.ArgumentParser(description="lcp Predictor Evaluation")
     parser.add_argument(
         "-c",
         "--config",
@@ -762,7 +762,7 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _build_eval_dataloader(config: dict) -> NLCPV4DataLoader:
+def _build_eval_dataloader(config: dict) -> LCPDataLoader:
     """Construct the eval-split dataloader with ``batch_size=1``.
 
     batch_size is hard-coded here because the per-sample folder layout
@@ -771,7 +771,7 @@ def _build_eval_dataloader(config: dict) -> NLCPV4DataLoader:
     """
     eval_cfg = config["evaluation"]
     eval_data_cfg = eval_cfg["data"]
-    return NLCPV4DataLoader(
+    return LCPDataLoader(
         data_cfg=eval_data_cfg,
         batch_size=1,
         include_solution=True,
@@ -817,7 +817,7 @@ def main() -> None:
     cli_logger = logging.getLogger("eval_predictor")
 
     cli_logger.info("=" * 72)
-    cli_logger.info("  NLCP V4 Predictor Evaluation")
+    cli_logger.info("  lcp Predictor Evaluation")
     cli_logger.info("=" * 72)
     cli_logger.info("Predictor config : %s", predictor_config_path)
     cli_logger.info("Builder config   : %s", builder_config_path)
