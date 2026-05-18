@@ -1,8 +1,7 @@
 """ConceptPyramidBuilder end-to-end pipeline test with real GSM8K data.
 
 Run with:
-    python3 examples/lcp/utest/test_concept_builder.py \
-        -c configs/lcp/GSM8K/train_builder_Qwen2.5-0.5B_6level.yml
+    python3 examples/lcp/utest/test_concept_builder.py -c configs/lcp/GSM8K/train_builder_Qwen2.5-0.5B_6level.yml
 
 DESIGN PHILOSOPHY:
     Single end-to-end pipeline driven by real GSM8K CoT data.

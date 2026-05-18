@@ -79,6 +79,24 @@ in ONE packed forward pass over
   ║  │      Linear(D_enc, D_enc), GELU, Linear(D_enc, D))    │              ║
   ║  │    Maps LLM hidden output → concept space prediction  │              ║
   ║  │                                                       │              ║
+  ║  │  sb_query_head: Sequential(                           │              ║
+  ║  │      Linear(D_enc, D_enc), GELU, Linear(D_enc, D))    │              ║
+  ║  │    Parallel head to concept_head (V2 design):         │              ║
+  ║  │    h_k → sb_q_k → Canvas.predict_soft_boundaries.     │              ║
+  ║  │    Decouples sb prediction from concept prediction —  │              ║
+  ║  │    breaks causal inversion + train/infer dist shift.  │              ║
+  ║  │                                                       │              ║
+  ║  │  canvas: Canvas(D, K, L_canvas) — VAR-style upsample  │              ║
+  ║  │    • pad_f_hat:        L_real → L_canvas (zero-pad)   │              ║
+  ║  │    • pad_soft_boundaries: gt_sb key-dim → L_canvas    │              ║
+  ║  │    • predict_soft_boundaries(queries, k) → pred_sb    │              ║
+  ║  │      (queries from sb_query_head; keys = canvas_k_proj │              ║
+  ║  │       (sinusoidal_pos + lvl_embed[k]); + level_pos_bias)│              ║
+  ║  │    • reconstruct: R_k = sb^T @ concepts (builder fmla)│              ║
+  ║  │    Trained analog of builder's soft_boundaries; closes│              ║
+  ║  │    train/inference gap on f_hat updates (no CoT at    │              ║
+  ║  │    inference → no builder soft_boundaries available). │              ║
+  ║  │                                                       │              ║
   ║  └───────────────────────────────────────────────────────┘              ║
   ║                                                                         ║
   ╚═══════════════════════════════════════════════════════════════════════════╝
@@ -91,7 +109,7 @@ in ONE packed forward pass over
     K       = num_levels (e.g., 6)
     L_k     = level_lengths[k] (e.g., 1, 2, 4, 8, 16, 32)
     total_C = Σ L_k (e.g., 63)
-    L_canvas= inference_canvas_length (e.g., 128)
+    L_canvas= canvas_length (sized per dataset CoT distribution; e.g., 256 for GSM8K, 512 for MATH)
     T       = packed sequence length (varies per batch)
 
 ===============================================================================
@@ -108,7 +126,14 @@ in ONE packed forward pass over
   │  builder(batch) ──► PyramidOutput                                      │
   │    gt_concepts = [C_0 [B,L_0,D], ..., C_{K-1} [B,L_{K-1},D]]          │
   │    gt_f_hats   = [f_hat_0 [B,L,D], ..., f_hat_{K-1} [B,L,D]]          │
+  │    gt_sb_k     = pyramid.level_outputs[k].attention_weights            │
+  │                  [B, L_k, L_CoT]   (builder's soft_boundaries)        │
   │    (all detached — no gradient flows back to builder)                   │
+  │                                                                        │
+  │  canvas.pad_f_hat(gt_f_hats[k], f_hat_mask)                            │
+  │    → padded_gt_f_hats[k] [B, L_canvas, D], f_hat_mask_padded            │
+  │  canvas.pad_soft_boundaries(gt_sb_k)                                   │
+  │    → gt_sb_padded[k]    [B, L_k, L_canvas]                              │
   │                                                                        │
   │  tokenizer(questions) ──► question_ids [B, L_Q_pad], q_mask [B, L_Q_pad]│
   │  tokenizer(solutions) ──► solution_ids [B, L_S_pad], s_mask [B, L_S_pad]│
@@ -155,27 +180,43 @@ in ONE packed forward pass over
   │    hidden = model_out.hidden_states[-1]    [B, T, D_enc]               │
   │    logits = model_out.logits               [B, T, V]                   │
   │                                                                        │
-  │  Step 2.6: Concept readout                                             │
+  │  Step 2.6: Concept readout & per-level dual heads (V2)                  │
   │  ──────────────────────────                                            │
   │    For row i, approx-token positions are:                              │
   │      col = q_len[i] + j,  j ∈ [0, total_C)                            │
   │    approx_hidden = hidden[i, q_len[i]:q_len[i]+total_C]  [B,total_C,D_enc]│
-  │    C_hat_k = concept_head(approx_hidden[:, offset_k:offset_k+L_k])     │
-  │                                                → [B, L_k, D]           │
+  │    For each level k (offset = Σ_{j<k} L_j):                             │
+  │      h_k     = approx_hidden[:, offset:offset+L_k, :]   [B, L_k, D_enc]  │
+  │      C_hat_k = concept_head(h_k)                         [B, L_k, D]    │
+  │      sb_q_k  = sb_query_head(h_k)                        [B, L_k, D]    │
+  │    Concept and sb queries are SIBLINGS of h_k — no parent-child chain.  │
   │                                                                        │
   │  Step 2.7: Reasoning NTP supervision                                   │
   │  ───────────────────────────────────                                   │
   │    reasoning_logits    = gather_solution_logits(logits, pack)           │
   │    reasoning_target_ids = build_solution_targets(solution_ids, s_mask)  │
   │                                                                        │
+  │  Step 2.8: Canvas soft_boundaries prediction (V2 multi-task)            │
+  │  ─────────────────────────────────────────────────────────────   │
+  │    For each level k, predict soft_boundaries from h_k (NOT concepts):   │
+  │      sb_q_k    = sb_query_head(h_k)             [B, L_k, D]             │
+  │      pred_sb_k = canvas.predict_soft_boundaries(sb_q_k, k)              │
+  │                                       [B, L_k, L_canvas]               │
+  │    Loss: MSE(pred_sb_k, gt_sb_padded[k]) on the FULL canvas —           │
+  │    zero-padded gt drives self-suppression of the tail at inference.    │
+  │    Train↔Inference parity: h_k is computed identically in both phases  │
+  │    (both feed f_hat → approx_tokens → LLM); no gt_concepts on this path.│
+  │                                                                        │
   └──────────────────────────────────────────────────────────────────────────┘
                 │
                 ▼
   PredictorOutput:
-    predicted_concepts:   [C_hat_0, ..., C_hat_{K-1}]    (for concept loss)
-    gt_concepts:          [C_0, ..., C_{K-1}]            (from builder)
-    reasoning_logits:     [B, L_sol, V]                  (for CE loss)
-    reasoning_target_ids: [B, L_sol]                     (shifted targets)
+    predicted_concepts:    [C_hat_0, ..., C_hat_{K-1}]    (for concept loss)
+    gt_concepts:           [C_0, ..., C_{K-1}]            (from builder)
+    pred_soft_boundaries:  [pred_sb_0, ..., pred_sb_{K-1}] (canvas prediction)
+    gt_soft_boundaries:    [gt_sb_0, ..., gt_sb_{K-1}]     (zero-padded gt)
+    reasoning_logits:      [B, L_sol, V]                  (for CE loss)
+    reasoning_target_ids:  [B, L_sol]                     (shifted targets)
 
 ===============================================================================
 5. INFERENCE DATA FLOW — _forward_inference(question_ids, q_mask)
@@ -198,7 +239,8 @@ in ONE packed forward pass over
   ║                                                                        ║
   ║  ① _construct_approx_tokens(k, f_hat)                                  ║
   ║     → approx_tokens_k [B, L_k, D_enc]                                 ║
-  ║     → attn_weights α_k [B, L_k, L_canvas]                             ║
+  ║     (extract_attn's attn_weights are NOT used for reconstruction;     ║
+  ║      they only carry the f_hat → approx_tokens routing for the LLM)  ║
   ║     approx_token_list.append(approx_tokens_k)                          ║
   ║                                                                        ║
   ║  ② Pack [real_Q_i | approx_tokens_0..k | tail_pad]                     ║
@@ -209,11 +251,16 @@ in ONE packed forward pass over
   ║  ④ Readout level k's approx-token positions:                           ║
   ║     col[i] = q_len[i] + Σ_{j<k} L_j + arange(L_k)                     ║
   ║     hidden_k = hidden[row_idx, col_idx]        [B, L_k, D_enc]         ║
-  ║     C_hat_k = concept_head(hidden_k)           [B, L_k, D]             ║
+  ║     C_hat_k  = concept_head(hidden_k)          [B, L_k, D]             ║
+  ║     sb_q_k   = sb_query_head(hidden_k)         [B, L_k, D]             ║
+  ║     (V2: dual heads share h_k=hidden_k; no concepts → sb chain.)        ║
   ║                                                                        ║
-  ║  ⑤ Reconstruct & accumulate:                                           ║
-  ║     R_k = α_k^T @ C_hat_k                     [B, L_canvas, D]        ║
-  ║     f_hat = f_hat + R_k                                                ║
+  ║  ⑤ Canvas reconstruct & accumulate (replaces builder's H_rest path):    ║
+  ║     pred_sb_k = canvas.predict_soft_boundaries(sb_q_k, k)                ║
+  ║                                                  [B, L_k, L_canvas]    ║
+  ║     R_k       = Canvas.reconstruct(C_hat_k, pred_sb_k)                  ║
+  ║                = pred_sb_k^T @ C_hat_k         [B, L_canvas, D]         ║
+  ║     f_hat = f_hat + R_k                                                 ║
   ║                                                                        ║
   ╚══════════════════════════════════════════════════════════════════════════╝
                 │
@@ -298,8 +345,14 @@ in ONE packed forward pass over
                                         ▼
                               approx_tokens_k [B, L_k, D_enc]
 
-  The attention weights α_k are retained at inference for reconstruction:
-    R_k = α_k^T @ C_hat_k    [B, L_canvas, D]
+  The attention weights α_k from extract_attn are NOT used for f_hat
+  reconstruction. Reconstruction goes through the dedicated Canvas module
+  whose queries come from sb_query_head(h_k) (a parallel head to
+  concept_head, both consuming the same LLM hidden state). Canvas is
+  supervised by builder's gt_sb during training:
+      sb_q_k    = sb_query_head(h_k)
+      pred_sb_k = canvas.predict_soft_boundaries(sb_q_k, k)
+      R_k       = pred_sb_k^T @ concepts_k     [B, L_canvas, D]
 
 ===============================================================================
 8. GENERATE SOLUTION — generate_solution(predicted_concepts, ...)
@@ -329,7 +382,10 @@ in ONE packed forward pass over
   config["model"]["predictor"]:
     model_name:              HuggingFace model ID for reason_model
     dropout:                 dropout for extract_attn
-    inference_canvas_length: L_canvas for f_hat at inference (default 128)
+    canvas_length:           REQUIRED. L_canvas for f_hat (used in train + inference).
+                             MUST be sized per dataset CoT distribution to avoid silent
+                             truncation in Canvas.pad_f_hat / pad_soft_boundaries.
+                             Recommended: GSM8K=256, MATH=512.
     num_layers:              optional layer truncation (None = use all)
 
   config["training"]["predictor"]:
@@ -359,15 +415,18 @@ REFERENCES:
     - docs/VAR.md §5.3: training pipeline and scale-causal mask
 """
 
+import math
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from peft import LoraConfig, get_peft_model
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from lcp.data_loader import BuilderInput
+from lcp.concept_builder import PyramidOutput
 from lcp.utils import (
     build_solution_targets,
     gather_solution_logits,
@@ -377,7 +436,19 @@ from lcp.utils import (
 
 @dataclass
 class PredictorOutput:
-    """Full output of ConceptPredictor.forward()."""
+    """Full output of ConceptPredictor.forward().
+
+    Canvas (VAR-style upsampling) tensors are populated when the
+    Canvas module is in use:
+        pred_soft_boundaries: List of [B, L_k, L_canvas] per level
+            — predictor's learned spatial routing (concept → canvas).
+        gt_soft_boundaries:   List of [B, L_k, L_canvas] per level
+            — builder's soft_boundaries, zero-padded on the tail to
+            L_canvas. Supervision target for canvas loss (MSE on full
+            canvas drives self-suppressing tail behavior).
+
+    Both default to None at inference (no builder pyramid available).
+    """
 
     predicted_concepts: List[torch.Tensor]
     gt_concepts: Optional[List[torch.Tensor]] = None
@@ -387,6 +458,304 @@ class PredictorOutput:
     reasoning_target_ids: Optional[torch.Tensor] = None
     reasoning_texts: Optional[List[str]] = None
     generation_texts: Optional[List[str]] = None
+    # Canvas supervision (VAR upsampling) — present when Canvas is active.
+    pred_soft_boundaries: Optional[List[torch.Tensor]] = None
+    gt_soft_boundaries: Optional[List[torch.Tensor]] = None
+
+
+def _build_sinusoidal_pos(L: int, D: int) -> torch.Tensor:
+    """Standard sinusoidal positional encoding [L, D] (length-agnostic).
+
+    Length-agnostic in the sense that it is precomputed up to L and works
+    for any sub-length on subsequent calls (no learnable parameters tied
+    to the seq dimension).
+    """
+    position = torch.arange(L, dtype=torch.float32).unsqueeze(1)  # [L, 1]
+    div_term = torch.exp(
+        torch.arange(0, D, 2, dtype=torch.float32) * -(math.log(10000.0) / D)
+    )  # [D/2]
+    pe = torch.zeros(L, D)
+    pe[:, 0::2] = torch.sin(position * div_term)
+    pe[:, 1::2] = torch.cos(position * div_term)
+    return pe
+
+
+class Canvas(nn.Module):
+    """VAR-style canvas operations for the predictor.
+
+    PURPOSE — close the train/inference gap on f_hat updates.
+        The Builder updates f_hat via
+            R_k = soft_boundaries^T @ concepts   (concept_builder.py L1248-1249)
+        where soft_boundaries is computed from the residual CoT (H_rest).
+        At Predictor inference there is NO CoT, so soft_boundaries cannot
+        be reproduced. The Canvas module fills this gap with a TRAINED
+        concepts → spatial-distribution mapping that is supervised against
+        the Builder's gt_soft_boundaries during training.
+
+    SCOPE — all canvas-related operations live here:
+        * pad variable-length f_hats and gt_soft_boundaries to L_canvas
+        * predict pred_soft_boundaries from concepts (the missing
+          "upsample" operator that mirrors builder's spatial routing)
+        * deterministically reconstruct R_k via builder's formula
+          R_k = pred_sb^T @ concepts (identical arithmetic; the only
+          difference is sb is predicted instead of computed from H_rest)
+        * provide an MSE-based canvas loss helper used by the loss module
+
+    TRAIN/INFERENCE UNIFICATION:
+        L_canvas is fixed at construction; both phases run on this length.
+        Training: gt_f_hats and gt_sb (variable L_CoT from builder) are
+            zero-padded on tail to L_canvas. cross-attention's
+            key_padding_mask correctly ignores padding positions inside
+            the predictor's _construct_approx_tokens.
+        Inference: f_hat starts as zeros [B, L_canvas, D] and is updated
+            via R_k = canvas.reconstruct(c_hat_k, canvas.predict_soft_boundaries(...)).
+        The Canvas module is the SAME in both phases — same parameters,
+        same forward path, same shape.
+
+    SELF-SUPPRESSING TAIL:
+        gt_soft_boundaries (zero-padded to L_canvas on the tail) gives
+        zero target mass on positions beyond the real L_CoT. MSE loss on
+        the FULL canvas (no masking out of padding) pushes pred_sb to
+        also output zero at tail positions. At inference, the trained
+        module emits ~zero pred_sb on the tail → ~zero R_k contribution
+        → effectively ignores the excess canvas length. The model thus
+        learns to allocate spatial information only where needed,
+        regardless of the configured L_canvas.
+
+    DESIGN (V2 — multi-task heads from LLM hidden states):
+        Canvas is QUERY-AGNOSTIC. The query bank is produced upstream by
+        the predictor's `sb_query_head` (a parallel head to `concept_head`)
+        operating on the LLM hidden states `h_k` at level-k approx-token
+        positions. Both train and inference feed the SAME h_k distribution
+        into Canvas — no teacher-forcing distribution shift on this path.
+
+        keys[t]    = canvas_k_proj(sinusoidal_pos[t] + lvl_embed[k])
+        queries    = sb_query_head(h_k)             (computed by predictor)
+        logits     = queries @ keys^T / sqrt(D)
+        pred_sb    = softmax(logits + level_pos_bias[k])   # over L_canvas
+        R_k        = pred_sb^T @ concepts                  # builder formula
+
+        `level_pos_bias[k]` is a learnable per-level positional bias on the
+        canvas axis (analogous to T5/ALiBi relative bias). It encodes the
+        per-level routing prior — coarse levels can drift toward broad
+        distributions, fine levels toward concentrated ones — without
+        forcing the dot-product head to learn this from scratch.
+
+    Args:
+        concept_dim: D, the concept-space dimension (== pyramid hidden_dim).
+        num_levels:  K, the number of pyramid levels.
+        L_canvas:    fixed canvas length used in both training and inference.
+    """
+
+    def __init__(
+        self,
+        concept_dim: int,
+        num_levels: int,
+        L_canvas: int,
+    ):
+        super().__init__()
+        if L_canvas <= 0:
+            raise ValueError(f"L_canvas must be > 0, got {L_canvas}")
+        self.concept_dim = concept_dim
+        self.num_levels = num_levels
+        self.L_canvas = L_canvas
+        D = concept_dim
+        self.scale = D**-0.5
+
+        # Per-level identity tag added to canvas keys (mirrors builder's
+        # implicit per-level distinction via separate query banks).
+        self.lvl_embed = nn.Embedding(num_levels, D)
+
+        # Canvas key projection (single-head attention K-side).
+        # The Q-side projection is owned by the predictor (sb_query_head),
+        # not by Canvas — this is a deliberate decoupling so Canvas does
+        # not assume any particular query origin.
+        self.canvas_k_proj = nn.Linear(D, D, bias=False)
+
+        # Per-level learnable positional bias on canvas axis (V2 add-on).
+        # Shape: [num_levels, L_canvas]. Zero-init so the softmax is purely
+        # Q·K driven at start; the bias adapts during training to encode
+        # per-level routing priors (broad vs. concentrated).
+        self.level_pos_bias = nn.Embedding(num_levels, L_canvas)
+        nn.init.zeros_(self.level_pos_bias.weight)
+
+        # Sinusoidal canvas position embeddings (length-agnostic, no params).
+        self.register_buffer(
+            "_canvas_pos_embed",
+            _build_sinusoidal_pos(L_canvas, D),
+            persistent=False,
+        )
+
+    # ── Padding utilities ────────────────────────────────────────────
+
+    def pad_f_hat(
+        self,
+        f_hat: torch.Tensor,
+        mask: Optional[torch.Tensor],
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Zero-pad / truncate f_hat to L_canvas; extend mask correspondingly.
+
+        Args:
+            f_hat: [B, L_real, D] cumulative-reconstruction snapshot from
+                builder (variable L_real == L_CoT_batch_max).
+            mask:  [B, L_real] valid-token mask (1=valid, 0=pad) or None.
+
+        Returns:
+            (f_hat_padded [B, L_canvas, D], mask_padded [B, L_canvas]).
+            mask_padded is always a long tensor with 1=valid, 0=pad.
+        """
+        B, L_real, _ = f_hat.shape
+        L = self.L_canvas
+        device = f_hat.device
+
+        if L_real == L:
+            mask_padded = (
+                mask
+                if mask is not None
+                else torch.ones(B, L, device=device, dtype=torch.long)
+            )
+            return f_hat, mask_padded
+
+        if L_real > L:
+            # Truncate (rare; happens only when CoT exceeds L_canvas)
+            f_hat_padded = f_hat[:, :L, :].contiguous()
+            mask_padded = (
+                mask[:, :L].contiguous()
+                if mask is not None
+                else torch.ones(B, L, device=device, dtype=torch.long)
+            )
+            return f_hat_padded, mask_padded
+
+        # L_real < L: zero-pad along seq dim
+        pad_zeros = torch.zeros(
+            B, L - L_real, f_hat.shape[-1], device=device, dtype=f_hat.dtype
+        )
+        f_hat_padded = torch.cat([f_hat, pad_zeros], dim=1)
+        if mask is not None:
+            mask_pad = torch.zeros(B, L - L_real, device=device, dtype=mask.dtype)
+            mask_padded = torch.cat([mask, mask_pad], dim=1)
+        else:
+            # Synthesize a [valid_real | pad] mask from L_real boundary.
+            mask_padded = torch.cat(
+                [
+                    torch.ones(B, L_real, device=device, dtype=torch.long),
+                    torch.zeros(B, L - L_real, device=device, dtype=torch.long),
+                ],
+                dim=1,
+            )
+        return f_hat_padded, mask_padded
+
+    def pad_soft_boundaries(self, sb: torch.Tensor) -> torch.Tensor:
+        """Zero-pad / truncate gt_soft_boundaries to L_canvas on key dim.
+
+        Args:
+            sb: [B, L_k, L_real] builder's soft attention. Mass is already
+                concentrated on valid CoT positions (builder's softmax
+                respects key_padding_mask), so zero-padding on the tail
+                is a clean truncation of the support set.
+
+        Returns:
+            sb_padded: [B, L_k, L_canvas] with zeros on positions beyond
+            L_real. Sums (over the canvas axis) are preserved at ~1.0
+            on rows that have any valid keys, and 0.0 on fully-masked rows.
+        """
+        B, L_k, L_real = sb.shape
+        L = self.L_canvas
+        if L_real == L:
+            return sb
+        if L_real > L:
+            return sb[:, :, :L].contiguous()
+        pad = torch.zeros(B, L_k, L - L_real, device=sb.device, dtype=sb.dtype)
+        return torch.cat([sb, pad], dim=-1)
+
+    # ── Predict pred_soft_boundaries ─────────────────────────────────
+
+    def predict_soft_boundaries(
+        self,
+        queries: torch.Tensor,
+        level_idx: int,
+    ) -> torch.Tensor:
+        """Predict pred_soft_boundaries [B, L_k, L_canvas] from queries.
+
+        Single-head attention: queries come from the predictor's
+        `sb_query_head(h_k)` (LLM hidden states at level-k approx-token
+        positions), keys are projected (sinusoidal_pos + lvl_embed[k]).
+        Softmax over the L_canvas key axis yields a per-position
+        distribution over canvas slots — the predictor's learned analog
+        of builder's soft_boundaries.
+
+        Why queries come from h_k (not from concepts):
+            (1) breaks the causal inversion (concepts are an EFFECT of
+                soft_boundaries in builder; predicting cause from effect
+                is the wrong direction).
+            (2) eliminates compounding errors at inference: a bad C_hat_k
+                no longer pollutes pred_sb_k since both are siblings of
+                h_k, not parent-child.
+            (3) eliminates teacher-forcing distribution shift: h_k is
+                computed identically at train and inference (both feed
+                f_hat → approx_tokens → LLM).
+            (4) h_k is strictly richer than C_hat_k (it carries Q + prior
+                levels + RoPE positional context via causal attention).
+
+        Args:
+            queries: [B, L_k, D] precomputed queries in concept space
+                (output of the predictor's sb_query_head).
+            level_idx: int in [0, num_levels). Selects lvl_embed and
+                level_pos_bias rows.
+
+        Returns:
+            pred_sb: [B, L_k, L_canvas] softmax distribution per query
+                over canvas positions.
+        """
+        if not (0 <= level_idx < self.num_levels):
+            raise IndexError(
+                f"level_idx {level_idx} out of range [0, {self.num_levels})"
+            )
+        # Build canvas keys in the dtype of queries (handle bf16/fp16).
+        pos = self._canvas_pos_embed.to(dtype=queries.dtype)  # [L, D]
+        lvl = self.lvl_embed.weight[level_idx].to(dtype=queries.dtype)  # [D]
+        canvas_keys = self.canvas_k_proj(pos + lvl)  # [L_canvas, D]
+
+        # logits: [B, L_k, L_canvas]
+        logits = torch.matmul(queries, canvas_keys.transpose(0, 1)) * self.scale
+        # Add per-level positional bias on canvas axis (broadcasts over B, L_k).
+        bias = self.level_pos_bias.weight[level_idx].to(dtype=queries.dtype)
+        logits = logits + bias  # [B, L_k, L_canvas]
+        return F.softmax(logits, dim=-1)
+
+    # ── Reconstruction (builder formula, deterministic) ──────────────
+
+    @staticmethod
+    def reconstruct(
+        concepts: torch.Tensor,
+        soft_boundaries: torch.Tensor,
+    ) -> torch.Tensor:
+        """R_k = soft_boundaries^T @ concepts. Mirrors builder L1248-1249.
+
+        Args:
+            concepts:        [B, L_k, D]
+            soft_boundaries: [B, L_k, L_canvas]
+
+        Returns:
+            R_k: [B, L_canvas, D]
+        """
+        return torch.bmm(soft_boundaries.transpose(1, 2), concepts)
+
+    # ── Loss helper ──────────────────────────────────────────────────
+
+    @staticmethod
+    def canvas_mse(
+        pred_sb: torch.Tensor,
+        gt_sb_padded: torch.Tensor,
+    ) -> torch.Tensor:
+        """MSE on the FULL canvas (zero-padded gt drives tail suppression).
+
+        Crucial choice: NO masking. By including padding positions
+        (gt_sb=0 there) in the MSE, we explicitly train pred_sb to output
+        zero on the tail. Masking those positions out would leave tail
+        behavior undefined — exactly the failure mode this module fixes.
+        """
+        return F.mse_loss(pred_sb, gt_sb_padded)
 
 
 class ConceptPredictor(nn.Module):
@@ -414,9 +783,7 @@ class ConceptPredictor(nn.Module):
         self._num_levels = num_levels
         self._concept_dim = concept_dim
         self._total_concepts = sum(level_lengths)
-        self._inference_canvas_length = self.predictor_cfg.get(
-            "inference_canvas_length", 128
-        )
+        self._canvas_length = self.predictor_cfg["canvas_length"]
 
         # Frozen builder — Phase 1 only (GT concepts + f_hats)
         self.builder = builder
@@ -460,6 +827,29 @@ class ConceptPredictor(nn.Module):
             nn.Linear(D_enc, concept_dim),
         )
 
+        # Soft-boundaries query head: D_enc → D (parallel to concept_head).
+        # Operates on the SAME LLM hidden state h_k at level-k approx-token
+        # positions, producing a query bank for Canvas.predict_soft_boundaries.
+        # This is the V2 multi-task head design — concepts and soft_boundaries
+        # are siblings of h_k (not parent-child), which:
+        #   - breaks the causal inversion (concepts are an effect of sb,
+        #     so predicting sb from concepts is the wrong direction),
+        #   - eliminates compounding errors at inference (no C_hat_k → sb chain),
+        #   - eliminates teacher-forcing distribution shift (h_k is identical
+        #     at train and inference; gt_concepts no longer enters this path).
+        self.sb_query_head = nn.Sequential(
+            nn.Linear(D_enc, D_enc),
+            nn.GELU(),
+            nn.Linear(D_enc, concept_dim),
+        )
+
+        # Canvas: VAR-style upsampling module (predict soft_boundaries)
+        self.canvas = Canvas(
+            concept_dim=concept_dim,
+            num_levels=num_levels,
+            L_canvas=self._canvas_length,
+        )
+
         self._init_weights()
 
     # ------------------------------------------------------------------ #
@@ -488,7 +878,7 @@ class ConceptPredictor(nn.Module):
                 ),
             )
         # Freeze base weights (LoRA adapters remain trainable)
-        if train_cfg.get("freeze", False):
+        if train_cfg["freeze"]:
             for p in reason_model.parameters():
                 p.requires_grad = False
             if lora_cfg is not None:
@@ -525,6 +915,11 @@ class ConceptPredictor(nn.Module):
             nn.init.normal_(q, std=0.02)
         nn.init.normal_(self.lvl_embed.weight, std=0.02)
         for m in self.concept_head:
+            if isinstance(m, nn.Linear):
+                nn.init.xavier_uniform_(m.weight)
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+        for m in self.sb_query_head:
             if isinstance(m, nn.Linear):
                 nn.init.xavier_uniform_(m.weight)
                 if m.bias is not None:
@@ -636,16 +1031,26 @@ class ConceptPredictor(nn.Module):
     #  approx-token construction: pre-LLM level_queries × back_proj(f_hat)
     # ------------------------------------------------------------------ #
 
-    def _construct_approx_tokens(self, level_idx, f_hat_k):
+    def _construct_approx_tokens(self, level_idx, f_hat_k, f_hat_mask=None):
         """Construct approximation tokens for one pyramid level.
 
         Text-domain analog of VAR's spatial downsampling: extracts
         f_hat_k [B, L, D] → L_k approx tokens [B, L_k, D_enc] via
         learnable queries cross-attending to back_proj(f_hat_k).
 
+        PADDING SAFETY:
+            f_hat at padding positions is zero (builder masks guarantee this).
+            However, context_norm(back_proj(zeros)) ≠ 0 due to LayerNorm bias.
+            Without key_padding_mask, the cross-attention would attend to these
+            spurious constant-vector positions, causing information leakage.
+            When f_hat_mask is provided, padding positions are excluded from
+            key/value attention computation.
+
         Args:
             level_idx: Pyramid level k in [0, K).
             f_hat_k: Cumulative reconstruction [B, ctx, D].
+            f_hat_mask: Optional [B, ctx] mask where 1=valid, 0=padding.
+                At inference (self-maintained canvas) this is None (all valid).
 
         Returns:
             (approx_tokens [B, L_k, D_enc], attn_weights [B, L_k, ctx]).
@@ -658,10 +1063,19 @@ class ConceptPredictor(nn.Module):
 
         q_n = self.query_norm(queries)
         c_n = self.context_norm(context)
+
+        # key_padding_mask: True = IGNORE position (PyTorch MHA convention).
+        # This prevents cross-attention from attending to padding positions
+        # where context_norm produces a non-zero constant (LayerNorm bias).
+        kpm = None
+        if f_hat_mask is not None:
+            kpm = f_hat_mask == 0  # [B, ctx] → True at padding positions
+
         attn_out, attn_w = self.extract_attn(
             query=q_n,
             key=c_n,
             value=c_n,
+            key_padding_mask=kpm,
             need_weights=True,
             average_attn_weights=True,
         )
@@ -673,7 +1087,9 @@ class ConceptPredictor(nn.Module):
     #  forward — single packed forward (training)                        #
     # ------------------------------------------------------------------ #
 
-    def forward(self, batch: BuilderInput) -> PredictorOutput:
+    def forward(
+        self, batch: BuilderInput, *, pyramid: Optional[PyramidOutput] = None
+    ) -> PredictorOutput:
         """Training forward: BuilderInput → PredictorOutput.
 
         Phase 1: builder(batch) → gt_concepts + f_hats; tokenize Q (and S).
@@ -681,6 +1097,16 @@ class ConceptPredictor(nn.Module):
                  LLM forward, read concept predictions at approx-token
                  positions and reasoning logits at solution-predicting
                  positions.
+
+        Args:
+            batch: BuilderInput with questions, cot_answers, solutions.
+            pyramid: Optional pre-computed PyramidOutput from a frozen
+                builder call (e.g., builder(_strip_solutions(batch))).
+                When provided, the internal builder call is skipped.
+                This is the recommended usage in training loops where the
+                builder is invoked separately for efficiency (avoids
+                running _prepare_reasoning on solutions the builder
+                doesn't need).
         """
         device = next(self.parameters()).device
         max_length = self.pyramid_cfg["max_seq_len"]
@@ -690,10 +1116,38 @@ class ConceptPredictor(nn.Module):
         # ============================================================== #
         # Phase 1: Input preparation                                     #
         # ============================================================== #
-        with torch.no_grad():
-            pyramid = self.builder(batch)
+        if pyramid is None:
+            with torch.no_grad():
+                pyramid = self.builder(batch)
         gt_concepts = [c.detach() for c in pyramid.concepts]
         gt_f_hats = [f.detach() for f in pyramid.f_hat_per_level]
+        # CoT padding mask from builder: [B, L_CoT] where 1=valid, 0=pad.
+        # Passed to _construct_approx_tokens so cross-attention ignores padding
+        # positions in f_hat (LayerNorm turns zeros into non-zero constants).
+        f_hat_mask = pyramid.attention_mask  # [B, L_CoT] or None
+
+        # ── Canvas: pad gt_f_hats to L_canvas for train/infer unification ──
+        # Also extract gt_soft_boundaries from builder's level_outputs.
+        gt_sb_list: List[torch.Tensor] = []  # padded gt_soft_boundaries per level
+        pred_sb_list: List[torch.Tensor] = []  # predicted soft_boundaries per level
+        padded_gt_f_hats: List[torch.Tensor] = []
+        f_hat_mask_padded: Optional[torch.Tensor] = None
+        for k in range(K):
+            # Pad f_hat_k to L_canvas
+            f_hat_k_padded, mask_k_padded = self.canvas.pad_f_hat(
+                gt_f_hats[k], f_hat_mask
+            )
+            padded_gt_f_hats.append(f_hat_k_padded)
+            if k == 0:
+                f_hat_mask_padded = mask_k_padded
+            # Extract and pad gt_soft_boundaries from builder
+            gt_sb_k = pyramid.level_outputs[
+                k
+            ].attention_weights.detach()  # [B, L_k, L_CoT]
+            gt_sb_k_padded = self.canvas.pad_soft_boundaries(
+                gt_sb_k
+            )  # [B, L_k, L_canvas]
+            gt_sb_list.append(gt_sb_k_padded)
 
         q_tokens = self.tokenizer(
             batch.questions,
@@ -727,10 +1181,13 @@ class ConceptPredictor(nn.Module):
         embed_layer = self._get_backbone().get_input_embeddings()
         Q_embeds = embed_layer(question_ids)  # [B, L_Q_pad, D_enc]
 
-        # Build approximation tokens for all levels and concat
+        # Build approximation tokens for all levels and concat.
+        # f_hat_mask_padded ensures cross-attention ignores padding positions.
         approx_token_list = []
         for k in range(K):
-            approx_tokens_k, _ = self._construct_approx_tokens(k, gt_f_hats[k])
+            approx_tokens_k, _ = self._construct_approx_tokens(
+                k, padded_gt_f_hats[k], f_hat_mask_padded
+            )
             approx_token_list.append(approx_tokens_k)
         approx_tokens = torch.cat(approx_token_list, dim=1)  # [B, total_C, D_enc]
         if approx_tokens.dtype != Q_embeds.dtype:
@@ -785,14 +1242,27 @@ class ConceptPredictor(nn.Module):
         approx_hidden = hidden[approx_row_idx, approx_col_idx]  # [B, total_C, D_enc]
 
         # Slice per level and project to concept space
+        # (V2) Two parallel heads consume the SAME h_k:
+        #   * concept_head    → C_hat_k       (concept prediction)
+        #   * sb_query_head   → sb_q_k        (queries for Canvas.pred_sb)
+        # Both heads back-propagate into h_k — multi-task regularization.
         predicted_concepts: List[torch.Tensor] = []
         offset = 0
         for k in range(K):
             L_k = self._level_lengths[k]
-            c_hat_k = self.concept_head(
-                approx_hidden[:, offset : offset + L_k, :]
-            )  # [B, L_k, D]
+            h_k = approx_hidden[:, offset : offset + L_k, :]  # [B, L_k, D_enc]
+            c_hat_k = self.concept_head(h_k)  # [B, L_k, D]
             predicted_concepts.append(c_hat_k)
+
+            # Canvas: predict soft_boundaries from h_k via sb_query_head.
+            # No teacher-forcing distribution shift on this path: h_k is
+            # computed identically at train and inference time.
+            sb_q_k = self.sb_query_head(h_k)  # [B, L_k, D]
+            pred_sb_k = self.canvas.predict_soft_boundaries(
+                sb_q_k, level_idx=k
+            )  # [B, L_k, L_canvas]
+            pred_sb_list.append(pred_sb_k)
+
             offset += L_k
 
         out = PredictorOutput(
@@ -800,6 +1270,8 @@ class ConceptPredictor(nn.Module):
             gt_concepts=gt_concepts,
             num_levels=K,
             level_lengths=list(self._level_lengths),
+            pred_soft_boundaries=pred_sb_list,
+            gt_soft_boundaries=gt_sb_list,
         )
 
         # Reasoning NTP supervision (S in input from the start)
@@ -828,8 +1300,19 @@ class ConceptPredictor(nn.Module):
             1. Construct approx_tokens_k from back_proj(f_hat) via extract_attn
             2. Pack [real_Q_i | approx_tokens_0..k] per row, build per-row
                scale-causal mask, single backbone forward → hidden
-            3. concept_head(hidden at level-k approx-token positions) → C_hat_k
-            4. R_k = attn_weights^T @ C_hat_k; f_hat += R_k
+            3. Slice hidden_k at level-k approx-token positions; the SAME
+               h_k feeds two parallel heads (V2 multi-task design):
+                  C_hat_k = concept_head(hidden_k)
+                  sb_q_k  = sb_query_head(hidden_k)
+            4. pred_sb_k = canvas.predict_soft_boundaries(sb_q_k, k)
+               R_k       = Canvas.reconstruct(C_hat_k, pred_sb_k)
+               f_hat    += R_k
+               (extract_attn's attn_weights are NOT used here; reconstruction
+                goes through the dedicated Canvas module which is supervised
+                during training against builder's gt_soft_boundaries. Queries
+                come from h_k via sb_query_head — NOT from C_hat_k — so the
+                inference path has no compounding error chain from concept
+                prediction into soft_boundaries prediction.)
 
         Args:
             question_ids: [B, L_Q].
@@ -840,7 +1323,7 @@ class ConceptPredictor(nn.Module):
         """
         B = question_ids.shape[0]
         device = question_ids.device
-        L_canvas = self._inference_canvas_length
+        L_canvas = self._canvas_length
 
         if question_attention_mask is None:
             q_mask = torch.ones(
@@ -850,6 +1333,8 @@ class ConceptPredictor(nn.Module):
             q_mask = question_attention_mask
 
         # Initialize f_hat canvas: [B, L_canvas, D]
+        # No f_hat_mask needed: canvas is self-maintained with no padding
+        # (all L_canvas positions are valid workspace for accumulation).
         f_hat = torch.zeros(
             B,
             L_canvas,
@@ -929,11 +1414,15 @@ class ConceptPredictor(nn.Module):
             )
             col_idx = pack.q_len.unsqueeze(1) + prev + arange_lk.unsqueeze(0)
             hidden_k = hidden[row_idx, col_idx]  # [B, L_k, D_enc]
+            # (V2) Two parallel heads consume the SAME h_k = hidden_k:
+            #   * concept_head  → C_hat_k
+            #   * sb_query_head → sb_q_k (queries for Canvas.predict_sb)
             c_hat_k = self.concept_head(hidden_k)  # [B, L_k, D]
             predicted_concepts.append(c_hat_k)
 
-            # Reconstruct and accumulate into f_hat
-            R_k = torch.bmm(attn_weights.transpose(1, 2), c_hat_k)
+            sb_q_k = self.sb_query_head(hidden_k)  # [B, L_k, D]
+            pred_sb_k = self.canvas.predict_soft_boundaries(sb_q_k, level_idx=k)
+            R_k = Canvas.reconstruct(c_hat_k, pred_sb_k)  # [B, L_canvas, D]
             f_hat = f_hat + R_k
 
         return PredictorOutput(

@@ -86,6 +86,7 @@ model:
     predictor_model_name: Qwen/Qwen2.5-0.5B
     predictor_num_layers: null
     dropout: 0.0
+    canvas_length: 128  # L_canvas: fixed canvas length for VAR-style upsampling (used in train + inference)
 
 # Training configuration
 # -----------------------------------------------------------------------------
@@ -134,6 +135,7 @@ training:
   loss_weights:
     concept_loss_weight: 1.0
     reasoning_loss_weight: 1.0
+    canvas_loss_weight: 1.0  # MSE on predicted vs gt soft_boundaries (canvas module)
 
 # Logging configuration
 # -----------------------------------------------------------------------------

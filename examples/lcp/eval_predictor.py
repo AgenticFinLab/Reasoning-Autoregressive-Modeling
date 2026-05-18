@@ -130,23 +130,19 @@ def _run_predictor_step(
     max_length: int,
     device: str,
 ):
-    """Build gt_concepts (frozen builder), tokenize, call predictor.
+    """Build gt_concepts (frozen builder), then predictor forward.
+
+    Uses the pre-computed pyramid path: builder runs on solutions-stripped
+    batch (skips _prepare_reasoning), and the resulting PyramidOutput is
+    passed directly to predictor.forward so f_hats + attention_mask are
+    propagated for proper padding masking.
 
     Returns the full PredictorOutput; the caller computes the loss.
     """
     with torch.no_grad():
         pyramid = builder(_strip_solutions(batch))
-        gt_concepts = [c.detach() for c in pyramid.concepts]
 
-    q_ids, q_mask, s_ids, s_mask = _tokenize_qs(builder, batch, max_length, device)
-
-    output = predictor(
-        question_ids=q_ids,
-        question_attention_mask=q_mask,
-        gt_concepts=gt_concepts,
-        solution_ids=s_ids,
-        solution_attention_mask=s_mask,
-    )
+    output = predictor(batch, pyramid=pyramid)
     return output
 
 

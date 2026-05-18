@@ -121,6 +121,7 @@ model:
     model_name: Qwen/Qwen3-0.6B
     num_layers: null
     dropout: 0.0
+    canvas_length: 256  # L_canvas: VAR-style upsampling canvas (sized for GSM8K CoT distribution)
 
 # Training configuration
 # -----------------------------------------------------------------------------
@@ -169,6 +170,7 @@ training:
   loss_weights:
     concept_loss_weight: 0.023484     # raw concept   =    425.817  -> weighted ≈ 10.000
     reasoning_loss_weight: 1.000000   # raw reasoning =      7.211  -> weighted ≈ 7.211 (unchanged)
+    canvas_loss_weight: 1.0      # MSE on predicted vs gt soft_boundaries (canvas module)
 
 # Logging configuration
 # -----------------------------------------------------------------------------

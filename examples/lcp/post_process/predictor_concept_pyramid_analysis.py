@@ -43,18 +43,15 @@ Usage
 -----
 Direct config path::
 
-    python3 examples/lcp/predictor_concept_pyramid_analysis.py \\
-        -c configs/lcp/GSM8K/train_predictor_Qwen2.5-0.5B_6level_independent.yml
+    python3 examples/lcp/predictor_concept_pyramid_analysis.py -c configs/lcp/GSM8K/train_predictor_Qwen2.5-0.5B_6level_independent.yml
 
 Discovery::
 
-    python3 examples/lcp/predictor_concept_pyramid_analysis.py \\
-        -d GSM8K -e Qwen2.5-0.5B_6level_independent
+    python3 examples/lcp/predictor_concept_pyramid_analysis.py -d GSM8K -e Qwen2.5-0.5B_6level_independent
 
 Override checkpoint (only ``evaluation.data`` is read from the YAML)::
 
-    python3 examples/lcp/predictor_concept_pyramid_analysis.py \\
-        -c <yaml> -p /path/to/checkpoint.pt
+    python3 examples/lcp/predictor_concept_pyramid_analysis.py -c <yaml> -p /path/to/checkpoint.pt
 
 Arguments
 ---------

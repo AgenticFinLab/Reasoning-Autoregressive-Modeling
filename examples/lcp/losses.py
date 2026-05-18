@@ -348,8 +348,9 @@ def compute_predictor_loss(
         )
         loss_dict["concept"] = concept_loss.item()
         loss_dict["concept_per_level"] = [ll.item() for ll in per_level]
-        concept_weight = loss_weights.get("concept_loss_weight", 1.0)
-        total_loss = concept_weight * concept_loss
+        # Direct dict access: concept_loss_weight is REQUIRED in config when
+        # the concept loss component is computed (no defensive default).
+        total_loss = loss_weights["concept_loss_weight"] * concept_loss
 
     # ── Reasoning (NTP) loss ─────────────────────────────────────────
     if output.reasoning_logits is not None and output.reasoning_target_ids is not None:
@@ -359,12 +360,33 @@ def compute_predictor_loss(
             ignore_index=-100,
         )
         loss_dict["reasoning"] = reasoning_loss.item()
-        reasoning_weight = loss_weights.get("reasoning_loss_weight", 1.0)
-        weighted_reasoning = reasoning_weight * reasoning_loss
+        # Direct dict access: reasoning_loss_weight is REQUIRED in config when
+        # reasoning logits are produced (no defensive default).
+        weighted_reasoning = loss_weights["reasoning_loss_weight"] * reasoning_loss
         total_loss = (
             weighted_reasoning
             if total_loss is None
             else total_loss + weighted_reasoning
+        )
+
+    # ── Canvas (soft_boundaries prediction) loss ───────────────────────
+    if (
+        output.pred_soft_boundaries is not None
+        and output.gt_soft_boundaries is not None
+    ):
+        canvas_losses = []
+        for pred_sb_k, gt_sb_k in zip(
+            output.pred_soft_boundaries, output.gt_soft_boundaries
+        ):
+            canvas_losses.append(F.mse_loss(pred_sb_k, gt_sb_k))
+        canvas_loss = sum(canvas_losses) / len(canvas_losses)
+        loss_dict["canvas"] = canvas_loss.item()
+        loss_dict["canvas_per_level"] = [cl.item() for cl in canvas_losses]
+        # Direct dict access: canvas_loss_weight is REQUIRED in config when
+        # the canvas module emits soft_boundaries (no defensive default).
+        weighted_canvas = loss_weights["canvas_loss_weight"] * canvas_loss
+        total_loss = (
+            weighted_canvas if total_loss is None else total_loss + weighted_canvas
         )
 
     if total_loss is None:

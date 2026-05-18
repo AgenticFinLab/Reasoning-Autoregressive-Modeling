@@ -64,17 +64,7 @@ imports from the other.
   CLI TEMPLATE
 ================================================================================
 
-    python examples/lcp/eval_builder.py \
-        -c <path/to/train_builder_*.yml> \
-        -s <storage-root> \
-        --mode <teacher_forced | free_generation | both> \
-        --max-samples <N> \
-        [--ckpt <explicit/checkpoint.pt>] \
-        [-o <custom/output/dir>] \
-        [-v <0 | 1>]
-
-    (Substitute the multi-line block with one line if your shell does
-    not support backslash continuation.)
+    python examples/lcp/eval_builder.py -c <path/to/train_builder_*.yml> -s <storage-root> --mode <teacher_forced | free_generation | both> --max-samples <N> [--ckpt <explicit/checkpoint.pt>] [-o <custom/output/dir>] [-v <0 | 1>]
 
 Flag reference
 --------------

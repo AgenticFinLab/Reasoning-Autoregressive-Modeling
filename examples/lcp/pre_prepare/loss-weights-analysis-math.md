@@ -464,11 +464,8 @@ EXPERIMENT/lcp/builder/MATH_<m>_<L>level_AutoWeighted/
 ### 11.4 Regeneration
 
 ```bash
-python3 examples/RunResults/loss_prepare.py \
-    -c configs/lcp/MATH/ --dataset MATH
-python3 examples/lcp/loss_weight_compute.py \
-    -f EXPERIMENT/lcp/builder/MATH_Loss_prepare.json \
-    --c-recon 10 --c-ordering 6
+python3 examples/RunResults/loss_prepare.py -c configs/lcp/MATH/ --dataset MATH
+python3 examples/lcp/loss_weight_compute.py -f EXPERIMENT/lcp/builder/MATH_Loss_prepare.json --c-recon 10 --c-ordering 6
 # then re-run the AutoWeighted generator against configs/lcp/MATH/
 ```
 

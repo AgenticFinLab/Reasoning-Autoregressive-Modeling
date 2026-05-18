@@ -2,8 +2,7 @@
 
 Usage:
     # Basic: train with the config's own log paths (relative to CWD by default).
-    python3 examples/lcp/train_predictor.py \
-        -c configs/lcp/GSM8K/train_predictor_Qwen2.5-0.5B_3level_shared.yml
+    python3 examples/lcp/train_predictor.py -c configs/lcp/GSM8K/train_predictor_Qwen2.5-0.5B_3level_shared.yml
 
     # Redirect ALL relative outputs (save_folder/checkpoint_path/log_path)
     # under a storage root — typical on a shared server where the
@@ -11,18 +10,13 @@ Usage:
     # checkpoint paths (model.builder.checkpoint_path) are ALSO resolved
     # under this same root so Stage 2 can find the Stage 1 artefacts the
     # previous builder run wrote.
-    python3 examples/lcp/train_predictor.py \
-        -c configs/lcp/GSM8K/train_predictor_Qwen2.5-0.5B_3level_shared.yml \
-        -s /Data/<proj>
+    python3 examples/lcp/train_predictor.py -c configs/lcp/GSM8K/train_predictor_Qwen2.5-0.5B_3level_shared.yml -s /Data/<proj>
 
     # Resume from the latest checkpoint under log.checkpoint_path.
-    python3 examples/lcp/train_predictor.py \
-        -c configs/lcp/GSM8K/train_predictor_Qwen2.5-0.5B_3level_shared.yml --resume
+    python3 examples/lcp/train_predictor.py -c configs/lcp/GSM8K/train_predictor_Qwen2.5-0.5B_3level_shared.yml --resume
 
     # Resume AND pin the SwanLab run explicitly (rare).
-    python3 examples/lcp/train_predictor.py \
-        -c configs/lcp/GSM8K/train_predictor_Qwen2.5-0.5B_3level_shared.yml \
-        --resume --swanlab-id 5hjp09vuqh402irzz9j9h
+    python3 examples/lcp/train_predictor.py -c configs/lcp/GSM8K/train_predictor_Qwen2.5-0.5B_3level_shared.yml --resume --swanlab-id 5hjp09vuqh402irzz9j9h
 
 Stage-2 contract (vs Stage-1 / train_builder.py):
   - A FROZEN ConceptPyramidBuilder produces gt_concepts (and nothing else)
@@ -88,7 +82,6 @@ from lcp.data_loader import BuilderInput, LCPDataLoader
 from lcp.eval_builder import log_terminal_entry
 from lcp.eval_predictor import (
     _strip_solutions,
-    _tokenize_qs,
     evaluate_predictor,
     log_eval_results_predictor,
 )
@@ -421,6 +414,7 @@ def _log_predictor_summary(
         "  Loss Weights",
         "  ├─ concept            : %s" % loss_weights["concept_loss_weight"],
         "  ├─ reasoning          : %s" % loss_weights["reasoning_loss_weight"],
+        "  ├─ canvas             : %s" % loss_weights["canvas_loss_weight"],
         "",
         "  Parameter Summary",
         "  ├─ total              : %s" % f"{total_params:,}",
@@ -840,22 +834,14 @@ def train_predictor(
             dataloader, desc=f"Epoch {epoch+1}/{num_epochs}", miniters=log_interval
         )
         for batch_idx, batch in enumerate(pbar):
-            # Builder forward (frozen, no_grad) for gt_concepts
+            # Builder forward (frozen, no_grad) for gt_concepts + f_hats.
+            # _strip_solutions avoids running _prepare_reasoning in builder.
             with torch.no_grad():
                 pyramid = builder(_strip_solutions(batch))
-                gt_concepts = [c.detach() for c in pyramid.concepts]
 
-            # Tokenize + predictor forward
-            q_ids, q_mask, s_ids, s_mask = _tokenize_qs(
-                builder, batch, max_length, device
-            )
-            output = predictor(
-                question_ids=q_ids,
-                question_attention_mask=q_mask,
-                gt_concepts=gt_concepts,
-                solution_ids=s_ids,
-                solution_attention_mask=s_mask,
-            )
+            # Predictor forward (receives pre-computed pyramid for f_hat
+            # padding mask propagation; tokenizes Q/S from batch internally).
+            output = predictor(batch, pyramid=pyramid)
             total_loss, loss_dict = compute_predictor_loss(
                 output, loss_weights, concept_loss_type="mse"
             )

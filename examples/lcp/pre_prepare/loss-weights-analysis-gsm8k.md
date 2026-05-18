@@ -614,8 +614,7 @@ after adding Qwen3-8B entries):
 
 ```bash
 python3 examples/RunResults/loss_prepare.py -c configs/lcp/GSM8K/
-python3 examples/lcp/loss_weight_compute.py \
-    -f EXPERIMENT/lcp/builder/Loss_prepare.json
+python3 examples/lcp/loss_weight_compute.py -f EXPERIMENT/lcp/builder/Loss_prepare.json
 # then re-run the AutoWeighted generator
 ```
 

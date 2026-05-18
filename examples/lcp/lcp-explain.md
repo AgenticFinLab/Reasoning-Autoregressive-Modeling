@@ -1156,8 +1156,10 @@ of `f_hat_k`.
 | `lvl_embed`     | `Embedding(K, D_enc)`                                    | Per-level identity tag added to every approximation token at level `k` (analogous to VAR's `lvl_emb`).           |
 | `concept_head`  | `Linear(D_enc, D_enc) → GELU → Linear(D_enc, D)`         | Maps backbone hidden state at approx-token positions back to concept space to produce Ĉ_k.                       |
 
-The `_inference_canvas_length` (default 128) sets the fixed canvas size
-used at inference time when the Builder is unavailable. There is **no**
+The `_canvas_length` (REQUIRED in config; recommended **256 for GSM8K**, **512 for MATH**) sets
+the fixed canvas size used in both training and inference for the VAR-style f_hat workspace.
+It should be sized to cover the ~99th percentile of the dataset's CoT length to avoid silent
+truncation of long samples in `Canvas.pad_f_hat` / `pad_soft_boundaries`. There is **no**
 `level_embeddings` table on individual concept tokens, no
 `position_embeddings`, no `q_proj`, no `start_token`, and no
 `use_shared_model` toggle: the predictor always owns its own copy of

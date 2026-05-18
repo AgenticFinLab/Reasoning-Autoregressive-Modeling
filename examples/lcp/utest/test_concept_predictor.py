@@ -4,10 +4,8 @@ Run with (defaults to a 6-level GSM8K predictor config):
     python examples/lcp/utest/test_concept_predictor.py
 
 Or override with any predictor config from configs/lcp/GSM8K or configs/lcp/MATH:
-    python examples/lcp/utest/test_concept_predictor.py \
-        -c configs/lcp/GSM8K/train_predictor_Qwen2.5-0.5B_6level_independent.yml
-    python examples/lcp/utest/test_concept_predictor.py \
-        -c configs/lcp/MATH/train_predictor_Qwen2.5-0.5B_6level_independent.yml
+    python examples/lcp/utest/test_concept_predictor.py -c configs/lcp/GSM8K/train_predictor_Qwen2.5-0.5B_6level_independent.yml
+    python examples/lcp/utest/test_concept_predictor.py -c configs/lcp/MATH/train_predictor_Qwen2.5-0.5B_6level_independent.yml
 
 DESIGN:
     Mirrors examples/lcp/train_predictor.py's loading contract:
@@ -141,7 +139,11 @@ def load_predictor_and_builder_configs(predictor_yaml_path: Path):
     predictor_cfg.setdefault("training", {})["batch_size"] = 2
     predictor_cfg["training"].setdefault(
         "loss_weights",
-        {"concept_loss_weight": 1.0, "reasoning_loss_weight": 1.0},
+        {
+            "concept_loss_weight": 1.0,
+            "reasoning_loss_weight": 1.0,
+            "canvas_loss_weight": 1.0,
+        },
     )
 
     return predictor_cfg, builder_cfg, builder_cfg_path
@@ -197,6 +199,7 @@ def run_pipeline(predictor_cfg: dict, builder_cfg: dict, device: str):
 
     gt_concepts = [c.detach() for c in pyramid.concepts]
     f_hats = [f.detach() for f in pyramid.f_hat_per_level]
+    f_hat_mask = pyramid.attention_mask  # [B, L_CoT] or None
     for k in range(num_levels):
         log_value(f"GT concepts[{k}].shape", list(gt_concepts[k].shape))
         log_value(f"f_hat[{k}].shape", list(f_hats[k].shape))
@@ -216,7 +219,7 @@ def run_pipeline(predictor_cfg: dict, builder_cfg: dict, device: str):
     log_value("_num_levels", predictor._num_levels)
     log_value("_total_concepts", predictor._total_concepts)
     log_value("_level_lengths", predictor._level_lengths)
-    log_value("_inference_canvas_length", predictor._inference_canvas_length)
+    log_value("_canvas_length", predictor._canvas_length)
 
     # Verify key modules exist
     log_check("has back_proj", hasattr(predictor, "back_proj"))
@@ -251,7 +254,9 @@ def run_pipeline(predictor_cfg: dict, builder_cfg: dict, device: str):
     log_section("Step 4: _construct_approx_tokens (pre-LLM cross-attention)")
 
     test_f_hat = f_hats[0].to(device)
-    approx_tokens_0, attn_w_0 = predictor._construct_approx_tokens(0, test_f_hat)
+    approx_tokens_0, attn_w_0 = predictor._construct_approx_tokens(
+        0, test_f_hat, f_hat_mask.to(device) if f_hat_mask is not None else None
+    )
 
     L_0 = level_lengths[0]
     D_enc = predictor.reason_model_hidden_dim
@@ -276,6 +281,25 @@ def run_pipeline(predictor_cfg: dict, builder_cfg: dict, device: str):
         "approx_tokens_0 stats",
         f"mean={approx_tokens_0.mean():.4f}, std={approx_tokens_0.std():.4f}",
     )
+
+    # Padding mask validation: when mask is provided, attention weight at
+    # padding positions should be exactly 0 (key_padding_mask excludes them).
+    if f_hat_mask is not None:
+        pad_positions = f_hat_mask.to(device) == 0  # [B, ctx]
+        if pad_positions.any():
+            # attn_w_0: [B, L_0, ctx] — weight at padding cols should be 0
+            attn_at_pad = attn_w_0[:, :, : pad_positions.shape[1]]
+            attn_at_pad = attn_at_pad * pad_positions.unsqueeze(1).float()
+            max_pad_attn = attn_at_pad.abs().max().item()
+            log_check(
+                "attn_w at padding positions = 0",
+                max_pad_attn < 1e-6,
+                f"max_pad_attn={max_pad_attn:.2e}",
+            )
+        else:
+            log_value("padding check", "no padding positions in this batch")
+    else:
+        log_value("padding check", "no attention_mask (all positions valid)")
 
     # ==================================================================
     # Step 5: Scale-Causal Mask Verification
