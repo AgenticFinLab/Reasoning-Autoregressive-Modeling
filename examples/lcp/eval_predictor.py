@@ -64,7 +64,7 @@ from lcp.eval_builder import (
     compute_reasoning_accuracy,
     log_terminal_entry,
 )
-from lcp.losses import compute_predictor_loss
+from lcp.losses import compute_predictor_loss, validate_predictor_loss_weights
 from ram.utils import apply_storage_root, load_config
 
 logger = logging.getLogger(__name__)
@@ -240,7 +240,7 @@ def evaluate_predictor(
     device: str,
     max_batches: int,
     mode: str,
-    generation_max_tokens: int,
+    generation_kwargs: dict,
     output_root: Optional[Path],
     dump_artifacts: bool,
 ) -> tuple[dict, dict[str, list[str]], list[dict]]:
@@ -258,7 +258,11 @@ def evaluate_predictor(
         max_batches: Max batches to consume (0 = all).
         mode: One of ``VALID_MODES``. Controls which reasoning path(s)
             are exercised per sample.
-        generation_max_tokens: Max new tokens for free generation.
+        generation_kwargs: Dict of HuggingFace ``.generate()`` knobs for
+            the free-generation path. REQUIRED keys: ``max_new_tokens``,
+            ``do_sample``, ``temperature``, ``top_k``, ``top_p``. All
+            five are forwarded to ``predictor.generate_solution`` which
+            forbids defaults; a missing key raises immediately.
         output_root: Folder under which ``sample_<id>/`` directories are
             written when ``dump_artifacts`` is True. Ignored otherwise.
         dump_artifacts: Master switch for per-sample folder writes. The
@@ -302,9 +306,7 @@ def evaluate_predictor(
         t0 = time.perf_counter()
 
         output = _run_predictor_step(predictor, builder, batch, max_length, device)
-        _, loss_dict = compute_predictor_loss(
-            output, loss_weights, concept_loss_type="mse"
-        )
+        _, loss_dict = compute_predictor_loss(output, loss_weights)
 
         if torch.cuda.is_available():
             torch.cuda.synchronize()
@@ -331,7 +333,7 @@ def evaluate_predictor(
                 output.predicted_concepts,
                 q_ids,
                 q_mask,
-                max_new_tokens=generation_max_tokens,
+                **generation_kwargs,
             )
 
             if torch.cuda.is_available():
@@ -853,7 +855,19 @@ def main() -> None:
 
     loss_weights = predictor_config["training"]["loss_weights"]
     max_length = predictor_config["model"]["pyramid"]["max_seq_len"]
-    generation_max_tokens = predictor_config["evaluation"]["generation_max_tokens"]
+    eval_cfg = predictor_config["evaluation"]
+    generation_kwargs = {
+        "max_new_tokens": eval_cfg["generation_max_tokens"],
+        "do_sample": eval_cfg["do_sample"],
+        "temperature": eval_cfg["temperature"],
+        "top_k": eval_cfg["top_k"],
+        "top_p": eval_cfg["top_p"],
+    }
+    # Fail-fast schema check on loss_weights so a bad YAML aborts before
+    # the long evaluation run rather than mid-loop.
+    validate_predictor_loss_weights(
+        loss_weights, predictor_config["model"]["pyramid"]["num_levels"]
+    )
 
     cli_logger.info("")
     cli_logger.info("Starting evaluation (max_samples=%d)...", args.max_samples)
@@ -869,7 +883,7 @@ def main() -> None:
         device=device,
         max_batches=args.max_samples,
         mode=args.mode,
-        generation_max_tokens=generation_max_tokens,
+        generation_kwargs=generation_kwargs,
         output_root=output_root,
         dump_artifacts=True,
     )

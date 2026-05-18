@@ -259,32 +259,152 @@ def _concept_loss_cosine(predicted: torch.Tensor, target: torch.Tensor) -> torch
     return (1.0 - cos_sim).mean()
 
 
+def _weighted_level_mean(
+    per_level: List[torch.Tensor], level_weights: List[float]
+) -> torch.Tensor:
+    """Weighted mean across pyramid levels: Σ w_k * L_k / Σ w_k.
+
+    The reduction runs in float32 regardless of the per-level dtype so
+    that bf16 / fp16 underflow on tiny ``level_weights`` cannot collapse
+    ``Σ w_k`` to zero and produce a silent NaN / Inf. The final scalar
+    is cast back to the per-level dtype so the calling autograd graph
+    sees the same precision it provided.
+    """
+    src_dtype = per_level[0].dtype
+    device = per_level[0].device
+    weights_f32 = torch.tensor(level_weights, device=device, dtype=torch.float32)
+    weight_sum = weights_f32.sum()
+    if weight_sum.item() <= 0.0:
+        raise ValueError(
+            "_weighted_level_mean: sum of level_weights must be > 0 "
+            f"(got {level_weights})."
+        )
+    # Promote per-level scalars to float32 for the weighted reduction.
+    stacked_f32 = torch.stack([t.to(torch.float32) for t in per_level])
+    result_f32 = (stacked_f32 * weights_f32).sum() / weight_sum
+    return result_f32.to(src_dtype)
+
+
+# ── Loss-weights schema validators (fail-fast at process startup) ─────────────────────
+#
+# These run AT THE TOP of train_*.py / eval_*.py CLIs. Their job is to
+# turn schema mismatches (an old YAML resumed against new code, or a
+# typo in a new YAML) into a single readable error BEFORE a long
+# training run hits the first forward pass and crashes mid-step.
+# Both validators enforce the project rule "no defaults in code, all
+# knobs in config" — every key listed below must appear in YAML.
+
+_PREDICTOR_REQUIRED_LOSS_KEYS: Tuple[str, ...] = (
+    "concept_loss_type",
+    "concept_loss_weight",
+    "concept_level_weights",
+    "reasoning_loss_weight",
+    "canvas_loss_weight",
+    "canvas_level_weights",
+)
+
+_BUILDER_REQUIRED_LOSS_KEYS: Tuple[str, ...] = (
+    "recon_loss_weight",
+    "ordering_loss_weight",
+    "ordering_margin",
+    "residual_loss_weight",
+    "reasoning_loss_weight",
+)
+
+
+def validate_predictor_loss_weights(loss_weights: dict, num_levels: int) -> None:
+    """Fail-fast schema check for ``training.loss_weights`` (predictor).
+
+    Verifies every key in :data:`_PREDICTOR_REQUIRED_LOSS_KEYS` is
+    present, that ``concept_loss_type`` is a known value, and that the
+    two per-level weight lists have length ``num_levels`` with
+    non-negative entries.
+
+    Raises:
+        ValueError: on any schema violation, with a message that names
+            the offending key and points the user at the YAML.
+    """
+    if not isinstance(loss_weights, dict):
+        raise ValueError(
+            f"loss_weights must be a dict, got {type(loss_weights).__name__}."
+        )
+    missing = [k for k in _PREDICTOR_REQUIRED_LOSS_KEYS if k not in loss_weights]
+    if missing:
+        raise ValueError(
+            f"training.loss_weights missing required keys for predictor: "
+            f"{missing}. Add them to the YAML config."
+        )
+    if loss_weights["concept_loss_type"] not in ("mse", "cosine"):
+        raise ValueError(
+            "training.loss_weights.concept_loss_type must be 'mse' or "
+            f"'cosine', got {loss_weights['concept_loss_type']!r}."
+        )
+    for key in ("concept_level_weights", "canvas_level_weights"):
+        seq = loss_weights[key]
+        if not isinstance(seq, (list, tuple)):
+            raise ValueError(
+                f"training.loss_weights.{key} must be a list, got "
+                f"{type(seq).__name__}."
+            )
+        if len(seq) != num_levels:
+            raise ValueError(
+                f"training.loss_weights.{key} length {len(seq)} does not "
+                f"match model.pyramid.num_levels={num_levels}."
+            )
+        for i, v in enumerate(seq):
+            if not isinstance(v, (int, float)) or isinstance(v, bool) or v < 0:
+                raise ValueError(
+                    f"training.loss_weights.{key}[{i}]={v!r} must be a "
+                    f"non-negative number."
+                )
+
+
+def validate_builder_loss_weights(loss_weights: dict) -> None:
+    """Fail-fast schema check for ``training.loss_weights`` (builder).
+
+    The builder schema is flat — every weight is a single scalar — so
+    presence is the only thing to check. ``reasoning_loss_weight`` is
+    listed as required because every shipped builder YAML declares it;
+    the value is ignored for solution-less batches.
+    """
+    if not isinstance(loss_weights, dict):
+        raise ValueError(
+            f"loss_weights must be a dict, got {type(loss_weights).__name__}."
+        )
+    missing = [k for k in _BUILDER_REQUIRED_LOSS_KEYS if k not in loss_weights]
+    if missing:
+        raise ValueError(
+            f"training.loss_weights missing required keys for builder: "
+            f"{missing}. Add them to the YAML config."
+        )
+
+
 def compute_predictor_concept_loss(
     predicted_concepts: List[torch.Tensor],
     gt_concepts: List[torch.Tensor],
-    concept_loss_type: str = "mse",
+    concept_loss_type: str,
+    level_weights: List[float],
 ) -> Tuple[torch.Tensor, List[torch.Tensor]]:
-    """Concept reconstruction loss averaged across pyramid levels.
+    """Concept reconstruction loss aggregated across pyramid levels.
 
-    PRINCIPLE:
-        For each level k, compare predicted C_k to GT C_k. The GT is
-        detached so gradients do not flow back into the frozen builder
-        even if a caller accidentally passes attached tensors.
+    Final scalar is a weighted mean: Σ w_k * L_k / Σ w_k.
 
     Args:
         predicted_concepts: list of K tensors, each [B, L_k, D].
         gt_concepts:        list of K tensors, each [B, L_k, D].
-        concept_loss_type:  "mse" (default) or "cosine".
-
-    Returns:
-        (total_loss, per_level_losses)
-            total_loss:       mean of the K per-level losses.
-            per_level_losses: list of K scalar tensors.
+        concept_loss_type:  "mse" or "cosine". REQUIRED (no default).
+        level_weights:      list of K floats. REQUIRED (no default).
+                            Use [1.0]*K for a uniform mean.
     """
     if len(predicted_concepts) != len(gt_concepts):
         raise ValueError(
             f"predicted_concepts has {len(predicted_concepts)} levels but "
             f"gt_concepts has {len(gt_concepts)}."
+        )
+    if len(level_weights) != len(predicted_concepts):
+        raise ValueError(
+            f"concept_level_weights length {len(level_weights)} does not "
+            f"match num_levels {len(predicted_concepts)}."
         )
     if concept_loss_type == "mse":
         level_fn = _concept_loss_mse
@@ -294,43 +414,41 @@ def compute_predictor_concept_loss(
         raise ValueError(f"Unknown concept_loss_type: {concept_loss_type}")
 
     per_level_losses: List[torch.Tensor] = []
-    total = None
     for predicted, target in zip(predicted_concepts, gt_concepts):
         # Detach target to be safe; GT is from the frozen builder anyway.
-        level_loss = level_fn(predicted, target.detach())
-        per_level_losses.append(level_loss)
-        total = level_loss if total is None else total + level_loss
+        per_level_losses.append(level_fn(predicted, target.detach()))
 
-    total_loss = total / len(predicted_concepts)
+    total_loss = _weighted_level_mean(per_level_losses, level_weights)
     return total_loss, per_level_losses
 
 
 def compute_predictor_loss(
     output: PredictorOutput,
     loss_weights: dict,
-    concept_loss_type: str = "mse",
 ) -> Tuple[torch.Tensor, dict]:
-    """Compute total ConceptPredictor loss = concept + reasoning.
+    """Compute total ConceptPredictor loss = concept + reasoning + canvas.
 
     PRINCIPLE:
-        total = concept_loss_weight * concept_loss
+        total = concept_loss_weight   * weighted_mean_k(concept_loss_k)
               + reasoning_loss_weight * reasoning_loss
+              + canvas_loss_weight    * weighted_mean_k(canvas_loss_k)
 
-        Both components are optional (skipped gracefully if the
-        corresponding output tensors are missing) so the same function
-        serves training and evaluation.
+        Each component is computed ONLY when the corresponding output
+        tensors are present, so the same function serves training and
+        evaluation. Every knob below is read directly from
+        ``loss_weights`` (KeyError on missing key); this function
+        performs NO defaulting.
 
     Args:
         output: PredictorOutput from ConceptPredictor.forward().
-            - predicted_concepts and gt_concepts are required for the
-              concept loss component.
-            - reasoning_logits and reasoning_target_ids are required
-              for the reasoning loss component.
-        loss_weights: dict with the following keys (used only when the
-            corresponding component is computed):
-                "concept_loss_weight"   (default 1.0 if absent)
-                "reasoning_loss_weight" (default 1.0 if absent)
-        concept_loss_type: "mse" (default) or "cosine".
+        loss_weights: dict with the following REQUIRED keys (only the
+            keys for components actually computed are looked up):
+                "concept_loss_type"      : "mse" or "cosine"
+                "concept_loss_weight"    : float
+                "concept_level_weights"  : list of K floats
+                "reasoning_loss_weight"  : float
+                "canvas_loss_weight"     : float
+                "canvas_level_weights"   : list of K floats
 
     Returns:
         (total_loss, loss_dict) — loss_dict records the scalar value of
@@ -338,21 +456,21 @@ def compute_predictor_loss(
     """
     loss_dict: dict = {}
 
-    # ── Concept reconstruction loss ──────────────────────────────────
+    # ── Concept reconstruction loss ─────────────────────────────────────────
     total_loss = None
     if output.gt_concepts is not None and len(output.predicted_concepts) > 0:
         concept_loss, per_level = compute_predictor_concept_loss(
             output.predicted_concepts,
             output.gt_concepts,
-            concept_loss_type=concept_loss_type,
+            concept_loss_type=loss_weights["concept_loss_type"],
+            level_weights=loss_weights["concept_level_weights"],
         )
         loss_dict["concept"] = concept_loss.item()
         loss_dict["concept_per_level"] = [ll.item() for ll in per_level]
-        # Direct dict access: concept_loss_weight is REQUIRED in config when
-        # the concept loss component is computed (no defensive default).
+        # concept_loss_weight is REQUIRED in config when this branch runs.
         total_loss = loss_weights["concept_loss_weight"] * concept_loss
 
-    # ── Reasoning (NTP) loss ─────────────────────────────────────────
+    # ── Reasoning (NTP) loss ─────────────────────────────────────────────────
     if output.reasoning_logits is not None and output.reasoning_target_ids is not None:
         reasoning_loss = F.cross_entropy(
             output.reasoning_logits.reshape(-1, output.reasoning_logits.shape[-1]),
@@ -360,8 +478,7 @@ def compute_predictor_loss(
             ignore_index=-100,
         )
         loss_dict["reasoning"] = reasoning_loss.item()
-        # Direct dict access: reasoning_loss_weight is REQUIRED in config when
-        # reasoning logits are produced (no defensive default).
+        # reasoning_loss_weight is REQUIRED in config when this branch runs.
         weighted_reasoning = loss_weights["reasoning_loss_weight"] * reasoning_loss
         total_loss = (
             weighted_reasoning
@@ -369,21 +486,26 @@ def compute_predictor_loss(
             else total_loss + weighted_reasoning
         )
 
-    # ── Canvas (soft_boundaries prediction) loss ───────────────────────
+    # ── Canvas (soft_boundaries prediction) loss ──────────────────────────
     if (
         output.pred_soft_boundaries is not None
         and output.gt_soft_boundaries is not None
     ):
-        canvas_losses = []
+        canvas_per_level: List[torch.Tensor] = []
         for pred_sb_k, gt_sb_k in zip(
             output.pred_soft_boundaries, output.gt_soft_boundaries
         ):
-            canvas_losses.append(F.mse_loss(pred_sb_k, gt_sb_k))
-        canvas_loss = sum(canvas_losses) / len(canvas_losses)
+            canvas_per_level.append(F.mse_loss(pred_sb_k, gt_sb_k))
+        canvas_level_weights = loss_weights["canvas_level_weights"]
+        if len(canvas_level_weights) != len(canvas_per_level):
+            raise ValueError(
+                f"canvas_level_weights length {len(canvas_level_weights)} "
+                f"does not match num_levels {len(canvas_per_level)}."
+            )
+        canvas_loss = _weighted_level_mean(canvas_per_level, canvas_level_weights)
         loss_dict["canvas"] = canvas_loss.item()
-        loss_dict["canvas_per_level"] = [cl.item() for cl in canvas_losses]
-        # Direct dict access: canvas_loss_weight is REQUIRED in config when
-        # the canvas module emits soft_boundaries (no defensive default).
+        loss_dict["canvas_per_level"] = [cl.item() for cl in canvas_per_level]
+        # canvas_loss_weight is REQUIRED in config when this branch runs.
         weighted_canvas = loss_weights["canvas_loss_weight"] * canvas_loss
         total_loss = (
             weighted_canvas if total_loss is None else total_loss + weighted_canvas

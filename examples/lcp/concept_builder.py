@@ -127,7 +127,11 @@ from peft import LoraConfig, get_peft_model
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from lcp.data_loader import BuilderInput
-from lcp.utils import pack_qcs_sequences
+from lcp.utils import (
+    build_solution_targets,
+    gather_solution_logits,
+    pack_qcs_sequences,
+)
 
 # =========================================================================
 # Output Dataclasses — structured outputs for each Builder stage
@@ -878,22 +882,20 @@ class ConceptPyramidBuilder(nn.Module):
             compute_builder_loss() in losses.py can compute cross-entropy
             — keeping all loss computation centralized.
 
-            Data flow (teacher-forcing):
+            Data flow (teacher-forcing, per-row packed):
                 1. Concatenate concepts (all levels) -> [B, total_C, D]
                 2. back_proj: concepts [B, total_C, D] -> [B, total_C, D_enc]
-                3. embed Q tokens: [B, L_Q, D_enc]
-                4. embed S tokens: [B, L_S, D_enc]
-                5. Concatenate [Q_embeds, concept_embeds, S_embeds]
-                   -> [B, L_Q + total_C + L_S, D_enc]
-                6. Attention mask [Q_mask, ones(total_C), S_mask]
-                   -> [B, L_Q + total_C + L_S]
-                7. Forward through reason_model -> logits
-                   [B, L_Q + total_C + L_S, V]
-                8. Extract solution-prediction logits:
-                   logits[:, L_Q+total_C-1 : L_Q+total_C+L_S-1, :]
-                   -> [B, L_S, V]
-                9. Build targets: solution_ids with pad positions set to -100
-               10. Store in pyramid + argmax decode for reasoning_texts
+                3. embed Q tokens: [B, L_Q_pad, D_enc]
+                4. embed S tokens: [B, L_S_pad, D_enc]
+                5. pack_qcs_sequences -> per-row
+                   [real_Q_i | concepts | real_S_i | tail_pad]
+                   (no internal padding; RoPE-safe across rows)
+                6. Forward through reason_model with 2D packed_mask
+                   -> logits [B, T, V] under standard causal+padding mask
+                7. gather_solution_logits(logits, pack)
+                   -> [B, L_S_pad, V] aligned to S token positions
+                8. build_solution_targets: pad positions set to -100
+                9. Store in pyramid + argmax decode for reasoning_texts
 
         PURPOSE:
             Validate that the concept pyramid supports reasoning. A pyramid
@@ -909,12 +911,8 @@ class ConceptPyramidBuilder(nn.Module):
         """
         assert self.back_proj is not None, "back_proj is None"
 
-        device = question_ids.device
-        batch_size = question_ids.shape[0]
-
         # Step 1: Concatenate all concept levels: [B, total_C, D]
         concepts = pyramid.cat_concepts()
-        total_C = concepts.shape[1]
 
         # Step 2: Back-project concepts to encoder dimension: [B, total_C, D_enc]
         concept_embeds = self.back_decode(concepts)
@@ -923,62 +921,50 @@ class ConceptPyramidBuilder(nn.Module):
         backbone = self._get_backbone()
         embed_layer = backbone.get_input_embeddings()
 
-        # Q_embeds: [B, L_Q, D_enc]
+        # Q_embeds: [B, L_Q_pad, D_enc]
         Q_embeds = embed_layer(question_ids)
-        L_Q = Q_embeds.shape[1]
-
-        # S_embeds: [B, L_S, D_enc]
+        # S_embeds: [B, L_S_pad, D_enc]
         S_embeds = embed_layer(solution_ids)
-        L_S = S_embeds.shape[1]
 
-        # Step 4: Concatenate [Q_embeds, concept_embeds, S_embeds]
-        # Mirrors the original autoregressive flow: Q -> CoT -> Solution
-        # decoder_input_embeds: [B, L_Q + total_C + L_S, D_enc]
-        decoder_input_embeds = torch.cat([Q_embeds, concept_embeds, S_embeds], dim=1)
-
-        # Step 5: Build attention mask [Q_mask, ones(total_C), S_mask]
-        # Concepts have no padding, so mask is all ones
-        # concept_mask: [B, total_C]
-        concept_mask = torch.ones(
-            batch_size,
-            total_C,
-            device=device,
-            dtype=question_attention_mask.dtype,
-        )
-        # decoder_attention_mask: [B, L_Q + total_C + L_S]
-        decoder_attention_mask = torch.cat(
-            [question_attention_mask, concept_mask, solution_attention_mask],
-            dim=1,
+        # Step 4: Per-row pack [real_Q_i | concepts | real_S_i | tail_pad]
+        # RoPE-safe: removes Q/S padding so concepts and S share consistent
+        # relative positions across rows. Replaces the legacy
+        # cat([Q_pad, concepts, S_pad]) layout whose batch-uniform offsets
+        # corrupted RoPE distances and pinned readouts at pad positions.
+        pack = pack_qcs_sequences(
+            Q_embeds=Q_embeds,
+            q_mask=question_attention_mask,
+            concept_embeds=concept_embeds,
+            S_embeds=S_embeds,
+            s_mask=solution_attention_mask,
         )
 
-        # Step 6: Forward through reason_model (full, includes lm_head)
-        # Use inputs_embeds since we provide mixed embeddings directly
+        # Step 5: Forward through reason_model on packed inputs.
+        # The 2D packed_mask is converted by HF to a standard causal +
+        # padding mask, which is exactly what the builder needs here
+        # (no scale-causal block structure required for reasoning NTP).
         outputs = self.reason_model(
-            inputs_embeds=decoder_input_embeds,
-            attention_mask=decoder_attention_mask,
+            inputs_embeds=pack.packed_embeds,
+            attention_mask=pack.packed_mask,
         )
-        # logits: [B, L_Q + total_C + L_S, V]
+        # logits: [B, T, V]
         logits = outputs.logits
 
-        # Step 7: Extract solution-prediction logits
-        # In a causal LM, logits at position t predict token at t+1.
-        # The last concept position (L_Q + total_C - 1) predicts S_0.
-        # The position (L_Q + total_C + L_S - 2) predicts S_{L_S-1}.
-        # solution_logits: [B, L_S, V]
-        sol_start = L_Q + total_C - 1
-        sol_end = L_Q + total_C + L_S - 1
-        solution_logits = logits[:, sol_start:sol_end, :]
+        # Step 6: Gather solution-prediction logits aligned to S tokens.
+        # gather_solution_logits returns [B, L_S_pad, V] using per-row
+        # advanced indices (q_len[i] + total_C - 1 + j), so position 0
+        # of the result is the prediction for S_0 on every row.
+        solution_logits = gather_solution_logits(logits, pack)
 
-        # Step 8: Build targets with -100 for padding positions
-        # Where solution_attention_mask == 0, set target to -100 (ignored by CE)
-        targets = solution_ids.clone()
-        targets[solution_attention_mask == 0] = -100
+        # Step 7: Build CE targets with -100 for padding positions.
+        # Shape preserved as [B, L_S_pad] to match downstream CE layout.
+        targets = build_solution_targets(solution_ids, solution_attention_mask, pack)
 
-        # Step 9: Store in pyramid
+        # Step 8: Store in pyramid
         pyramid.reasoning_logits = solution_logits
         pyramid.reasoning_target_ids = targets
 
-        # Step 10: Teacher-forced argmax decode: [B, L_S] -> List[str]
+        # Step 9: Teacher-forced argmax decode: [B, L_S_pad] -> List[str]
         predicted_ids = solution_logits.argmax(dim=-1)
         pyramid.reasoning_texts = self.tokenizer.batch_decode(
             predicted_ids, skip_special_tokens=True
@@ -990,7 +976,12 @@ class ConceptPyramidBuilder(nn.Module):
         pyramid: PyramidOutput,
         question_ids: torch.Tensor,
         question_attention_mask: torch.Tensor,
-        max_new_tokens: int = 256,
+        *,
+        max_new_tokens: int,
+        do_sample: bool,
+        temperature: float,
+        top_k: int,
+        top_p: float,
     ) -> List[str]:
         """Free autoregressive generation of solution from [Q, Concepts].
 
@@ -1012,6 +1003,18 @@ class ConceptPyramidBuilder(nn.Module):
             question_ids: Token IDs for the question [B, L_Q].
             question_attention_mask: Attention mask for question [B, L_Q].
             max_new_tokens: Maximum tokens to generate per sample.
+            do_sample: If True, sample with temperature/top_k/top_p; if
+                False, use greedy decoding (sampling kwargs are ignored).
+            temperature: Softmax temperature for sampling. Used iff
+                ``do_sample`` is True.
+            top_k: Top-k truncation size for sampling. Used iff
+                ``do_sample`` is True.
+            top_p: Nucleus sampling probability. Used iff ``do_sample``
+                is True.
+
+        All five generation knobs are REQUIRED (keyword-only, no
+        defaults) so they must be supplied from the YAML config; this
+        prevents hidden defaults from drifting between train and eval.
 
         Returns:
             List of B generated strings.
@@ -1042,15 +1045,22 @@ class ConceptPyramidBuilder(nn.Module):
             s_mask=None,
         )
 
-        # Step 5: Free autoregressive generation on packed input
-        generated_ids = self.reason_model.generate(
-            inputs_embeds=pack.packed_embeds,
-            attention_mask=pack.packed_mask,
-            max_new_tokens=max_new_tokens,
-            eos_token_id=self.tokenizer.eos_token_id,
-            pad_token_id=self.tokenizer.pad_token_id,
-            do_sample=False,  # greedy for reproducibility
-        )
+        # Step 5: Free autoregressive generation on packed input.
+        # Sampling kwargs are conditional on do_sample to avoid HF
+        # warnings about "temperature/top_k/top_p set with do_sample=False".
+        gen_kwargs = {
+            "inputs_embeds": pack.packed_embeds,
+            "attention_mask": pack.packed_mask,
+            "max_new_tokens": max_new_tokens,
+            "eos_token_id": self.tokenizer.eos_token_id,
+            "pad_token_id": self.tokenizer.pad_token_id,
+            "do_sample": do_sample,
+        }
+        if do_sample:
+            gen_kwargs["temperature"] = temperature
+            gen_kwargs["top_k"] = top_k
+            gen_kwargs["top_p"] = top_p
+        generated_ids = self.reason_model.generate(**gen_kwargs)
 
         # Step 6: Decode only the NEW tokens (after the input prefix)
         # generate() with inputs_embeds may return only new tokens or

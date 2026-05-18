@@ -74,13 +74,23 @@ training:
     freeze: false
     lora: null
 
-  # Loss weights (builder losses for pyramid construction)
+  # Loss weights — single block shared by builder utest and predictor utest.
+  # Builder keys are consumed by compute_builder_loss; predictor keys (concept_*
+  # and canvas_*) are consumed by compute_predictor_loss. Extra keys are ignored
+  # by the loss that does not need them.
   loss_weights:
+    # ── builder keys ────────────────────────────────────────────────
     reasoning_loss_weight: 0.5
     ordering_loss_weight: 0.5
     recon_loss_weight: 0.1
     ordering_margin: 1.0
     residual_loss_weight: 1.0
+    # ── predictor keys ──────────────────────────────────────────────
+    concept_loss_type: mse              # mse | cosine
+    concept_loss_weight: 1.0
+    concept_level_weights: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]   # length == num_levels
+    canvas_loss_weight: 1.0
+    canvas_level_weights: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]    # length == num_levels
   ordering_loss_type: margin
 
 # Log configuration

@@ -170,6 +170,10 @@ evaluation:
   eval_step_interval: 500   # -1 = disabled
   mode: teacher_forced  # one of: teacher_forced | free_generation | both
   generation_max_tokens: 512      # max new tokens for free generation
+  do_sample: false              # HF .generate() — greedy when false
+  temperature: 0.2              # HF .generate() — only used if do_sample=true
+  top_k: 20                     # HF .generate() — only used if do_sample=true
+  top_p: 0.9                    # HF .generate() — only used if do_sample=true
   intermediate_vector_save: 1  # 0 = skip vector dumps (e.g. pyramid.pt), 1 = save intermediate vectors
   data:
     data_name: math

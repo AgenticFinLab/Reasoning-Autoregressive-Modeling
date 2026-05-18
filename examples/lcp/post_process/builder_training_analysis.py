@@ -443,6 +443,17 @@ def run_checkpoint_eval(config: dict) -> dict | None:
     loss_weights = train_cfg["loss_weights"]
     ordering_loss_type = train_cfg["ordering_loss_type"]
 
+    # Build generation_kwargs from YAML even though teacher-forced mode
+    # below will not consume them — keeps the contract that all HF
+    # ``.generate()`` knobs come from YAML, never from in-code defaults.
+    generation_kwargs = {
+        "max_new_tokens": eval_cfg["generation_max_tokens"],
+        "do_sample": eval_cfg["do_sample"],
+        "temperature": eval_cfg["temperature"],
+        "top_k": eval_cfg["top_k"],
+        "top_p": eval_cfg["top_p"],
+    }
+
     # Discard reasoning_texts and samples list — not needed for plotting.
     eval_losses, _, _ = evaluate_builder(
         builder=builder,
@@ -452,7 +463,7 @@ def run_checkpoint_eval(config: dict) -> dict | None:
         # Evaluate all batches
         max_batches=0,
         mode=MODE_TEACHER_FORCED,
-        generation_max_tokens=0,
+        generation_kwargs=generation_kwargs,
         output_root=None,
         dump_artifacts=False,
     )

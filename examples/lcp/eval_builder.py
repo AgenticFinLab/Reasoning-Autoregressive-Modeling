@@ -41,7 +41,7 @@ imports from the other.
         ordering_loss_type=ordering_loss_type,
         max_batches=quick_eval_batches,
         mode=eval_mode,                  # YAML evaluation.mode
-        generation_max_tokens=gen_max_tokens,
+        generation_kwargs=generation_kwargs,  # YAML evaluation.* knobs
         output_root=None,                # ignored when dump_artifacts=False
         dump_artifacts=False,
     )
@@ -169,7 +169,7 @@ sys.path.insert(0, str(PROJECT_ROOT / "examples"))
 from lmbase.utils.env_tools import get_device
 from lcp.concept_builder import ConceptPyramidBuilder
 from lcp.data_loader import BuilderInput, LCPDataLoader
-from lcp.losses import compute_builder_loss
+from lcp.losses import compute_builder_loss, validate_builder_loss_weights
 from ram.utils import apply_storage_root, load_config
 
 logger = logging.getLogger(__name__)
@@ -610,7 +610,7 @@ def evaluate_builder(
     ordering_loss_type: str,
     max_batches: int,
     mode: str,
-    generation_max_tokens: int,
+    generation_kwargs: dict,
     output_root: Optional[Path],
     dump_artifacts: bool,
     artifacts: Optional[BuilderEvalArtifacts] = None,
@@ -626,7 +626,11 @@ def evaluate_builder(
         max_batches: Max batches to consume (0 = all).
         mode: One of ``VALID_MODES``. Controls which reasoning path(s)
             are exercised per sample.
-        generation_max_tokens: Max new tokens for free generation.
+        generation_kwargs: Dict of HuggingFace ``.generate()`` knobs for
+            the free-generation path. REQUIRED keys: ``max_new_tokens``,
+            ``do_sample``, ``temperature``, ``top_k``, ``top_p``. All
+            five are forwarded to ``builder.generate_solution`` which
+            forbids defaults; a missing key raises immediately.
         output_root: Folder under which ``sample_<id>/`` directories are
             written when ``dump_artifacts`` is True. Ignored otherwise.
         dump_artifacts: Master switch for per-sample folder writes. The
@@ -720,7 +724,7 @@ def evaluate_builder(
                 pyramid,
                 q_ids,
                 q_mask,
-                max_new_tokens=generation_max_tokens,
+                **generation_kwargs,
             )
 
             if torch.cuda.is_available():
@@ -1049,7 +1053,17 @@ def main() -> None:
     # Loss config.
     loss_weights = config["training"]["loss_weights"]
     ordering_loss_type = config["training"]["ordering_loss_type"]
-    generation_max_tokens = config["evaluation"]["generation_max_tokens"]
+    eval_cfg = config["evaluation"]
+    generation_kwargs = {
+        "max_new_tokens": eval_cfg["generation_max_tokens"],
+        "do_sample": eval_cfg["do_sample"],
+        "temperature": eval_cfg["temperature"],
+        "top_k": eval_cfg["top_k"],
+        "top_p": eval_cfg["top_p"],
+    }
+    # Fail-fast schema check: builder loss_weights must declare every
+    # required key before this evaluation run starts.
+    validate_builder_loss_weights(loss_weights)
 
     # Per-sample artifact toggles (config + optional CLI override).
     artifacts = BuilderEvalArtifacts.from_config(config["evaluation"])
@@ -1077,7 +1091,7 @@ def main() -> None:
         ordering_loss_type=ordering_loss_type,
         max_batches=args.max_samples,
         mode=args.mode,
-        generation_max_tokens=generation_max_tokens,
+        generation_kwargs=generation_kwargs,
         output_root=output_root,
         dump_artifacts=True,
         artifacts=artifacts,

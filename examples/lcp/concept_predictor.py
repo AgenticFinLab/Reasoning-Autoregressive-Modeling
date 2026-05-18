@@ -547,6 +547,11 @@ class Canvas(nn.Module):
         L_canvas:    fixed canvas length used in both training and inference.
     """
 
+    # One-shot warning latch for the silent-truncation branch in
+    # ``pad_f_hat`` (when L_real > L_canvas). Class-level so multiple
+    # Canvas instances share the same suppression state across a run.
+    _truncation_warned: bool = False
+
     def __init__(
         self,
         concept_dim: int,
@@ -617,7 +622,26 @@ class Canvas(nn.Module):
             return f_hat, mask_padded
 
         if L_real > L:
-            # Truncate (rare; happens only when CoT exceeds L_canvas)
+            # Truncate (rare; happens only when CoT exceeds L_canvas).
+            # Silent truncation is a real correctness loss — the tail of
+            # the reasoning is discarded and gt_concepts / canvas
+            # supervision no longer cover the original CoT. Emit a one-
+            # shot RuntimeWarning so operators see this in the log
+            # without spamming every batch.
+            if not Canvas._truncation_warned:
+                Canvas._truncation_warned = True
+                import warnings
+
+                warnings.warn(
+                    f"Canvas.pad_f_hat: observed f_hat length L_real={L_real} "
+                    f"> L_canvas={L}; tail positions [{L}:{L_real}] are being "
+                    f"discarded (silent information loss). Increase "
+                    f"'model.canvas.canvas_length' in the predictor YAML to "
+                    f"match the dataset's typical CoT length distribution. "
+                    f"(Suppressing further occurrences.)",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
             f_hat_padded = f_hat[:, :L, :].contiguous()
             mask_padded = (
                 mask[:, :L].contiguous()
@@ -1031,7 +1055,9 @@ class ConceptPredictor(nn.Module):
     #  approx-token construction: pre-LLM level_queries × back_proj(f_hat)
     # ------------------------------------------------------------------ #
 
-    def _construct_approx_tokens(self, level_idx, f_hat_k, f_hat_mask=None):
+    def _construct_approx_tokens(
+        self, level_idx, f_hat_k, f_hat_mask=None, return_weights: bool = False
+    ):
         """Construct approximation tokens for one pyramid level.
 
         Text-domain analog of VAR's spatial downsampling: extracts
@@ -1051,9 +1077,16 @@ class ConceptPredictor(nn.Module):
             f_hat_k: Cumulative reconstruction [B, ctx, D].
             f_hat_mask: Optional [B, ctx] mask where 1=valid, 0=padding.
                 At inference (self-maintained canvas) this is None (all valid).
+            return_weights: If True, run MHA with need_weights=True and return
+                the (B, L_k, ctx) attention probabilities. Production callers
+                (training forward / inference loop) pass False since the
+                Canvas module owns the soft-boundary path. Diagnostic / unit
+                tests pass True to verify cross-attention correctness.
 
         Returns:
-            (approx_tokens [B, L_k, D_enc], attn_weights [B, L_k, ctx]).
+            (approx_tokens [B, L_k, D_enc], attn_weights or None).
+            attn_weights is None when return_weights=False, else
+            [B, L_k, ctx] (averaged over heads).
         """
         B = f_hat_k.shape[0]
         context = self.back_proj(f_hat_k)  # [B, ctx, D_enc]
@@ -1069,14 +1102,18 @@ class ConceptPredictor(nn.Module):
         # where context_norm produces a non-zero constant (LayerNorm bias).
         kpm = None
         if f_hat_mask is not None:
-            kpm = f_hat_mask == 0  # [B, ctx] → True at padding positions
+            kpm = f_hat_mask == 0  # [B, ctx] -> True at padding positions
 
+        # need_weights gated by return_weights: production callers skip
+        # weight materialization (Canvas owns the soft-boundary path),
+        # avoiding the O(B * L_k * ctx) probability tensor and the MHA
+        # backward through it. Tests/diagnostics opt in via return_weights.
         attn_out, attn_w = self.extract_attn(
             query=q_n,
             key=c_n,
             value=c_n,
             key_padding_mask=kpm,
-            need_weights=True,
+            need_weights=return_weights,
             average_attn_weights=True,
         )
         approx_tokens = self.post_norm(attn_out + queries)  # residual
@@ -1352,9 +1389,10 @@ class ConceptPredictor(nn.Module):
 
         for k in range(self._num_levels):
             # Construct approx tokens for level k using current f_hat
-            approx_tokens_k, attn_weights = self._construct_approx_tokens(k, f_hat)
+            approx_tokens_k, _ = self._construct_approx_tokens(k, f_hat)
             # approx_tokens_k: [B, L_k, D_enc]
-            # attn_weights:    [B, L_k, L_canvas]
+            # (extract_attn weights intentionally discarded; the Canvas
+            # module owns the f_hat update path via predict_soft_boundaries.)
             approx_token_list.append(approx_tokens_k)
 
             # Concat approx_tokens_0..k for packing
@@ -1442,7 +1480,12 @@ class ConceptPredictor(nn.Module):
         predicted_concepts,
         question_ids,
         question_attention_mask=None,
-        max_new_tokens=256,
+        *,
+        max_new_tokens: int,
+        do_sample: bool,
+        temperature: float,
+        top_k: int,
+        top_p: float,
     ):
         """Free autoregressive generation of solution from [Q, Concepts].
 
@@ -1453,6 +1496,18 @@ class ConceptPredictor(nn.Module):
             question_ids: [B, L_Q].
             question_attention_mask: [B, L_Q] or None.
             max_new_tokens: Max tokens to generate.
+            do_sample: If True, sample with temperature/top_k/top_p; if
+                False, use greedy decoding (sampling kwargs are ignored).
+            temperature: Softmax temperature for sampling. Used iff
+                ``do_sample`` is True.
+            top_k: Top-k truncation size for sampling. Used iff
+                ``do_sample`` is True.
+            top_p: Nucleus sampling probability. Used iff ``do_sample``
+                is True.
+
+        All five generation knobs are REQUIRED (keyword-only, no
+        defaults) so they must be supplied from the YAML config; this
+        prevents hidden defaults from drifting between train and eval.
 
         Returns:
             List of B generated strings.
@@ -1482,14 +1537,21 @@ class ConceptPredictor(nn.Module):
             s_mask=None,
         )
 
-        generated_ids = self.reason_model.generate(
-            inputs_embeds=pack.packed_embeds,
-            attention_mask=pack.packed_mask,
-            max_new_tokens=max_new_tokens,
-            eos_token_id=self.tokenizer.eos_token_id,
-            pad_token_id=self.tokenizer.pad_token_id,
-            do_sample=False,
-        )
+        # Sampling kwargs are conditional on do_sample to avoid HF
+        # warnings about "temperature/top_k/top_p set with do_sample=False".
+        gen_kwargs = {
+            "inputs_embeds": pack.packed_embeds,
+            "attention_mask": pack.packed_mask,
+            "max_new_tokens": max_new_tokens,
+            "eos_token_id": self.tokenizer.eos_token_id,
+            "pad_token_id": self.tokenizer.pad_token_id,
+            "do_sample": do_sample,
+        }
+        if do_sample:
+            gen_kwargs["temperature"] = temperature
+            gen_kwargs["top_k"] = top_k
+            gen_kwargs["top_p"] = top_p
+        generated_ids = self.reason_model.generate(**gen_kwargs)
 
         input_len = pack.packed_embeds.shape[1]
         if generated_ids.shape[1] > input_len:

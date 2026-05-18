@@ -112,7 +112,7 @@ from lcp.eval_builder import (
     log_eval_results,
     log_terminal_entry,
 )
-from lcp.losses import compute_builder_loss
+from lcp.losses import compute_builder_loss, validate_builder_loss_weights
 from ram.utils import apply_storage_root, load_config, print_storage_paths
 
 
@@ -404,6 +404,9 @@ def train_builder(
     log_cfg = config["log"]
     loss_weights = train_cfg["loss_weights"]
 
+    # Fail-fast: validate loss-weight schema before any heavy work.
+    validate_builder_loss_weights(loss_weights)
+
     batch_size = train_cfg["batch_size"]
     learning_rate = train_cfg["learning_rate"]
     weight_decay = train_cfg["weight_decay"]
@@ -562,7 +565,15 @@ def train_builder(
     # Single ``mode`` selector replaces legacy teacher_force/generation flags.
     # Valid values are declared in ``lcp.eval_builder.VALID_MODES``.
     eval_mode = eval_cfg["mode"]
-    gen_max_tokens = eval_cfg["generation_max_tokens"]
+    # Bundle all HF .generate() knobs from YAML; every key is mandatory
+    # (no in-code defaults) so YAML remains the single source of truth.
+    generation_kwargs = {
+        "max_new_tokens": eval_cfg["generation_max_tokens"],
+        "do_sample": eval_cfg["do_sample"],
+        "temperature": eval_cfg["temperature"],
+        "top_k": eval_cfg["top_k"],
+        "top_p": eval_cfg["top_p"],
+    }
     # eval_history holds per-invocation loss rows (eval_history.json);
     # eval_sample_history holds the matching sample lists
     # (eval_sample_history.json). Both are written crash-safely after
@@ -800,7 +811,7 @@ def train_builder(
                         ordering_loss_type,
                         max_batches=quick_eval_batches,
                         mode=eval_mode,
-                        generation_max_tokens=gen_max_tokens,
+                        generation_kwargs=generation_kwargs,
                         output_root=None,
                         dump_artifacts=False,
                     )
@@ -888,7 +899,7 @@ def train_builder(
                     ordering_loss_type,
                     max_batches=full_eval_batches,
                     mode=eval_mode,
-                    generation_max_tokens=gen_max_tokens,
+                    generation_kwargs=generation_kwargs,
                     output_root=None,
                     dump_artifacts=False,
                 )

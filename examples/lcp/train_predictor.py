@@ -85,7 +85,7 @@ from lcp.eval_predictor import (
     evaluate_predictor,
     log_eval_results_predictor,
 )
-from lcp.losses import compute_predictor_loss
+from lcp.losses import compute_predictor_loss, validate_predictor_loss_weights
 from ram.utils import apply_storage_root, load_config, print_storage_paths
 
 # =============================================================================
@@ -412,9 +412,12 @@ def _log_predictor_summary(
         ),
         "",
         "  Loss Weights",
-        "  ├─ concept            : %s" % loss_weights["concept_loss_weight"],
-        "  ├─ reasoning          : %s" % loss_weights["reasoning_loss_weight"],
-        "  ├─ canvas             : %s" % loss_weights["canvas_loss_weight"],
+        "  ├─ concept_loss_type   : %s" % loss_weights["concept_loss_type"],
+        "  ├─ concept             : %s" % loss_weights["concept_loss_weight"],
+        "  ├─   per-level         : %s" % loss_weights["concept_level_weights"],
+        "  ├─ reasoning           : %s" % loss_weights["reasoning_loss_weight"],
+        "  ├─ canvas              : %s" % loss_weights["canvas_loss_weight"],
+        "  ├─   per-level         : %s" % loss_weights["canvas_level_weights"],
         "",
         "  Parameter Summary",
         "  ├─ total              : %s" % f"{total_params:,}",
@@ -578,6 +581,12 @@ def train_predictor(
     log_cfg = config["log"]
     loss_weights = train_cfg["loss_weights"]
 
+    # Fail-fast: validate loss-weight schema (length matches num_levels)
+    # before any heavy work begins.
+    validate_predictor_loss_weights(
+        loss_weights, config["model"]["pyramid"]["num_levels"]
+    )
+
     batch_size = train_cfg["batch_size"]
     learning_rate = train_cfg["learning_rate"]
     weight_decay = train_cfg["weight_decay"]
@@ -722,7 +731,15 @@ def train_predictor(
     # Single ``mode`` selector replaces legacy teacher_force/generation flags.
     # Valid values are declared in ``lcp.eval_builder.VALID_MODES``.
     eval_mode = eval_cfg["mode"]
-    gen_max_tokens = eval_cfg["generation_max_tokens"]
+    # Bundle all HF .generate() knobs from YAML; every key is mandatory
+    # (no in-code defaults) so YAML remains the single source of truth.
+    generation_kwargs = {
+        "max_new_tokens": eval_cfg["generation_max_tokens"],
+        "do_sample": eval_cfg["do_sample"],
+        "temperature": eval_cfg["temperature"],
+        "top_k": eval_cfg["top_k"],
+        "top_p": eval_cfg["top_p"],
+    }
     eval_history: list[dict] = []
     eval_sample_history: list[dict] = []
     quick_eval_batches = 0
@@ -842,9 +859,7 @@ def train_predictor(
             # Predictor forward (receives pre-computed pyramid for f_hat
             # padding mask propagation; tokenizes Q/S from batch internally).
             output = predictor(batch, pyramid=pyramid)
-            total_loss, loss_dict = compute_predictor_loss(
-                output, loss_weights, concept_loss_type="mse"
-            )
+            total_loss, loss_dict = compute_predictor_loss(output, loss_weights)
 
             # Backward
             total_loss.backward()
@@ -866,6 +881,10 @@ def train_predictor(
                 w["reasoning"] = (
                     loss_dict["reasoning"] * loss_weights["reasoning_loss_weight"]
                 )
+            # Canvas (V2) — track its weighted contribution symmetrically
+            # so terminal log, history JSON and SwanLab all expose it.
+            if "canvas" in loss_dict:
+                w["canvas"] = loss_dict["canvas"] * loss_weights["canvas_loss_weight"]
 
             # ── Logging at log_interval ────────────────────────────
             if global_step % log_interval == 0:
@@ -883,13 +902,20 @@ def train_predictor(
                         loss_dict["reasoning"],
                         w["reasoning"],
                     )
+                canvas_part = ""
+                if "canvas" in loss_dict:
+                    canvas_part = " canvas=%.4f/%.4f" % (
+                        loss_dict["canvas"],
+                        w["canvas"],
+                    )
                 logger.info(
-                    "Step %5d | total=%.4f concept=%.4f/%.4f%s lr=%.2e",
+                    "Step %5d | total=%.4f concept=%.4f/%.4f%s%s lr=%.2e",
                     global_step,
                     loss_dict["total"],
                     loss_dict["concept"],
                     w["concept"],
                     reasoning_part,
+                    canvas_part,
                     lr,
                 )
                 term_entry = {
@@ -903,9 +929,16 @@ def train_predictor(
                 if "reasoning" in loss_dict:
                     term_entry["reasoning"] = round(loss_dict["reasoning"], 6)
                     term_entry["reasoning_w"] = round(w["reasoning"], 6)
+                if "canvas" in loss_dict:
+                    term_entry["canvas"] = round(loss_dict["canvas"], 6)
+                    term_entry["canvas_w"] = round(w["canvas"], 6)
                 if "concept_per_level" in loss_dict:
                     term_entry["concept_per_level"] = [
                         round(v, 6) for v in loss_dict["concept_per_level"]
+                    ]
+                if "canvas_per_level" in loss_dict:
+                    term_entry["canvas_per_level"] = [
+                        round(v, 6) for v in loss_dict["canvas_per_level"]
                     ]
                 log_terminal_entry(terminal_log_path, term_entry)
 
@@ -918,9 +951,15 @@ def train_predictor(
                 if "reasoning" in loss_dict:
                     swanlab_metrics["train/reasoning_raw"] = loss_dict["reasoning"]
                     swanlab_metrics["train/reasoning_weighted"] = w["reasoning"]
+                if "canvas" in loss_dict:
+                    swanlab_metrics["train/canvas_raw"] = loss_dict["canvas"]
+                    swanlab_metrics["train/canvas_weighted"] = w["canvas"]
                 if "concept_per_level" in loss_dict:
                     for k, v in enumerate(loss_dict["concept_per_level"]):
                         swanlab_metrics[f"train/concept_level{k}"] = v
+                if "canvas_per_level" in loss_dict:
+                    for k, v in enumerate(loss_dict["canvas_per_level"]):
+                        swanlab_metrics[f"train/canvas_level{k}"] = v
                 swanlab.log(swanlab_metrics, step=global_step)
 
                 # Quick eval (skip when full eval fires at same step).
@@ -934,7 +973,7 @@ def train_predictor(
                         device,
                         max_batches=quick_eval_batches,
                         mode=eval_mode,
-                        generation_max_tokens=gen_max_tokens,
+                        generation_kwargs=generation_kwargs,
                         output_root=None,
                         dump_artifacts=False,
                     )
@@ -1008,7 +1047,7 @@ def train_predictor(
                     device,
                     max_batches=full_eval_batches,
                     mode=eval_mode,
-                    generation_max_tokens=gen_max_tokens,
+                    generation_kwargs=generation_kwargs,
                     output_root=None,
                     dump_artifacts=False,
                 )
@@ -1047,12 +1086,16 @@ def train_predictor(
                         eval_losses["total"],
                     )
 
-            # History row (raw + weighted scalars; skip per-level list
-            # to keep the JSON compact — SwanLab already carries it).
+            # History row (raw + weighted scalars; skip per-level lists
+            # to keep the JSON compact — SwanLab already carries them).
             step_record = {
                 "step": global_step,
                 "epoch": epoch,
-                **{k: v for k, v in loss_dict.items() if k != "concept_per_level"},
+                **{
+                    k: v
+                    for k, v in loss_dict.items()
+                    if k not in ("concept_per_level", "canvas_per_level")
+                },
                 **{f"{k}_w": v for k, v in w.items()},
             }
             history.append(step_record)

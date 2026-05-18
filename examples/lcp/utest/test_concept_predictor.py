@@ -51,7 +51,11 @@ if "lcp" not in sys.modules:
 from lcp.concept_builder import ConceptPyramidBuilder, PyramidOutput
 from lcp.concept_predictor import ConceptPredictor, PredictorOutput
 from lcp.data_loader import LCPDataLoader
-from lcp.losses import compute_predictor_concept_loss, compute_predictor_loss
+from lcp.losses import (
+    compute_predictor_concept_loss,
+    compute_predictor_loss,
+    validate_predictor_loss_weights,
+)
 from lmbase.utils.env_tools import get_device
 from ram.utils import load_config
 
@@ -135,16 +139,13 @@ def load_predictor_and_builder_configs(predictor_yaml_path: Path):
     builder_cfg = load_config(str(builder_cfg_path))
     _inherit_pyramid_from_builder(predictor_cfg, builder_cfg)
 
-    # For utest stability: force a small batch and a sensible loss-weight set.
+    # For utest stability: force a small batch size. All loss-weight keys
+    # MUST be declared in the YAML — we no longer fill defaults via
+    # ``setdefault``. ``validate_predictor_loss_weights`` raises a clear
+    # KeyError/ValueError if the YAML schema is incomplete.
     predictor_cfg.setdefault("training", {})["batch_size"] = 2
-    predictor_cfg["training"].setdefault(
-        "loss_weights",
-        {
-            "concept_loss_weight": 1.0,
-            "reasoning_loss_weight": 1.0,
-            "canvas_loss_weight": 1.0,
-        },
-    )
+    K = int(predictor_cfg["model"]["pyramid"]["num_levels"])
+    validate_predictor_loss_weights(predictor_cfg["training"]["loss_weights"], K)
 
     return predictor_cfg, builder_cfg, builder_cfg_path
 
@@ -255,7 +256,10 @@ def run_pipeline(predictor_cfg: dict, builder_cfg: dict, device: str):
 
     test_f_hat = f_hats[0].to(device)
     approx_tokens_0, attn_w_0 = predictor._construct_approx_tokens(
-        0, test_f_hat, f_hat_mask.to(device) if f_hat_mask is not None else None
+        0,
+        test_f_hat,
+        f_hat_mask.to(device) if f_hat_mask is not None else None,
+        return_weights=True,
     )
 
     L_0 = level_lengths[0]
@@ -378,7 +382,14 @@ def run_pipeline(predictor_cfg: dict, builder_cfg: dict, device: str):
     log_section("Step 7: Loss Computation")
 
     concept_total, per_level = compute_predictor_concept_loss(
-        train_out.predicted_concepts, train_out.gt_concepts, concept_loss_type="mse"
+        train_out.predicted_concepts,
+        train_out.gt_concepts,
+        concept_loss_type=predictor_cfg["training"]["loss_weights"][
+            "concept_loss_type"
+        ],
+        level_weights=predictor_cfg["training"]["loss_weights"][
+            "concept_level_weights"
+        ],
     )
     log_value("concept_total_loss", f"{concept_total.item():.6f}")
     log_check("concept_total is finite", torch.isfinite(concept_total).item())
@@ -449,6 +460,10 @@ def run_pipeline(predictor_cfg: dict, builder_cfg: dict, device: str):
             q_ids,
             question_attention_mask=q_mask,
             max_new_tokens=50,
+            do_sample=False,
+            temperature=0.2,
+            top_k=20,
+            top_p=0.9,
         )
 
     log_check("returns list", isinstance(solutions, list))

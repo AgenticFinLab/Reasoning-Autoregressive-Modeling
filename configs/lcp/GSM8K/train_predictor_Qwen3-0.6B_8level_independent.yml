@@ -136,6 +136,9 @@ training:
     concept_loss_weight: 1.0
     reasoning_loss_weight: 1.0
     canvas_loss_weight: 1.0      # MSE on predicted vs gt soft_boundaries (canvas module)
+    concept_loss_type: mse           # 'mse' or 'cosine' (REQUIRED, no default in code)
+    concept_level_weights: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]  # per-level weights for concept loss (length=num_levels)
+    canvas_level_weights:  [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]  # per-level weights for canvas loss  (length=num_levels)
 
 # Logging configuration
 # -----------------------------------------------------------------------------
